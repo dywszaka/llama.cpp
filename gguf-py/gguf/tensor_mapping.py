@@ -112,6 +112,27 @@ class TensorNameMap:
         MODEL_TENSOR.CONV1D: (
             "backbone.embed", # roberta
         ),
+
+        # NVFP4 global scales
+        MODEL_TENSOR.INPUT_SCALE: (
+            "input_scale",
+        ),
+
+        MODEL_TENSOR.WEIGHT_SCALE_2: (
+            "weight_scale_2",
+        ),
+
+        MODEL_TENSOR.WEIGHT_SCALE: (
+            "weight_scale",
+        ),
+
+        MODEL_TENSOR.K_SCALE: (
+            "k_scale",
+        ),
+
+        MODEL_TENSOR.V_SCALE: (
+            "v_scale",
+        ),
     }
 
     block_mappings_cfg: dict[MODEL_TENSOR, tuple[str, ...]] = {
