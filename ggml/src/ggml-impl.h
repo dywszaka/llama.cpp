@@ -471,6 +471,49 @@ static inline float ggml_e8m0_to_fp32_half(uint8_t x) {
 #define GGML_E8M0_TO_FP32(x) ggml_e8m0_to_fp32(x)
 #define GGML_E8M0_TO_FP32_HALF(x) ggml_e8m0_to_fp32_half(x)
 
+static inline float ggml_e4m3_to_fp32(uint8_t x) {
+    uint32_t sign     = (uint32_t)(x & 0x80) << 24; // bit7 -> float sign
+    uint32_t exponent = (x >> 3) & 0x0F;           // bits 6..3
+    uint32_t mantissa = x & 0x07;                   // bits 2..0
+
+    uint32_t bits;
+
+    if (exponent == 0) {
+        // subnormal or zero
+        if (mantissa == 0) {
+            bits = sign; // ±0
+        } else {
+            // subnormal:
+            // value = (-1)^S * 2^(-6) * (mantissa / 8)
+            // normalize mantissa
+            int shift = __builtin_clz(mantissa) - 29; // position to normalize
+            mantissa <<= shift;
+            uint32_t exp = 127 - 6 - shift;
+            bits = sign | (exp << 23) | ((mantissa & 0x7) << 20);
+        }
+    } else if (exponent == 0x0F) {
+        // Inf / NaN (optional handling)
+        bits = sign | 0x7F800000;
+    } else {
+        // normal number
+        // float exponent = exponent - bias + 127
+        uint32_t exp = (exponent - 7 + 127) << 23;
+        uint32_t man = mantissa << (23 - 3);
+        bits = sign | exp | man;
+    }
+
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+static inline float ggml_e4m3_to_fp32_half(uint8_t x) {
+    return ggml_e4m3_to_fp32(x) * 0.5f;
+}
+
+#define GGML_E4M3_TO_FP32(x) ggml_e4m3_to_fp32(x)
+#define GGML_E4M3_TO_FP32_HALF(x) ggml_e4m3_to_fp32_half(x)
+
 /**
  * Converts brain16 to float32.
  *

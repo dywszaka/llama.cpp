@@ -317,6 +317,7 @@ bool gguf_read_emplace_helper(const struct gguf_reader & gr, std::vector<struct 
 }
 
 struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_params params) {
+    GGML_LOG_INFO("%s: starting GGUF parsing\n", __func__);
     const struct gguf_reader gr(file);
     struct gguf_context * ctx = new gguf_context;
 
@@ -328,10 +329,14 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
         ok = ok && gr.read(magic, 4);
 
         if (!ok) {
-            GGML_LOG_ERROR("%s: failed to read magic\n", __func__);
+            GGML_LOG_ERROR("%s: failed to read magic (file too small or read error)\n", __func__);
             gguf_free(ctx);
             return nullptr;
         }
+
+        GGML_LOG_INFO("%s: magic bytes: 0x%02x 0x%02x 0x%02x 0x%02x\n", __func__, 
+                     (unsigned char)magic[0], (unsigned char)magic[1], 
+                     (unsigned char)magic[2], (unsigned char)magic[3]);
 
         for (uint32_t i = 0; i < magic.size(); i++) {
             if (magic[i] != GGUF_MAGIC[i]) {
@@ -339,11 +344,15 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
                 char c1 = isprint(magic[1]) ? magic[1] : '?';
                 char c2 = isprint(magic[2]) ? magic[2] : '?';
                 char c3 = isprint(magic[3]) ? magic[3] : '?';
-                GGML_LOG_ERROR("%s: invalid magic characters: '%c%c%c%c', expected 'GGUF'\n", __func__, c0, c1, c2, c3);
+                GGML_LOG_ERROR("%s: invalid magic characters: '%c%c%c%c' (0x%02x%02x%02x%02x), expected 'GGUF' (0x47474d4c)\n", 
+                              __func__, c0, c1, c2, c3,
+                              (unsigned char)magic[0], (unsigned char)magic[1], 
+                              (unsigned char)magic[2], (unsigned char)magic[3]);
                 gguf_free(ctx);
                 return nullptr;
             }
         }
+        GGML_LOG_INFO("%s: magic bytes OK\n", __func__);
     }
 
     // header
@@ -351,6 +360,8 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
     int64_t n_tensors = 0;
 
     if (ok && gr.read(ctx->version)) {
+        GGML_LOG_INFO("%s: GGUF version = %" PRIu32 "\n", __func__, ctx->version);
+        
         if (ok && ctx->version == 0) {
             GGML_LOG_ERROR("%s: bad GGUF version: %" PRIu32 "\n", __func__, ctx->version);
             ok = false;
@@ -364,7 +375,8 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
          * endianness as the host system.
         */
         if (ok && (ctx->version & 0x0000FFFF) == 0x00000000) {
-            GGML_LOG_ERROR("%s: failed to load model: this GGUF file version %" PRIu32 " is extremely large, is there a mismatch between the host and model endianness?\n", __func__, ctx->version);
+            GGML_LOG_ERROR("%s: failed to load model: this GGUF file version %" PRIu32 " (0x%08x) is extremely large, is there a mismatch between the host and model endianness?\n", 
+                          __func__, ctx->version, ctx->version);
             ok = false;
         }
 
@@ -378,10 +390,12 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             ok = false;
         }
     } else {
+        GGML_LOG_ERROR("%s: failed to read GGUF version\n", __func__);
         ok = false;
     }
 
     if (ok && gr.read(n_tensors)) {
+        GGML_LOG_INFO("%s: n_tensors = %" PRIi64 "\n", __func__, n_tensors);
         static_assert(sizeof(size_t) <= 8 && sizeof(gguf_tensor_info) >= 2, "int64_t insufficient for indexing");
         if (n_tensors < 0 || n_tensors > int64_t(SIZE_MAX/sizeof(gguf_tensor_info))) {
             GGML_LOG_ERROR("%s: number of tensors is %" PRIi64 " but must be in [0, %zu]\n",
@@ -389,10 +403,12 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             ok = false;
         }
     } else {
+        GGML_LOG_ERROR("%s: failed to read n_tensors\n", __func__);
         ok = false;
     }
 
     if (ok && gr.read(n_kv)) {
+        GGML_LOG_INFO("%s: n_kv = %" PRIi64 "\n", __func__, n_kv);
         static_assert(sizeof(size_t) <= 8 && sizeof(gguf_tensor_info) >= 2, "int64_t insufficient for indexing");
         if (n_kv < 0 || n_kv > int64_t(SIZE_MAX/sizeof(gguf_kv))) {
             GGML_LOG_ERROR("%s: number of key value pairs is %" PRIi64 " but must be in [0, %zu]\n",
@@ -400,6 +416,7 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
             ok = false;
         }
     } else {
+        GGML_LOG_ERROR("%s: failed to read n_kv\n", __func__);
         ok = false;
     }
 
@@ -731,14 +748,26 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
 }
 
 struct gguf_context * gguf_init_from_file(const char * fname, struct gguf_init_params params) {
+    GGML_LOG_INFO("%s: attempting to open '%s'\n", __func__, fname);
     FILE * file = ggml_fopen(fname, "rb");
 
     if (!file) {
-        GGML_LOG_ERROR("%s: failed to open GGUF file '%s'\n", __func__, fname);
+        GGML_LOG_ERROR("%s: failed to open GGUF file '%s' (errno=%d: %s)\n", __func__, fname, errno, strerror(errno));
         return nullptr;
     }
 
+    // Get file size for debugging
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    GGML_LOG_INFO("%s: file size = %ld bytes\n", __func__, file_size);
+
     struct gguf_context * result = gguf_init_from_file_impl(file, params);
+    if (!result) {
+        GGML_LOG_ERROR("%s: gguf_init_from_file_impl failed for '%s'\n", __func__, fname);
+    } else {
+        GGML_LOG_INFO("%s: successfully loaded '%s'\n", __func__, fname);
+    }
     fclose(file);
     return result;
 }
