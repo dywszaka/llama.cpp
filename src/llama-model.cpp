@@ -3009,13 +3009,6 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, 0);
                         layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
 
-                        if (hparams.use_global_scale) {
-                            
-                        }
-
-                        layer.ffn_gate_global_scale = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight_scale_2", i), {n_ff}, 0);
-                        layer.ffn_down_global_scale = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight_scale_2", i), {n_embd}, 0);
-                        layer.ffn_up_global_scale   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight_scale_2", i), {n_ff}, 0);
                     }
                 } break;
             case LLM_ARCH_QWEN3MOE:
