@@ -220,6 +220,50 @@ void ggml_vec_dot_mxfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     *s = sumf;
 }
 
+void ggml_vec_dot_nvfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+    GGML_ASSERT(n % QK8_0 == 0);
+    GGML_ASSERT(n % QK_NVFP4 == 0);
+    static_assert(QK8_0 == 2 * QK_NVFP4, "q8_0 block must contain two nvfp4 blocks");
+
+    const block_nvfp4 * GGML_RESTRICT x = vx;
+    const block_q8_0  * GGML_RESTRICT y = vy;
+
+    const int nb = n / QK8_0;
+
+    float sumf = 0;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const block_nvfp4 * GGML_RESTRICT x0 = &x[2*ib + 0];
+        const block_nvfp4 * GGML_RESTRICT x1 = &x[2*ib + 1];
+        const int8_t  * GGML_RESTRICT yq = y[ib].qs;
+
+        int32_t sumi0 = 0;
+        int32_t sumi1 = 0;
+
+        for (int j = 0; j < QK_NVFP4/2; ++j) {
+            const int8_t xv00 = kvalues_nvfp4[x0->qs[j] & 0x0F];
+            const int8_t xv01 = kvalues_nvfp4[x0->qs[j] >> 4];
+            const int8_t xv10 = kvalues_nvfp4[x1->qs[j] & 0x0F];
+            const int8_t xv11 = kvalues_nvfp4[x1->qs[j] >> 4];
+
+            sumi0 += yq[j]                  * xv00;
+            sumi0 += yq[j + QK_NVFP4/2]     * xv01;
+            sumi1 += yq[j + QK8_0/2]        * xv10;
+            sumi1 += yq[j + QK8_0/2 + QK_NVFP4/2] * xv11;
+        }
+
+        const float d = GGML_CPU_FP16_TO_FP32(y[ib].d);
+        sumf += d * (GGML_E4M3_TO_FP32_HALF(x0->e) * sumi0 + GGML_E4M3_TO_FP32_HALF(x1->e) * sumi1);
+    }
+
+    *s = sumf;
+}
+
 void ggml_vec_dot_q5_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK8_0;
     const int nb = n / qk;

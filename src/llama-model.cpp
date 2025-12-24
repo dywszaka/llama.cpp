@@ -3009,6 +3009,30 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, 0);
                         layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
 
+                        // // 判断 ffn_up 是否是 nvpf4 精度，如果是，则增加 llama-model.h 中定义的 nvfp4 relevant tensors 的初始化
+                        if (layer.wq->type == GGML_TYPE_NVFP4) {
+                            layer.wq_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_Q, "input_scale", i), {1}, 0);
+                            layer.wk_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_K, "input_scale", i), {1}, 0);
+                            layer.wv_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_V, "input_scale", i), {1}, 0);
+                            layer.wo_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "input_scale", i), {1}, 0);
+
+                            layer.wq_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight_scale_2", i), {1}, 0);
+                            layer.wk_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_K, "weight_scale_2", i), {1}, 0);
+                            layer.wv_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_V, "weight_scale_2", i), {1}, 0);
+                            layer.wo_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight_scale_2", i), {1}, 0);
+
+                            layer.wk_k_scale = create_tensor(tn(LLM_TENSOR_ATTN_K, "k_scale", i), {1}, 0);
+                            layer.wv_v_scale = create_tensor(tn(LLM_TENSOR_ATTN_V, "v_scale", i), {1}, 0);
+
+                            layer.ffn_gate_inp_scale = create_tensor(tn(LLM_TENSOR_FFN_GATE, "input_scale", i), {1}, 0);
+                            layer.ffn_down_inp_scale = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "input_scale", i), {1}, 0);
+                            layer.ffn_up_inp_scale   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "input_scale", i), {1}, 0);
+
+                            layer.ffn_gate_weight_scale_2 = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight_scale_2", i), {1}, 0);
+                            layer.ffn_down_weight_scale_2 = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight_scale_2", i), {1}, 0);
+                            layer.ffn_up_weight_scale_2   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight_scale_2", i), {1}, 0);
+                        }
+
                     }
                 } break;
             case LLM_ARCH_QWEN3MOE:
