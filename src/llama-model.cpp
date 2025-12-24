@@ -8792,12 +8792,33 @@ struct llm_build_qwen3 : public llm_graph_context {
                 // compute Q and K and RoPE them
                 ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
                 cb(Qcur, "Qcur", il);
+                if (model.layers[il].wq_weight_scale_2) {
+                    Qcur = ggml_mul(ctx0, Qcur, model.layers[il].wq_weight_scale_2);
+                }
+                cb(Qcur, "Qcur-scaled", il);
 
                 ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
                 cb(Kcur, "Kcur", il);
+                if (model.layers[il].wk_weight_scale_2) {
+                    Kcur = ggml_mul(ctx0, Kcur, model.layers[il].wk_weight_scale_2);
+                }
+                cb(Kcur, "Kcur-scaled", il);
 
                 ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
                 cb(Vcur, "Vcur", il);
+                if (model.layers[il].wv_weight_scale_2) {
+                    Vcur = ggml_mul(ctx0, Vcur, model.layers[il].wv_weight_scale_2);
+                }
+                cb(Vcur, "Vcur-scaled", il);
+
+                if (model.layers[il].wk_k_scale) {
+                    Kcur = ggml_mul(ctx0, Kcur, model.layers[il].wk_k_scale);
+                    cb(Kcur, "Kcur_k_scaled", il);
+                }
+                if (model.layers[il].wv_v_scale) {
+                    Vcur = ggml_mul(ctx0, Vcur, model.layers[il].wv_v_scale);
+                    cb(Vcur, "Vcur_v_scaled", il);
+                }
 
                 Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
                 Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
@@ -8845,9 +8866,9 @@ struct llm_build_qwen3 : public llm_graph_context {
             cb(cur, "ffn_norm", il);
 
             cur = build_ffn(cur,
-                    model.layers[il].ffn_up,   NULL, NULL,
-                    model.layers[il].ffn_gate, NULL, NULL,
-                    model.layers[il].ffn_down, NULL, NULL,
+                    model.layers[il].ffn_up,   NULL, model.layers[il].ffn_up_weight_scale_2,
+                    model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_weight_scale_2,
+                    model.layers[il].ffn_down, NULL, model.layers[il].ffn_down_weight_scale_2,
                     NULL,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
