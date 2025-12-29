@@ -1689,6 +1689,11 @@ static void ggml_cpu_truncate_tensor_f32(struct ggml_tensor * tensor) {
         return;
     }
 
+    static atomic_bool logged_enable = false;
+    if (!atomic_exchange_explicit(&logged_enable, true, memory_order_relaxed)) {
+        GGML_LOG_INFO("%s: GGML_CPU_TRUNC_ENABLE=1 -> CPU truncation active\n", __func__);
+    }
+
     float sample_before = 0.0f;
     float sample_after  = 0.0f;
     const bool do_log = ggml_cpu_trunc_log_enabled();

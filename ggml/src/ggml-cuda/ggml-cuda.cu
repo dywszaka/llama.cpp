@@ -2257,6 +2257,11 @@ static void ggml_cuda_truncate_tensor_f32(ggml_backend_cuda_context & ctx, struc
         return;
     }
 
+    static std::atomic<bool> logged_enable(false);
+    if (!logged_enable.exchange(true)) {
+        GGML_LOG_INFO("%s: GGML_CUDA_TRUNC_ENABLE=1 -> CUDA truncation active (device %d)\n", __func__, ctx.device);
+    }
+
     float sample_before = 0.0f;
     float sample_after  = 0.0f;
 
