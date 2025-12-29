@@ -2205,6 +2205,101 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         nb1, nb2, nb3, stream);
 }
 
+static __global__ void ggml_cuda_trunc_f32_kernel(float * data, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        uint32_t * u = (uint32_t *) data;
+        u[i] &= 0xFFFF0000u;
+    }
+}
+
+static __global__ void ggml_cuda_trunc_f32_strided_kernel(
+        char * data,
+        size_t nb0, size_t nb1, size_t nb2, size_t nb3,
+        int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t total = (size_t) ne0 * ne1 * ne2 * ne3;
+    if (idx >= total) {
+        return;
+    }
+
+    int64_t i0 = idx % ne0;
+    idx /= ne0;
+    int64_t i1 = idx % ne1;
+    idx /= ne1;
+    int64_t i2 = idx % ne2;
+    idx /= ne2;
+    int64_t i3 = idx;
+
+    float * p = (float *) (data + i0*nb0 + i1*nb1 + i2*nb2 + i3*nb3);
+    uint32_t * u = (uint32_t *) p;
+    u[0] &= 0xFFFF0000u;
+}
+
+static bool ggml_cuda_trunc_log_enabled() {
+    static bool enabled = []() {
+        const char * env = getenv("GGML_CUDA_TRUNC_LOG");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool ggml_cuda_trunc_enabled() {
+    static bool enabled = []() {
+        const char * env = getenv("GGML_CUDA_TRUNC_ENABLE");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
+
+static void ggml_cuda_truncate_tensor_f32(ggml_backend_cuda_context & ctx, struct ggml_tensor * tensor) {
+    if (!ggml_cuda_trunc_enabled() || tensor->type != GGML_TYPE_F32 || tensor->data == nullptr || ggml_is_empty(tensor)) {
+        return;
+    }
+
+    float sample_before = 0.0f;
+    float sample_after  = 0.0f;
+
+    bool do_log = ggml_cuda_trunc_log_enabled();
+    if (do_log) {
+        cudaStreamCaptureStatus cap_status;
+        unsigned long long cap_id;
+        CUDA_CHECK(cudaStreamGetCaptureInfo(ctx.stream(), &cap_status, &cap_id));
+        GGML_UNUSED(cap_id);
+        if (cap_status == cudaStreamCaptureStatusNone) {
+            CUDA_CHECK(cudaMemcpyAsync(&sample_before, tensor->data, sizeof(float), cudaMemcpyDeviceToHost, ctx.stream()));
+        } else {
+            do_log = false; // avoid interfering with CUDA graph capture
+        }
+    }
+
+    const int64_t ne0 = tensor->ne[0];
+    const int64_t ne1 = tensor->ne[1];
+    const int64_t ne2 = tensor->ne[2];
+    const int64_t ne3 = tensor->ne[3];
+
+    const size_t total = (size_t) ne0 * ne1 * ne2 * ne3;
+    const int block_size = 256;
+    const int grid_size  = (int) ((total + block_size - 1) / block_size);
+
+    if (ggml_is_contiguous(tensor)) {
+        ggml_cuda_trunc_f32_kernel<<<grid_size, block_size, 0, ctx.stream()>>>((float *) tensor->data, total);
+    } else {
+        ggml_cuda_trunc_f32_strided_kernel<<<grid_size, block_size, 0, ctx.stream()>>>(
+            (char *) tensor->data,
+            tensor->nb[0], tensor->nb[1], tensor->nb[2], tensor->nb[3],
+            ne0, ne1, ne2, ne3);
+    }
+
+    if (do_log) {
+        CUDA_CHECK(cudaMemcpyAsync(&sample_after, tensor->data, sizeof(float), cudaMemcpyDeviceToHost, ctx.stream()));
+        CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
+        const char * name = tensor->name ? tensor->name : "?";
+        GGML_LOG_INFO("%s: tensor=%s op=%s sample before=%#.8f after=%#.8f\n",
+                      __func__, name, ggml_op_desc(tensor), sample_before, sample_after);
+    }
+}
+
 static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
     // why is this here instead of mul_mat?
     if (dst->src[0] != nullptr && ggml_backend_buft_is_cuda_split(dst->src[0]->buffer->buft)) {
@@ -2485,6 +2580,10 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         default:
             return false;
+    }
+
+    if (dst->type == GGML_TYPE_F32) {
+        ggml_cuda_truncate_tensor_f32(ctx, dst);
     }
 
     cudaError_t err = cudaGetLastError();
