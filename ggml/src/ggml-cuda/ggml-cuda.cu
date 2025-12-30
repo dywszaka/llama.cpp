@@ -2971,6 +2971,9 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                 if (!disable_fusion) {
                     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {})) {
                         ggml_cuda_op_rms_norm_fused(*cuda_ctx, node, cgraph->nodes[i+1]);
+                        if (ggml_cuda_trunc_enabled()) {
+                            ggml_cuda_truncate_tensor_f32(*cuda_ctx, cgraph->nodes[i+1]);
+                        }
                         i++;
                         continue;
                     }
@@ -2978,6 +2981,9 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_SCALE }, { GGML_UNARY_OP_TANH })) {
                         i += 2;
                         ggml_cuda_op_softcap(*cuda_ctx, cgraph->nodes[i], node);
+                        if (ggml_cuda_trunc_enabled()) {
+                            ggml_cuda_truncate_tensor_f32(*cuda_ctx, cgraph->nodes[i]);
+                        }
                         continue;
                     }
                 }
