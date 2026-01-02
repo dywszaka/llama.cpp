@@ -15,6 +15,8 @@
 #include "ops.h"
 #include "ggml.h"
 
+#include "../fp32_to_bf16.c" // FP32->BF16 round-to-nearest-even helper
+
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
 #elif !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
@@ -1655,15 +1657,14 @@ static void ggml_compute_forward_mul_mat_id(
 
 /////////////////////////////////
 
-// Mask off the least-significant 16 bits of every F32 value.
+// Round-to-nearest-even to BF16 using shared helper, then widen back to F32 high bits.
 static inline float ggml_cpu_trunc_f32_low16(float v) {
+    const uint32_t bf16 = (uint32_t) fp32_to_bf16_round(v);
     union {
-        float    f;
         uint32_t u;
-    } tmp = { v };
-
-    tmp.u &= 0xFFFF0000u;
-    return tmp.f;
+        float    f;
+    } out = { bf16 << 16 };
+    return out.f;
 }
 
 static bool ggml_cpu_trunc_enabled(void) {
@@ -1691,7 +1692,7 @@ static void ggml_cpu_truncate_tensor_f32(struct ggml_tensor * tensor) {
 
     static atomic_bool logged_enable = false;
     if (!atomic_exchange_explicit(&logged_enable, true, memory_order_relaxed)) {
-        GGML_LOG_INFO("%s: GGML_CPU_TRUNC_ENABLE=1 -> CPU truncation active\n", __func__);
+        GGML_LOG_INFO("%s: GGML_CPU_TRUNC_ENABLE=1 -> CPU rounding-to-bf16 active\n", __func__);
     }
 
     float sample_before = 0.0f;
