@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 
+#include <algorithm>
 #include <array>
 #include <cinttypes>
 #include <cstring>
@@ -1031,6 +1032,46 @@ bool llama_model_loader::load_all_data(
 
         size_t n_size = ggml_nbytes(cur);
 
+        bool logged_preview = false;
+        const auto log_tensor_preview = [&](const void * data_ptr, size_t available) {
+            if (logged_preview || data_ptr == nullptr || available == 0) {
+                return;
+            }
+            logged_preview = true;
+
+            const char * tensor_name = ggml_get_name(cur);
+            const char * type_name   = ggml_type_name(cur->type);
+
+            printf("\n[TENSOR LOAD] %s | weight precision: %s\n", tensor_name, type_name);
+
+            if (cur->type == GGML_TYPE_NVFP4 && available >= ggml_type_size(cur->type)) {
+                const uint8_t * raw_block = static_cast<const uint8_t *>(data_ptr);
+                const size_t qk = (size_t) ggml_blck_size(cur->type); // number of 4-bit values, expected 16
+                const size_t qs_bytes = std::min<size_t>(available > 1 ? available - 1 : 0, qk / 2); // expect 8 bytes
+                const uint8_t * qs    = raw_block + 1; // skip scale byte
+
+                printf("  nvfp4 first block qs (%zu bytes):", qs_bytes);
+                for (size_t i = 0; i < qs_bytes; ++i) {
+                    printf(" %u", qs[i]);
+                }
+                printf("\n");
+            } else if (cur->type == GGML_TYPE_F32 && available >= sizeof(float)) {
+                const float * vals = static_cast<const float *>(data_ptr);
+                printf("  f32 first value: %.9g\n", vals[0]);
+            } else {
+                const size_t count       = std::min<size_t>(available, (size_t) 10);
+                const uint8_t * bytes    = static_cast<const uint8_t *>(data_ptr);
+
+                printf("  first %zu uint8 values:", count);
+                for (size_t i = 0; i < count; ++i) {
+                    printf(" %u", bytes[i]);
+                }
+                printf("\n");
+            }
+
+            fflush(stdout);
+        };
+
         if (use_mmap) {
             const auto & mapping = mappings.at(weight->idx);
             ggml_backend_buffer_t buf_mmap = nullptr;
@@ -1038,6 +1079,7 @@ bool llama_model_loader::load_all_data(
                 buf_mmap = bufs.at(weight->idx);
             }
             uint8_t * data = (uint8_t *) mapping->addr() + weight->offs;
+            log_tensor_preview(data, n_size);
 
             if (check_tensors) {
                 validation_result.emplace_back(std::async(std::launch::async, [cur, data, n_size] {
@@ -1048,6 +1090,7 @@ bool llama_model_loader::load_all_data(
             GGML_ASSERT(buf_mmap || cur->data); // either we have a buffer to allocate the tensor in, or it is already allocated
             if (buf_mmap && cur->data == nullptr) {
                 ggml_backend_tensor_alloc(buf_mmap, cur, data);
+
                 if (lmlocks) {
                     const auto & lmlock = lmlocks->at(weight->idx);
                     lmlock->grow_to(weight->offs + n_size);
@@ -1064,6 +1107,8 @@ bool llama_model_loader::load_all_data(
             if (ggml_backend_buffer_is_host(cur->buffer)) {
                 file->seek(weight->offs, SEEK_SET);
                 file->read_raw(cur->data, n_size);
+                log_tensor_preview(cur->data, n_size);
+
                 if (check_tensors) {
                     validation_result.emplace_back(std::async(std::launch::async, [cur, n_size] {
                         return std::make_pair(cur, ggml_validate_row_data(cur->type, cur->data, n_size));
@@ -1081,6 +1126,7 @@ bool llama_model_loader::load_all_data(
 
                         ggml_backend_event_synchronize(events[buffer_idx]);
                         file->read_raw(host_ptrs[buffer_idx], read_iteration);
+                        log_tensor_preview(host_ptrs[buffer_idx], read_iteration);
                         ggml_backend_tensor_set_async(upload_backend, cur, host_ptrs[buffer_idx], bytes_read, read_iteration);
                         ggml_backend_event_record(events[buffer_idx], upload_backend);
 
@@ -1092,6 +1138,7 @@ bool llama_model_loader::load_all_data(
                     read_buf.resize(n_size);
                     file->seek(weight->offs, SEEK_SET);
                     file->read_raw(read_buf.data(), n_size);
+                    log_tensor_preview(read_buf.data(), n_size);
                     ggml_backend_tensor_set(cur, read_buf.data(), 0, n_size);
                     if (check_tensors && !ggml_validate_row_data(cur->type, read_buf.data(), n_size)) {
                         throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));

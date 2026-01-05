@@ -450,12 +450,13 @@ void dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_REST
     for (int i = 0; i < nb; i++) {
         const float d = GGML_E4M3_TO_FP32_HALF(x[i].e);
 
+        // 每个 qs[j] 包含两个 4 位值：低位对应位置 2j，高位对应位置 2j+1
         for (int j = 0; j < qk/2; ++j) {
-            const int8_t x0 = kvalues_nvfp4[x[i].qs[j] & 0x0F];
-            const int8_t x1 = kvalues_nvfp4[x[i].qs[j] >>   4];
+            const int8_t x0 = kvalues_nvfp4[x[i].qs[j] & 0x0F];  // 低 4 位 -> 位置 2*j
+            const int8_t x1 = kvalues_nvfp4[x[i].qs[j] >>   4];  // 高 4 位 -> 位置 2*j+1
 
-            y[i*qk + j + 0   ] = x0*d;
-            y[i*qk + j + qk/2] = x1*d;
+            y[i*qk + 2*j + 0] = x0*d;
+            y[i*qk + 2*j + 1] = x1*d;
         }
     }
 }

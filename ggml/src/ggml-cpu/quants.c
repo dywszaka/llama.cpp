@@ -245,16 +245,20 @@ void ggml_vec_dot_nvfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, 
         int32_t sumi0 = 0;
         int32_t sumi1 = 0;
 
+        // 每个 NVFP4 块有 8 个 uint8，每个包含 2 个 4 位值
+        // qs[j] 的低 4 位对应位置 2*j，高 4 位对应位置 2*j+1
+        // x0 块对应 Q8_0 块的前 16 个值，x1 块对应后 16 个值
         for (int j = 0; j < QK_NVFP4/2; ++j) {
-            const int8_t xv00 = kvalues_nvfp4[x0->qs[j] & 0x0F];
-            const int8_t xv01 = kvalues_nvfp4[x0->qs[j] >> 4];
-            const int8_t xv10 = kvalues_nvfp4[x1->qs[j] & 0x0F];
-            const int8_t xv11 = kvalues_nvfp4[x1->qs[j] >> 4];
+            const int8_t xv00 = kvalues_nvfp4[x0->qs[j] & 0x0F];  // x0 的位置 2*j
+            const int8_t xv01 = kvalues_nvfp4[x0->qs[j] >> 4];    // x0 的位置 2*j+1
+            const int8_t xv10 = kvalues_nvfp4[x1->qs[j] & 0x0F];  // x1 的位置 2*j
+            const int8_t xv11 = kvalues_nvfp4[x1->qs[j] >> 4];    // x1 的位置 2*j+1
 
-            sumi0 += yq[j]                  * xv00;
-            sumi0 += yq[j + QK_NVFP4/2]     * xv01;
-            sumi1 += yq[j + QK8_0/2]        * xv10;
-            sumi1 += yq[j + QK8_0/2 + QK_NVFP4/2] * xv11;
+            // x0 对应 y 的位置 0-15，x1 对应 y 的位置 16-31
+            sumi0 += yq[2*j + 0] * xv00;
+            sumi0 += yq[2*j + 1] * xv01;
+            sumi1 += yq[16 + 2*j + 0] * xv10;
+            sumi1 += yq[16 + 2*j + 1] * xv11;
         }
 
         const float d = GGML_CPU_FP16_TO_FP32(y[ib].d);
