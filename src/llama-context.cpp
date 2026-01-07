@@ -371,7 +371,13 @@ llama_context::~llama_context() {
 }
 
 void llama_context::synchronize() {
+    const int64_t t_sync_start_us = ggml_time_us();
     ggml_backend_sched_synchronize(sched.get());
+    const double t_sync_ms = (ggml_time_us() - t_sync_start_us) / 1000.0;
+    if (t_sync_ms > 100.0) {
+        LLAMA_LOG_WARN("%s: backend sync took %.3f ms (n_queued_tokens=%d)\n",
+                __func__, t_sync_ms, n_queued_tokens);
+    }
 
     // FIXME: if multiple single tokens are evaluated without a synchronization,
     // the stats will be added to the prompt evaluation stats
