@@ -30,8 +30,8 @@ def build_nvfp4_weight_block_data(weight: np.ndarray, weight_scale: np.ndarray) 
         raise ValueError(f"Weight size {weight.size} does not match expected size {expected_weight_size} for {num_blocks} blocks")
 
     # 重塑为块结构
-    weight_blocks = weight.reshape(num_blocks, 8)  # (num_blocks, 8 uint8)
-    weight_scale_flat = weight_scale.flatten()     # (num_blocks,)
+    weight_blocks = np.array(weight, copy=True).reshape(num_blocks, 8)  # (num_blocks, 8 uint8)
+    weight_scale_flat = np.array(weight_scale, copy=True).flatten()     # (num_blocks,)
 
     # 完全向量化操作，避免 Python 循环
     # logger.info(f"  Building NVFP4 blocks: {num_blocks} blocks...")
@@ -116,10 +116,31 @@ def prepare_tensors_for_nvfp4(instance: ModelBase):
                 weight_scale_torch = weight_scale_tensors_map[weight_scale_name]
                 # Float8 需要先转换为可以用 numpy 表示的类型（保留原始字节）
                 # 使用 view 将 float8 数据视为 uint8 以保留原始字节
-                weight_scale_data = weight_scale_torch.view(torch.uint8).numpy()
+                weight_scale_data = weight_scale_torch.view(torch.uint8).cpu().contiguous().numpy()
+                weight_u8 = data_torch.to(torch.uint8).cpu().contiguous().numpy().reshape(-1)
+                scale_u8 = weight_scale_data.flatten()
+                # 预览原始权重与 scale 的首个 block 输入
+                weight_preview = weight_u8[:4].tolist()
+                scale_preview = scale_u8[:1].tolist()
+                logger.info(
+                    f"NVFP4 input preview | tensor: {new_name} | "
+                    f"scale byte: {' '.join(str(v) for v in scale_preview)} | "
+                    f"weight bytes (first 4): {' '.join(str(v) for v in weight_preview)}"
+                )
                 # 构建 NVFP4 块数据: 每块 = 1 个 weight_scale (F8) + 8 个 weight (U8)
                 original_shape = data.shape
-                data = build_nvfp4_weight_block_data(data.flatten(), weight_scale_data.flatten())
+                block_data = build_nvfp4_weight_block_data(weight_u8, scale_u8)
+                packed_preview = block_data[:9].astype(np.uint8)
+                if not np.array_equal(packed_preview[1:], weight_u8[:8]):
+                    logger.warning(
+                        f"NVFP4 pack mismatch | tensor: {new_name} | "
+                        f"expected first 8 weight bytes: {' '.join(str(v) for v in weight_u8[:8])} | "
+                        f"packed: {' '.join(str(v) for v in packed_preview[1:])}"
+                    )
+                # 打印第一个 block 的 9 字节（scale + 8*qs）作为 uint8
+                preview = packed_preview.tolist()
+                logger.info(f"NVFP4 block preview | tensor: {new_name} | first block bytes (uint8): {' '.join(str(v) for v in preview)}")
+                data = block_data
                 # 重新计算形状: 原始最后一维扩展为包含 scale 的块数据
                 # 原始形状的最后一维元素数 / 8 = 块数, 每块 9 字节
                 new_last_dim = (original_shape[-1] // 8) * 9

@@ -1046,11 +1046,12 @@ bool llama_model_loader::load_all_data(
 
             if (cur->type == GGML_TYPE_NVFP4 && available >= ggml_type_size(cur->type)) {
                 const uint8_t * raw_block = static_cast<const uint8_t *>(data_ptr);
+                const uint8_t scale = raw_block[0];
                 const size_t qk = (size_t) ggml_blck_size(cur->type); // number of 4-bit values, expected 16
                 const size_t qs_bytes = std::min<size_t>(available > 1 ? available - 1 : 0, qk / 2); // expect 8 bytes
                 const uint8_t * qs    = raw_block + 1; // skip scale byte
 
-                printf("  nvfp4 first block qs (%zu bytes):", qs_bytes);
+                printf("  nvfp4 first block: scale=%u | qs (%zu bytes):", scale, qs_bytes);
                 for (size_t i = 0; i < qs_bytes; ++i) {
                     printf(" %u", qs[i]);
                 }
