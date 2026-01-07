@@ -8770,15 +8770,12 @@ struct llm_build_qwen3 : public llm_graph_context {
         ggml_tensor * inpL;
 
         auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * x) -> ggml_tensor * {
-            ggml_tensor * w_used = w;
+            ggml_tensor * res = ggml_mul_mat(ctx0, w, x);
             if (w_scale) {
-                if (ggml_is_quantized(w->type)) {
-                    w_used = ggml_cast(ctx0, w, GGML_TYPE_F32);
-                }
-                w_used = ggml_mul(ctx0, w_used, w_scale);
+                // Apply scalar scale on output to avoid dequantizing full weights per token.
+                res = ggml_mul(ctx0, res, w_scale);
             }
 
-            ggml_tensor * res = ggml_mul_mat(ctx0, w_used, x);
             for (const auto & lora : *loras) {
                 llama_adapter_lora_weight * lw = lora.first->get_weight(w);
                 if (lw == nullptr) {
