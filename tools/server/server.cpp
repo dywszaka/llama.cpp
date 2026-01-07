@@ -70,6 +70,35 @@ enum server_task_type {
     SERVER_TASK_TYPE_SET_LORA,
 };
 
+static std::string escape_token_piece(const std::string & text, size_t max_len) {
+    std::string out;
+    out.reserve(std::min(text.size(), max_len) * 4);
+
+    size_t count = 0;
+    for (unsigned char c : text) {
+        if (count++ >= max_len) {
+            out += "...";
+            break;
+        }
+        switch (c) {
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            case '\\': out += "\\\\"; break;
+            default:
+                if (c >= 0x20 && c < 0x7f) {
+                    out.push_back(static_cast<char>(c));
+                } else {
+                    char buf[5];
+                    snprintf(buf, sizeof(buf), "\\x%02X", c);
+                    out += buf;
+                }
+                break;
+        }
+    }
+    return out;
+}
+
 enum oaicompat_type {
     OAICOMPAT_TYPE_NONE,
     OAICOMPAT_TYPE_CHAT,
@@ -2320,8 +2349,9 @@ struct server_context {
         slot.sampled = result.tok;
 
         if (slot.n_decoded <= 5 || token_str.empty()) {
-            SLT_INF(slot, "sampled token: tok=%d, piece_len=%zu, is_eog=%d\n",
-                    result.tok, token_str.size(), is_eog ? 1 : 0);
+            const std::string token_dbg = escape_token_piece(token_str, 64);
+            SLT_INF(slot, "sampled token: tok=%d, piece_len=%zu, is_eog=%d, piece='%s'\n",
+                    result.tok, token_str.size(), is_eog ? 1 : 0, token_dbg.c_str());
         }
 
         slot.generated_text += token_str;
@@ -2577,6 +2607,12 @@ struct server_context {
         // populate res.probs_output
         if (slot.params.sampling.n_probs > 0) {
             res->prob_output = tkn; // copy the token probs
+        }
+
+        if (slot.n_decoded <= 5 || tkn.text_to_send.empty()) {
+            const std::string content_dbg = escape_token_piece(tkn.text_to_send, 64);
+            SLT_INF(slot, "partial send: tok=%d, content_len=%zu, content='%s'\n",
+                    tkn.tok, tkn.text_to_send.size(), content_dbg.c_str());
         }
 
         // populate timings if this is final response or timings_per_token is enabled
