@@ -2297,6 +2297,10 @@ struct server_context {
         slot.state = SLOT_STATE_STARTED;
 
         SLT_INF(slot, "%s", "processing task\n");
+        SLT_INF(slot,
+                "params: stream=%d, n_predict=%d, n_ctx=%d, top_k=%d, top_p=%.3f, temp=%.3f\n",
+                slot.params.stream ? 1 : 0, slot.params.n_predict, slot.n_ctx,
+                slot.params.sampling.top_k, slot.params.sampling.top_p, slot.params.sampling.temp);
 
         return true;
     }
@@ -2312,7 +2316,13 @@ struct server_context {
     bool process_token(completion_token_output & result, server_slot & slot) {
         // remember which tokens were sampled - used for repetition penalties during sampling
         const std::string token_str = result.text_to_send;
+        const bool is_eog = llama_vocab_is_eog(vocab, result.tok);
         slot.sampled = result.tok;
+
+        if (slot.n_decoded <= 5 || token_str.empty()) {
+            SLT_INF(slot, "sampled token: tok=%d, piece_len=%zu, is_eog=%d\n",
+                    result.tok, token_str.size(), is_eog ? 1 : 0);
+        }
 
         slot.generated_text += token_str;
         if (slot.params.return_tokens) {
@@ -2349,6 +2359,13 @@ struct server_context {
                 // add the token to slot queue and cache
             } else {
                 result.text_to_send = "";
+            }
+
+            if (result.text_to_send.empty() && (slot.n_decoded <= 5 || token_str.empty())) {
+                SLT_INF(slot,
+                        "empty send_text: incomplete=%d, send_text=%d, generated=%zu, sent=%zu\n",
+                        incomplete ? 1 : 0, send_text ? 1 : 0,
+                        slot.generated_text.size(), slot.n_sent_text);
             }
 
             slot.add_token(result);
@@ -2436,7 +2453,7 @@ struct server_context {
                     slot.n_decoded, slot.n_prompt_tokens, slot.n_past, slot.n_ctx);
         }
 
-        if (llama_vocab_is_eog(vocab, result.tok)) {
+        if (is_eog) {
             slot.stop           = STOP_TYPE_EOS;
             slot.has_next_token = false;
 
