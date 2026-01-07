@@ -3506,7 +3506,11 @@ struct server_context {
                 batch.logits   + i,
             };
 
+            const int64_t t_decode_start_us = ggml_time_us();
+            SRV_INF("llama_decode begin, n_tokens = %d, n_batch = %d, i = %d\n", n_tokens, n_batch, i);
             const int ret = llama_decode(ctx, batch_view);
+            SRV_INF("llama_decode end, n_tokens = %d, n_batch = %d, i = %d, ret = %d, dt = %.3f ms\n",
+                    n_tokens, n_batch, i, ret, (ggml_time_us() - t_decode_start_us) / 1000.0);
 
             metrics.on_decoded(slots);
 
@@ -3711,15 +3715,19 @@ struct server_context {
                 common_batch_add  (slot.batch_spec, id, slot.n_past, { slot.id }, true);
 
                 for (size_t i = 0; i < draft.size(); ++i) {
-                    common_batch_add(slot.batch_spec, draft[i], slot.n_past + 1 + i, { slot.id }, true);
-                }
+                common_batch_add(slot.batch_spec, draft[i], slot.n_past + 1 + i, { slot.id }, true);
+            }
 
-                SLT_DBG(slot, "decoding speculative batch, size = %d\n", slot.batch_spec.n_tokens);
+            SLT_DBG(slot, "decoding speculative batch, size = %d\n", slot.batch_spec.n_tokens);
 
-                llama_decode(ctx, slot.batch_spec);
+            const int64_t t_decode_spec_start_us = ggml_time_us();
+            SLT_INF(slot, "llama_decode speculative begin, n_tokens = %d\n", slot.batch_spec.n_tokens);
+            llama_decode(ctx, slot.batch_spec);
+            SLT_INF(slot, "llama_decode speculative end, n_tokens = %d, dt = %.3f ms\n",
+                    slot.batch_spec.n_tokens, (ggml_time_us() - t_decode_spec_start_us) / 1000.0);
 
-                // the accepted tokens from the speculation
-                const auto ids = common_sampler_sample_and_accept_n(slot.smpl, ctx, draft);
+            // the accepted tokens from the speculation
+            const auto ids = common_sampler_sample_and_accept_n(slot.smpl, ctx, draft);
 
                 slot.n_past    += ids.size();
                 slot.n_decoded += ids.size();
