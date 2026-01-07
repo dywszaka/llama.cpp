@@ -297,7 +297,7 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
         sumi = ggml_cuda_dp4a(v.y, (int) odd,  sumi);
     }
 
-    const float d = ggml_cuda_e4m3_to_fp32(bq4->e) * __low2float(bq8_1->ds);
+    const float d = ggml_cuda_e4m3_to_fp32_half(bq4->e) * __low2float(bq8_1->ds);
     return d * sumi;
 }
 
