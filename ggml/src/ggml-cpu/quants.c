@@ -268,6 +268,44 @@ void ggml_vec_dot_nvfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     *s = sumf;
 }
 
+void ggml_vec_dot_nvfp4_f32_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+    GGML_ASSERT(n % QK_NVFP4 == 0);
+
+    const block_nvfp4 * GGML_RESTRICT x = vx;
+    const float * GGML_RESTRICT y = (const float *) vy;
+
+    const int nb = n / QK_NVFP4;
+
+    float sumf = 0.0f;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const uint8_t e = x[ib].e;
+        const float d = GGML_E4M3_TO_FP32_HALF(e);
+        const uint8_t * GGML_RESTRICT q = x[ib].qs;
+        const float * GGML_RESTRICT yb = y + ib*QK_NVFP4;
+
+        for (int j = 0; j < QK_NVFP4/2; ++j) {
+            const int8_t xv0 = kvalues_nvfp4[q[j] & 0x0F];
+            const int8_t xv1 = kvalues_nvfp4[q[j] >> 4];
+            const float y0 = yb[2*j + 0];
+            const float y1 = yb[2*j + 1];
+
+            const float t0 = (float) xv0 * d * y0;
+            const float t1 = (float) xv1 * d * y1;
+
+            sumf += t0;
+            sumf += t1;
+        }
+    }
+
+    *s = sumf;
+}
+
 void ggml_vec_dot_q5_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK8_0;
     const int nb = n / qk;

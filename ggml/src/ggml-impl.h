@@ -492,8 +492,13 @@ static inline float ggml_e4m3_to_fp32(uint8_t x) {
             bits = sign | (exp << 23) | ((mantissa & 0x7) << 20);
         }
     } else if (exponent == 0x0F) {
-        // Inf / NaN (optional handling)
-        bits = sign | 0x7F800000;
+        // float8_e4m3fn: no Inf. exp=0x0F, mantissa<=6 -> max finite (±448), mantissa=7 -> NaN.
+        if (mantissa == 0x7) {
+            uint32_t man = 1u << 22; // quiet NaN
+            bits = sign | 0x7F800000 | man;
+        } else {
+            bits = sign | 0x43E00000; // 448.0f
+        }
     } else {
         // normal number
         // float exponent = exponent - bias + 127
