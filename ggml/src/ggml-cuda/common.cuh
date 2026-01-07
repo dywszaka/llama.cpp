@@ -556,6 +556,44 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
 #endif // CUDART_VERSION >= 12050
 }
 
+static __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32(uint8_t x) {
+    uint32_t sign     = (uint32_t)(x & 0x80) << 24;
+    uint32_t exponent = (x >> 3) & 0x0F;
+    uint32_t mantissa = x & 0x07;
+
+    uint32_t bits;
+
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            int shift = __clz((uint32_t) mantissa) - 29;
+            mantissa <<= shift;
+            uint32_t exp = 127 - 6 - shift;
+            bits = sign | (exp << 23) | ((mantissa & 0x7) << 20);
+        }
+    } else if (exponent == 0x0F) {
+        if (mantissa == 0x7) {
+            uint32_t man = 1u << 22;
+            bits = sign | 0x7F800000 | man;
+        } else {
+            bits = sign | 0x43E00000;
+        }
+    } else {
+        uint32_t exp = (exponent - 7 + 127) << 23;
+        uint32_t man = mantissa << (23 - 3);
+        bits = sign | exp | man;
+    }
+
+    float result;
+    memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+static __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32_half(uint8_t x) {
+    return ggml_cuda_e4m3_to_fp32(x) * 0.5f;
+}
+
 typedef void (*dequantize_kernel_t)(const void * vx, const int64_t ib, const int iqs, dfloat2 & v);
 
 static __device__ __forceinline__ float get_alibi_slope(
