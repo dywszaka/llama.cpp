@@ -8772,12 +8772,16 @@ struct llm_build_qwen3 : public llm_graph_context {
         auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * x) -> ggml_tensor * {
             ggml_tensor * res = ggml_mul_mat(ctx0, w, x);
             if (w_scale) {
+                ggml_tensor * w_scale_f32 = w_scale;
+                if (w_scale->type != GGML_TYPE_F32) {
+                    w_scale_f32 = ggml_cast(ctx0, w_scale, GGML_TYPE_F32);
+                }
                 // Apply scalar scale on output to avoid dequantizing full weights per token.
                 // NVFP4 uses E4M3 dequant scale, so weight_scale_2 should divide the result.
                 if (w->type == GGML_TYPE_NVFP4) {
-                    res = ggml_div(ctx0, res, w_scale);
+                    res = ggml_div(ctx0, res, w_scale_f32);
                 } else {
-                    res = ggml_mul(ctx0, res, w_scale);
+                    res = ggml_mul(ctx0, res, w_scale_f32);
                 }
             }
 
