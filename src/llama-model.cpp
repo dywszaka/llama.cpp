@@ -5717,13 +5717,13 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                 case GGML_TYPE_F16: {
                     ggml_fp16_t v = 0;
                     memcpy(&v, tmp, sizeof(v));
-                    out = GGML_CPU_FP16_TO_FP32(v);
+                    out = ggml_fp16_to_fp32(v);
                     return true;
                 }
                 case GGML_TYPE_BF16: {
-                    ggml_bf16_t v = 0;
+                    ggml_bf16_t v = { 0 };
                     memcpy(&v, tmp, sizeof(v));
-                    out = GGML_BF16_TO_FP32(v);
+                    out = ggml_bf16_to_fp32(v);
                     return true;
                 }
                 default:
