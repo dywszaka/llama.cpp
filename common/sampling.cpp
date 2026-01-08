@@ -6,6 +6,7 @@
 #include <cmath>
 #include <unordered_map>
 #include <algorithm>
+#include <cstdlib>
 
 // the ring buffer works similarly to std::deque, but with a fixed capacity
 // TODO: deduplicate with llama-impl.h
@@ -336,21 +337,43 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
 }
 
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first) {
+    static const bool sampler_debug = (getenv("LLAMA_SAMPLER_DEBUG") != nullptr);
+    const int64_t t_sample_start_us = ggml_time_us();
+
+    int64_t t_set_logits_us = 0;
+    int64_t t_grammar_us = 0;
+    int64_t t_chain_us = 0;
+
     gsmpl->set_logits(ctx, idx);
+    t_set_logits_us = ggml_time_us() - t_sample_start_us;
 
     auto & grmr  = gsmpl->grmr;
     auto & chain = gsmpl->chain;
     auto & cur_p = gsmpl->cur_p; // initialized by set_logits
 
     if (grammar_first) {
+        const int64_t t_grammar_start_us = ggml_time_us();
         llama_sampler_apply(grmr, &cur_p);
+        t_grammar_us = ggml_time_us() - t_grammar_start_us;
     }
 
+    const int64_t t_chain_start_us = ggml_time_us();
     llama_sampler_apply(chain, &cur_p);
+    t_chain_us = ggml_time_us() - t_chain_start_us;
 
     GGML_ASSERT(cur_p.selected != -1 && "no selected token during sampling - check your sampling configuration");
 
     const llama_token id = cur_p.data[cur_p.selected].id;
+
+    if (sampler_debug) {
+        const int64_t t_total_us = ggml_time_us() - t_sample_start_us;
+        LOG_INFO("sampler: idx=%d, selected=%d, set_logits=%.3f ms, grammar=%.3f ms, chain=%.3f ms, total=%.3f ms\n",
+                idx, cur_p.selected,
+                t_set_logits_us / 1000.0,
+                t_grammar_us / 1000.0,
+                t_chain_us / 1000.0,
+                t_total_us / 1000.0);
+    }
 
     if (grammar_first) {
         return id;
