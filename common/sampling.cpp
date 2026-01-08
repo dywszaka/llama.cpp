@@ -351,6 +351,31 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     auto & chain = gsmpl->chain;
     auto & cur_p = gsmpl->cur_p; // initialized by set_logits
 
+    if (sampler_debug) {
+        float min_logit = INFINITY;
+        float max_logit = -INFINITY;
+        int nan_count = 0;
+        for (int i = 0; i < cur_p.size; ++i) {
+            const float v = cur_p.data[i].logit;
+            if (!std::isfinite(v)) {
+                nan_count++;
+                continue;
+            }
+            if (v < min_logit) {
+                min_logit = v;
+            }
+            if (v > max_logit) {
+                max_logit = v;
+            }
+        }
+        if (min_logit == INFINITY) {
+            min_logit = NAN;
+            max_logit = NAN;
+        }
+        LOG_INF("sampler: logits stats: size=%d min=%.6f max=%.6f nan=%d\n",
+                cur_p.size, min_logit, max_logit, nan_count);
+    }
+
     if (grammar_first) {
         const int64_t t_grammar_start_us = ggml_time_us();
         llama_sampler_apply(grmr, &cur_p);

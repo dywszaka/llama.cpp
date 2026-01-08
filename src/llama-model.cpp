@@ -5696,6 +5696,104 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    if (getenv("LLAMA_NVFP4_DEBUG") != nullptr) {
+        auto fetch_scalar = [&](const ggml_tensor * t, float & out) -> bool {
+            if (!t) {
+                return false;
+            }
+            uint8_t tmp[4] = { 0, 0, 0, 0 };
+            const size_t nbytes = ggml_nbytes(t);
+            if (nbytes > sizeof(tmp)) {
+                return false;
+            }
+            ggml_backend_tensor_get(t, tmp, 0, nbytes);
+            switch (t->type) {
+                case GGML_TYPE_F32: {
+                    float v = 0.0f;
+                    memcpy(&v, tmp, sizeof(v));
+                    out = v;
+                    return true;
+                }
+                case GGML_TYPE_F16: {
+                    ggml_fp16_t v = 0;
+                    memcpy(&v, tmp, sizeof(v));
+                    out = GGML_CPU_FP16_TO_FP32(v);
+                    return true;
+                }
+                case GGML_TYPE_BF16: {
+                    ggml_bf16_t v = 0;
+                    memcpy(&v, tmp, sizeof(v));
+                    out = GGML_BF16_TO_FP32(v);
+                    return true;
+                }
+                default:
+                    return false;
+            }
+        };
+
+        int nvfp4_layers = 0;
+        int total_scales = 0;
+        int invalid_scales = 0;
+        int missing_scales = 0;
+
+        auto check_scale = [&](int il, const char * name, const ggml_tensor * t, bool verbose) {
+            if (!t) {
+                missing_scales++;
+                if (verbose) {
+                    LLAMA_LOG_WARN("%s: nvfp4 scale missing: layer=%d tensor=%s\n", __func__, il, name);
+                }
+                return;
+            }
+            float value = 0.0f;
+            if (!fetch_scalar(t, value)) {
+                invalid_scales++;
+                if (verbose) {
+                    LLAMA_LOG_WARN("%s: nvfp4 scale read failed: layer=%d tensor=%s type=%d\n", __func__, il, name, (int) t->type);
+                }
+                return;
+            }
+            total_scales++;
+            const bool ok = std::isfinite(value) && value != 0.0f;
+            if (verbose) {
+                LLAMA_LOG_INFO("%s: nvfp4 scale: layer=%d tensor=%s value=%.9g\n", __func__, il, name, value);
+            }
+            if (!ok) {
+                invalid_scales++;
+                LLAMA_LOG_WARN("%s: nvfp4 scale invalid: layer=%d tensor=%s value=%.9g\n", __func__, il, name, value);
+            }
+        };
+
+        for (int il = 0; il < n_layer; ++il) {
+            const auto & layer = layers[il];
+            if (!layer.wq || layer.wq->type != GGML_TYPE_NVFP4) {
+                continue;
+            }
+            nvfp4_layers++;
+            const bool verbose = il == 0;
+
+            check_scale(il, "wq.input_scale", layer.wq_inp_scale, verbose);
+            check_scale(il, "wk.input_scale", layer.wk_inp_scale, verbose);
+            check_scale(il, "wv.input_scale", layer.wv_inp_scale, verbose);
+            check_scale(il, "wo.input_scale", layer.wo_inp_scale, verbose);
+
+            check_scale(il, "wq.weight_scale_2", layer.wq_weight_scale_2, verbose);
+            check_scale(il, "wk.weight_scale_2", layer.wk_weight_scale_2, verbose);
+            check_scale(il, "wv.weight_scale_2", layer.wv_weight_scale_2, verbose);
+            check_scale(il, "wo.weight_scale_2", layer.wo_weight_scale_2, verbose);
+
+            check_scale(il, "ffn_up.input_scale",   layer.ffn_up_inp_scale, verbose);
+            check_scale(il, "ffn_gate.input_scale", layer.ffn_gate_inp_scale, verbose);
+            check_scale(il, "ffn_down.input_scale", layer.ffn_down_inp_scale, verbose);
+
+            check_scale(il, "ffn_up.weight_scale_2",   layer.ffn_up_weight_scale_2, verbose);
+            check_scale(il, "ffn_gate.weight_scale_2", layer.ffn_gate_weight_scale_2, verbose);
+            check_scale(il, "ffn_down.weight_scale_2", layer.ffn_down_weight_scale_2, verbose);
+        }
+
+        LLAMA_LOG_INFO("%s: nvfp4 scale check: layers=%d total=%d invalid=%d missing=%d\n",
+                       __func__, nvfp4_layers, total_scales, invalid_scales, missing_scales);
+    }
+
     if (use_mmap_buffer) {
         for (auto & mapping : ml.mappings) {
             pimpl->mappings.emplace_back(std::move(mapping));
