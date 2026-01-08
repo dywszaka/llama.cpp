@@ -367,7 +367,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     if (sampler_debug) {
         const int64_t t_total_us = ggml_time_us() - t_sample_start_us;
-        LOG_INFO("sampler: idx=%d, selected=%d, set_logits=%.3f ms, grammar=%.3f ms, chain=%.3f ms, total=%.3f ms\n",
+        LOG_INF("sampler: idx=%d, selected=%d, set_logits=%.3f ms, grammar=%.3f ms, chain=%.3f ms, total=%.3f ms\n",
                 idx, cur_p.selected,
                 t_set_logits_us / 1000.0,
                 t_grammar_us / 1000.0,
