@@ -8,6 +8,7 @@
 #include "llama-model.h"
 
 #include <cinttypes>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -555,6 +556,52 @@ float * llama_context::get_logits_ith(int32_t i) {
         if (j >= n_outputs) {
             // This should not happen
             throw std::runtime_error(format("corrupt output buffer (j=%" PRId64 ", n_outputs=%d)", j, n_outputs));
+        }
+
+        if (getenv("LLAMA_NVFP4_LOGITS_DEBUG") != nullptr) {
+            synchronize();
+
+            const int32_t n_vocab = model.vocab.n_tokens();
+            const float * cur_logits = logits + j*n_vocab;
+
+            float min_logit = std::numeric_limits<float>::infinity();
+            float max_logit = -std::numeric_limits<float>::infinity();
+            int nan_count = 0;
+            int inf_count = 0;
+            int finite_count = 0;
+
+            for (int32_t t = 0; t < n_vocab; ++t) {
+                const float v = cur_logits[t];
+                if (std::isnan(v)) {
+                    nan_count++;
+                    continue;
+                }
+                if (std::isinf(v)) {
+                    inf_count++;
+                    continue;
+                }
+                if (v < min_logit) {
+                    min_logit = v;
+                }
+                if (v > max_logit) {
+                    max_logit = v;
+                }
+                finite_count++;
+            }
+
+            if (nan_count > 0 || inf_count > 0) {
+                const float min_out = finite_count ? min_logit : 0.0f;
+                const float max_out = finite_count ? max_logit : 0.0f;
+                LLAMA_LOG_WARN("%s: logits stats: idx=%d j=%" PRId64 " size=%d min=%.6f max=%.6f nan=%d inf=%d\n",
+                        __func__, i, j, n_vocab, min_out, max_out, nan_count, inf_count);
+            } else {
+                static bool logged_once = false;
+                if (!logged_once) {
+                    LLAMA_LOG_INFO("%s: logits stats: idx=%d j=%" PRId64 " size=%d min=%.6f max=%.6f\n",
+                            __func__, i, j, n_vocab, min_logit, max_logit);
+                    logged_once = true;
+                }
+            }
         }
 
         return logits + j*model.vocab.n_tokens();
