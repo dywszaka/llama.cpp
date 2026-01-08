@@ -2589,7 +2589,18 @@ static bool ggml_backend_cuda_cpy_tensor_async(ggml_backend_t backend_src, ggml_
 static void ggml_backend_cuda_synchronize(ggml_backend_t backend) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
+    static const bool sync_debug = (getenv("GGML_CUDA_SYNC_DEBUG") != nullptr);
+    if (sync_debug) {
+        GGML_LOG_WARN("%s: begin (device=%d)\n", __func__, cuda_ctx->device);
+    }
+    const int64_t t_sync_start_us = ggml_time_us();
+
     CUDA_CHECK(cudaStreamSynchronize(cuda_ctx->stream()));
+
+    const double t_sync_ms = (ggml_time_us() - t_sync_start_us) / 1000.0;
+    if (sync_debug || t_sync_ms > 100.0) {
+        GGML_LOG_WARN("%s: end (device=%d, dt=%.3f ms)\n", __func__, cuda_ctx->device, t_sync_ms);
+    }
 
     GGML_UNUSED(backend);
 }
