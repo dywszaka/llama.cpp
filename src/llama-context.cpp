@@ -74,6 +74,7 @@ const std::vector<std::string> & nvfp4_debug_patterns() {
     const std::string env_value = trim_copy(env);
     if (env_value == "1" || env_value == "default") {
         patterns = {
+            "inp_embd",
             "attn_norm-0",
             "Qcur-scaled-0",
             "Kcur-scaled-0",

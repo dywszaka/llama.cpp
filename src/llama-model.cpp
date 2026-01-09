@@ -20,10 +20,12 @@
 #include <cstring>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 const char * llm_type_name(llm_type type) {
     switch (type) {
@@ -5792,6 +5794,44 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
         LLAMA_LOG_INFO("%s: nvfp4 scale check: layers=%d total=%d invalid=%d missing=%d\n",
                        __func__, nvfp4_layers, total_scales, invalid_scales, missing_scales);
+
+        if (tok_embd && tok_embd->type == GGML_TYPE_NVFP4) {
+            const int64_t nbytes = ggml_nbytes(tok_embd);
+            const int64_t nblocks = nbytes / (int64_t) sizeof(block_nvfp4);
+            const int64_t sample_blocks = std::min<int64_t>(nblocks, 64);
+            if (sample_blocks > 0) {
+                std::vector<block_nvfp4> blocks(sample_blocks);
+                ggml_backend_tensor_get(tok_embd, blocks.data(), 0, sample_blocks * sizeof(block_nvfp4));
+
+                int nan_scales = 0;
+                int nan_bits = 0;
+                float min_scale = std::numeric_limits<float>::infinity();
+                float max_scale = -std::numeric_limits<float>::infinity();
+                int finite_scales = 0;
+
+                for (int64_t i = 0; i < sample_blocks; ++i) {
+                    const uint8_t e = blocks[i].e;
+                    if ((e & 0x7F) == 0x7F) {
+                        nan_bits++;
+                    }
+                    const float d = GGML_E4M3_TO_FP32_HALF(e);
+                    if (std::isnan(d)) {
+                        nan_scales++;
+                        continue;
+                    }
+                    if (std::isfinite(d)) {
+                        min_scale = std::min(min_scale, d);
+                        max_scale = std::max(max_scale, d);
+                        finite_scales++;
+                    }
+                }
+
+                const float min_out = finite_scales ? min_scale : 0.0f;
+                const float max_out = finite_scales ? max_scale : 0.0f;
+                LLAMA_LOG_INFO("%s: nvfp4 tok_embd scales: blocks=%" PRId64 " sample=%" PRId64 " nan=%d nan_bits=%d min=%.6g max=%.6g\n",
+                        __func__, nblocks, sample_blocks, nan_scales, nan_bits, min_out, max_out);
+            }
+        }
     }
 
     if (use_mmap_buffer) {
