@@ -12,6 +12,10 @@
 #include "llama-memory-recurrent.h"
 
 #include "ggml-cpp.h"
+#define GGML_COMMON_DECL_CPP
+#include "../ggml/src/ggml-common.h"
+#undef GGML_COMMON_DECL_CPP
+#include "../ggml/src/ggml-impl.h"
 
 #include <algorithm>
 #include <cassert>
