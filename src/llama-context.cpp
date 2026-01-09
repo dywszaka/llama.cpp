@@ -204,6 +204,8 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
         return;
     }
 
+    const bool log_all = getenv("LLAMA_NVFP4_TENSOR_DEBUG_ALL") != nullptr;
+
     ggml_backend_sched_synchronize(sched);
 
     std::unordered_set<const ggml_tensor *> seen;
@@ -218,17 +220,20 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
             if (t && seen.insert(t).second) {
                 llama_tensor_stats stats;
                 if (compute_tensor_stats(t, stats)) {
-                    if (stats.nan > 0 || stats.inf > 0) {
+                    if (log_all || stats.nan > 0 || stats.inf > 0) {
                         log_tensor_stats(t, stats);
                     }
                 } else {
                     LLAMA_LOG_WARN("%s: tensor=%s type=%s unsupported for stats\n",
                             __func__, ggml_get_name(t), ggml_type_name(t->type));
                 }
+            } else if (!t) {
+                LLAMA_LOG_WARN("%s: tensor=%s not found in graph\n", __func__, pattern.c_str());
             }
             continue;
         }
 
+        bool matched = false;
         const int n_nodes = ggml_graph_n_nodes(gf);
         for (int i = 0; i < n_nodes; ++i) {
             ggml_tensor * t = ggml_graph_node(gf, i);
@@ -238,13 +243,14 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
             if (!match_pattern(ggml_get_name(t), pattern)) {
                 continue;
             }
+            matched = true;
             if (!seen.insert(t).second) {
                 continue;
             }
 
             llama_tensor_stats stats;
             if (compute_tensor_stats(t, stats)) {
-                if (stats.nan > 0 || stats.inf > 0) {
+                if (log_all || stats.nan > 0 || stats.inf > 0) {
                     log_tensor_stats(t, stats);
                 }
             } else {
@@ -252,7 +258,48 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
                         __func__, ggml_get_name(t), ggml_type_name(t->type));
             }
         }
+        if (!matched) {
+            LLAMA_LOG_WARN("%s: tensor pattern=%s not found in graph\n", __func__, pattern.c_str());
+        }
     }
+}
+
+void debug_nvfp4_norm_weights(const llama_model & model) {
+    if (getenv("LLAMA_NVFP4_TENSOR_DEBUG") == nullptr) {
+        return;
+    }
+
+    static bool logged = false;
+    if (logged) {
+        return;
+    }
+    logged = true;
+
+    const bool log_all = getenv("LLAMA_NVFP4_TENSOR_DEBUG_ALL") != nullptr;
+
+    if (model.layers.empty()) {
+        return;
+    }
+
+    auto log_weight = [&](const char * name, const ggml_tensor * t) {
+        if (!t) {
+            LLAMA_LOG_WARN("%s: weight=%s missing\n", __func__, name);
+            return;
+        }
+        llama_tensor_stats stats;
+        if (compute_tensor_stats(t, stats)) {
+            if (log_all || stats.nan > 0 || stats.inf > 0) {
+                log_tensor_stats(t, stats);
+            }
+        } else {
+            LLAMA_LOG_WARN("%s: weight=%s type=%s unsupported for stats\n",
+                    __func__, name, ggml_type_name(t->type));
+        }
+    };
+
+    log_weight("layer0.attn_norm", model.layers[0].attn_norm);
+    log_weight("layer0.ffn_norm", model.layers[0].ffn_norm);
+    log_weight("output_norm", model.output_norm);
 }
 
 } // namespace
@@ -1083,6 +1130,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
     if (getenv("LLAMA_NVFP4_TENSOR_DEBUG") != nullptr) {
         debug_nvfp4_graph_tensors(sched.get(), res->get_gf());
+        debug_nvfp4_norm_weights(model);
     }
 
     return res;
