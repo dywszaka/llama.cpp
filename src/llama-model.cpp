@@ -33,6 +33,225 @@
 #include <stdexcept>
 #include <vector>
 
+namespace {
+
+static float nvfp4_clampf(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static uint8_t nvfp4_fp32_to_e4m3(float x) {
+    struct e4m3_table {
+        float vals[256];
+        uint8_t valid[256];
+    };
+    static const e4m3_table table = []() {
+        e4m3_table t{};
+        for (int i = 0; i < 256; ++i) {
+            const float v = GGML_E4M3_TO_FP32((uint8_t) i);
+            t.vals[i] = v;
+            t.valid[i] = std::isfinite(v) ? 1 : 0;
+        }
+        return t;
+    }();
+
+    if (!std::isfinite(x)) {
+        return 0;
+    }
+
+    float best_err = std::numeric_limits<float>::infinity();
+    uint8_t best_i = 0;
+    for (int i = 0; i < 256; ++i) {
+        if (!table.valid[i]) {
+            continue;
+        }
+        const float err = fabsf(table.vals[i] - x);
+        if (err < best_err) {
+            best_err = err;
+            best_i = (uint8_t) i;
+        }
+    }
+
+    return best_i;
+}
+
+static float nvfp4_fp4_quantize(float x) {
+    static const float kvalues_fp4[16] = {
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  3.0f,  4.0f,  6.0f,
+        0.0f, -0.5f, -1.0f, -1.5f,
+       -2.0f, -3.0f, -4.0f, -6.0f,
+    };
+
+    float best = kvalues_fp4[0];
+    float best_err = fabsf(x - best);
+    for (int i = 1; i < 16; ++i) {
+        const float err = fabsf(x - kvalues_fp4[i]);
+        if (err < best_err) {
+            best_err = err;
+            best = kvalues_fp4[i];
+        }
+    }
+    return best;
+}
+
+static void nvfp4_quantize_row_ref(
+        const float * x,
+        float * q,
+        float * scales,
+        int64_t ncol,
+        float global_scale) {
+    static const int64_t qk = QK_NVFP4;
+    static const float k_fp4_max = 6.0f;
+
+    GGML_ASSERT(ncol % qk == 0);
+
+    const int64_t nblocks = ncol / qk;
+    for (int64_t ib = 0; ib < nblocks; ++ib) {
+        const int64_t base = ib * qk;
+        float vmax = 0.0f;
+        for (int64_t i = 0; i < qk; ++i) {
+            vmax = std::max(vmax, fabsf(x[base + i]));
+        }
+
+        float scale = global_scale * (vmax / k_fp4_max);
+        scale = nvfp4_clampf(scale, -448.0f, 448.0f);
+        const uint8_t scale_q = nvfp4_fp32_to_e4m3(scale);
+        const float scale_f = GGML_E4M3_TO_FP32(scale_q);
+        scales[ib] = scale_f;
+
+        const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
+        for (int64_t i = 0; i < qk; ++i) {
+            const float scaled = x[base + i] * inv_scale;
+            const float clipped = nvfp4_clampf(scaled, -k_fp4_max, k_fp4_max);
+            q[base + i] = nvfp4_fp4_quantize(clipped);
+        }
+    }
+}
+
+static void nvfp4_dequantize_row_ref(
+        const float * q,
+        const float * scales,
+        float * y,
+        int64_t ncol,
+        float global_scale) {
+    static const int64_t qk = QK_NVFP4;
+
+    GGML_ASSERT(ncol % qk == 0);
+
+    const int64_t nblocks = ncol / qk;
+    for (int64_t ib = 0; ib < nblocks; ++ib) {
+        const float scale_f = scales[ib];
+        const float out_scale = (global_scale != 0.0f) ? (scale_f / global_scale) : 0.0f;
+        const int64_t base = ib * qk;
+        for (int64_t i = 0; i < qk; ++i) {
+            y[base + i] = q[base + i] * out_scale;
+        }
+    }
+}
+
+static void nvfp4_to_f32_ref(
+        const float * x,
+        float * y,
+        int64_t ncol,
+        float global_scale,
+        std::vector<float> & q_buf,
+        std::vector<float> & scale_buf) {
+    q_buf.resize(ncol);
+    scale_buf.resize(ncol / QK_NVFP4);
+    nvfp4_quantize_row_ref(x, q_buf.data(), scale_buf.data(), ncol, global_scale);
+    nvfp4_dequantize_row_ref(q_buf.data(), scale_buf.data(), y, ncol, global_scale);
+}
+
+static bool nvfp4_fetch_scalar_f32(const ggml_tensor * t, float & out) {
+    if (!t || !t->data) {
+        return false;
+    }
+    const void * src = t->data;
+    switch (t->type) {
+        case GGML_TYPE_F32: {
+            float v = 0.0f;
+            memcpy(&v, src, sizeof(v));
+            out = v;
+            return true;
+        }
+        case GGML_TYPE_F16: {
+            ggml_fp16_t v = 0;
+            memcpy(&v, src, sizeof(v));
+            out = ggml_fp16_to_fp32(v);
+            return true;
+        }
+        case GGML_TYPE_BF16: {
+            ggml_bf16_t v = { 0 };
+            memcpy(&v, src, sizeof(v));
+            out = ggml_bf16_to_fp32(v);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+static void nvfp4_to_f32_op_impl(
+        ggml_tensor * dst,
+        const ggml_tensor * a,
+        const ggml_tensor * b,
+        int ith,
+        int nth,
+        void * userdata) {
+    GGML_UNUSED(userdata);
+
+    GGML_ASSERT(a->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(a));
+    GGML_ASSERT(ggml_is_contiguous(dst));
+
+    float global_scale = 0.0f;
+    if (!nvfp4_fetch_scalar_f32(b, global_scale)) {
+        memcpy(dst->data, a->data, ggml_nbytes(a));
+        return;
+    }
+
+    const bool scale_is_recip = []() {
+        const char * env = std::getenv("LLAMA_NVFP4_WEIGHT_SCALE_2_RECIP");
+        return env && std::strcmp(env, "0") != 0;
+    }();
+    if (scale_is_recip) {
+        global_scale = (global_scale != 0.0f) ? (1.0f / global_scale) : 0.0f;
+    }
+
+    const int64_t ncols = a->ne[0];
+    const int64_t nrows = a->ne[1];
+    if (a->ne[2] != 1 || a->ne[3] != 1 || ncols % QK_NVFP4 != 0 || global_scale == 0.0f) {
+        memcpy(dst->data, a->data, ggml_nbytes(a));
+        return;
+    }
+
+    std::vector<float> q_buf;
+    std::vector<float> scale_buf;
+
+    const int64_t row_start = (nrows * ith) / nth;
+    const int64_t row_end   = (nrows * (ith + 1)) / nth;
+
+    const size_t row_stride = a->nb[1] / sizeof(float);
+    for (int64_t r = row_start; r < row_end; ++r) {
+        const float * x = (const float *) a->data + r * row_stride;
+        float * y = (float *) dst->data + r * row_stride;
+        nvfp4_to_f32_ref(x, y, ncols, global_scale, q_buf, scale_buf);
+    }
+}
+
+} // namespace
+
+extern "C" void ggml_nvfp4_to_f32_op(
+        ggml_tensor * dst,
+        const ggml_tensor * a,
+        const ggml_tensor * b,
+        int ith,
+        int nth,
+        void * userdata) {
+    nvfp4_to_f32_op_impl(dst, a, b, ith, nth, userdata);
+}
+
 const char * llm_type_name(llm_type type) {
     switch (type) {
         case LLM_TYPE_14M:           return "14M";
@@ -8982,8 +9201,16 @@ struct llm_build_qwen3 : public llm_graph_context {
             return env && std::strcmp(env, "0") != 0;
         }();
 
-        auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * x) -> ggml_tensor * {
-            ggml_tensor * res = ggml_mul_mat(ctx0, w, x);
+        auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * w_inp_scale, ggml_tensor * x) -> ggml_tensor * {
+            ggml_tensor * x_used = x;
+            if (w->type == GGML_TYPE_NVFP4 && w_inp_scale) {
+                if (x_used->type != GGML_TYPE_F32) {
+                    x_used = ggml_cast(ctx0, x_used, GGML_TYPE_F32);
+                }
+                x_used = ggml_map_custom2(ctx0, x_used, w_inp_scale, ggml_nvfp4_to_f32_op, GGML_N_TASKS_MAX, nullptr);
+            }
+
+            ggml_tensor * res = ggml_mul_mat(ctx0, w, x_used);
             if (w_scale) {
                 ggml_tensor * w_scale_f32 = w_scale;
                 if (w_scale->type != GGML_TYPE_F32) {
@@ -9010,7 +9237,7 @@ struct llm_build_qwen3 : public llm_graph_context {
 
                 ggml_tensor * ab_cur = ggml_mul_mat(
                         ctx0, lw->b,
-                        ggml_mul_mat(ctx0, lw->a, x)
+                        ggml_mul_mat(ctx0, lw->a, x_used)
                         );
 
                 ab_cur = ggml_scale(ctx0, ab_cur, scale);
@@ -9044,18 +9271,21 @@ struct llm_build_qwen3 : public llm_graph_context {
                 ggml_tensor * Qcur = build_lora_mm_scaled(
                         model.layers[il].wq,
                         model.layers[il].wq_weight_scale_2,
+                        model.layers[il].wq_inp_scale,
                         cur);
                 cb(Qcur, "Qcur-scaled", il);
 
                 ggml_tensor * Kcur = build_lora_mm_scaled(
                         model.layers[il].wk,
                         model.layers[il].wk_weight_scale_2,
+                        model.layers[il].wk_inp_scale,
                         cur);
                 cb(Kcur, "Kcur-scaled", il);
 
                 ggml_tensor * Vcur = build_lora_mm_scaled(
                         model.layers[il].wv,
                         model.layers[il].wv_weight_scale_2,
+                        model.layers[il].wv_inp_scale,
                         cur);
                 cb(Vcur, "Vcur-scaled", il);
 
@@ -9101,6 +9331,7 @@ struct llm_build_qwen3 : public llm_graph_context {
                 cur = build_lora_mm_scaled(
                         model.layers[il].wo,
                         model.layers[il].wo_weight_scale_2,
+                        model.layers[il].wo_inp_scale,
                         cur);
                 if (model.layers[il].bo) {
                     cur = ggml_add(ctx0, cur, model.layers[il].bo);
@@ -9125,12 +9356,14 @@ struct llm_build_qwen3 : public llm_graph_context {
                 ggml_tensor * up = build_lora_mm_scaled(
                         model.layers[il].ffn_up,
                         model.layers[il].ffn_up_weight_scale_2,
+                        model.layers[il].ffn_up_inp_scale,
                         cur);
                 cb(up, "ffn_up", il);
 
                 ggml_tensor * gate = build_lora_mm_scaled(
                         model.layers[il].ffn_gate,
                         model.layers[il].ffn_gate_weight_scale_2,
+                        model.layers[il].ffn_gate_inp_scale,
                         cur);
                 cb(gate, "ffn_gate", il);
 
@@ -9140,6 +9373,7 @@ struct llm_build_qwen3 : public llm_graph_context {
                 cur = build_lora_mm_scaled(
                         model.layers[il].ffn_down,
                         model.layers[il].ffn_down_weight_scale_2,
+                        model.layers[il].ffn_down_inp_scale,
                         cur);
                 cb(cur, "ffn_down", il);
             }
