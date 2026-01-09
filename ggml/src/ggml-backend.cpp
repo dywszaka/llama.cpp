@@ -378,7 +378,7 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
 
     if (getenv("LLAMA_NVFP4_COPY_DEBUG") != nullptr) {
         const char * name = ggml_get_name(dst);
-        if (name && std::strstr(name, "token_embd.weight") != nullptr && dst->type == GGML_TYPE_F32) {
+        if (name && strstr(name, "token_embd.weight") != nullptr && dst->type == GGML_TYPE_F32) {
             static bool logged = false;
             if (!logged) {
                 logged = true;
