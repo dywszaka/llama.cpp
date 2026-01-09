@@ -7,11 +7,254 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 
+#include <cctype>
 #include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+namespace {
+
+struct llama_tensor_stats {
+    int64_t n = 0;
+    float min = std::numeric_limits<float>::infinity();
+    float max = -std::numeric_limits<float>::infinity();
+    int nan = 0;
+    int inf = 0;
+    int finite = 0;
+};
+
+std::string trim_copy(const std::string & value) {
+    size_t start = 0;
+    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start]))) {
+        ++start;
+    }
+    size_t end = value.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+    return value.substr(start, end - start);
+}
+
+std::vector<std::string> split_patterns(const std::string & value) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= value.size()) {
+        size_t pos = value.find(',', start);
+        if (pos == std::string::npos) {
+            pos = value.size();
+        }
+        std::string token = trim_copy(value.substr(start, pos - start));
+        if (!token.empty()) {
+            out.push_back(std::move(token));
+        }
+        start = pos + 1;
+    }
+    return out;
+}
+
+const std::vector<std::string> & nvfp4_debug_patterns() {
+    static std::vector<std::string> patterns;
+    static bool initialized = false;
+    if (initialized) {
+        return patterns;
+    }
+    initialized = true;
+
+    const char * env = getenv("LLAMA_NVFP4_TENSOR_DEBUG");
+    if (!env || env[0] == '\0') {
+        return patterns;
+    }
+
+    const std::string env_value = trim_copy(env);
+    if (env_value == "1" || env_value == "default") {
+        patterns = {
+            "attn_norm-0",
+            "Qcur-scaled-0",
+            "Kcur-scaled-0",
+            "Vcur-scaled-0",
+            "Qcur_normed-0",
+            "Kcur_normed-0",
+            "kqv_out-0",
+            "ffn_norm-0",
+            "ffn_up-0",
+            "ffn_gate-0",
+            "ffn_swiglu-0",
+            "ffn_down-0",
+            "result_norm",
+            "result_output",
+        };
+        return patterns;
+    }
+
+    patterns = split_patterns(env_value);
+    return patterns;
+}
+
+bool match_pattern(const char * name, const std::string & pattern) {
+    if (!name) {
+        return false;
+    }
+    if (pattern.empty()) {
+        return false;
+    }
+    if (pattern == name) {
+        return true;
+    }
+    if (pattern.back() == '*') {
+        const std::string prefix = pattern.substr(0, pattern.size() - 1);
+        return std::strncmp(name, prefix.c_str(), prefix.size()) == 0;
+    }
+    return false;
+}
+
+bool compute_tensor_stats(const ggml_tensor * tensor, llama_tensor_stats & stats) {
+    stats = {};
+    if (!tensor) {
+        return false;
+    }
+
+    const int64_t n = ggml_nelements(tensor);
+    if (n <= 0) {
+        return false;
+    }
+
+    stats.n = n;
+
+    if (tensor->type == GGML_TYPE_F32) {
+        std::vector<float> buf(n);
+        ggml_backend_tensor_get(tensor, buf.data(), 0, buf.size() * sizeof(float));
+        for (int64_t i = 0; i < n; ++i) {
+            const float v = buf[i];
+            if (std::isnan(v)) {
+                stats.nan++;
+                continue;
+            }
+            if (std::isinf(v)) {
+                stats.inf++;
+                continue;
+            }
+            stats.min = std::min(stats.min, v);
+            stats.max = std::max(stats.max, v);
+            stats.finite++;
+        }
+        return true;
+    }
+
+    if (tensor->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> buf(n);
+        ggml_backend_tensor_get(tensor, buf.data(), 0, buf.size() * sizeof(ggml_fp16_t));
+        for (int64_t i = 0; i < n; ++i) {
+            const float v = ggml_fp16_to_fp32(buf[i]);
+            if (std::isnan(v)) {
+                stats.nan++;
+                continue;
+            }
+            if (std::isinf(v)) {
+                stats.inf++;
+                continue;
+            }
+            stats.min = std::min(stats.min, v);
+            stats.max = std::max(stats.max, v);
+            stats.finite++;
+        }
+        return true;
+    }
+
+    if (tensor->type == GGML_TYPE_BF16) {
+        std::vector<ggml_bf16_t> buf(n);
+        ggml_backend_tensor_get(tensor, buf.data(), 0, buf.size() * sizeof(ggml_bf16_t));
+        for (int64_t i = 0; i < n; ++i) {
+            const float v = ggml_bf16_to_fp32(buf[i]);
+            if (std::isnan(v)) {
+                stats.nan++;
+                continue;
+            }
+            if (std::isinf(v)) {
+                stats.inf++;
+                continue;
+            }
+            stats.min = std::min(stats.min, v);
+            stats.max = std::max(stats.max, v);
+            stats.finite++;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+void log_tensor_stats(const ggml_tensor * tensor, const llama_tensor_stats & stats) {
+    const float min_out = stats.finite ? stats.min : 0.0f;
+    const float max_out = stats.finite ? stats.max : 0.0f;
+    LLAMA_LOG_WARN("%s: tensor=%s type=%s n=%" PRId64 " min=%.6f max=%.6f nan=%d inf=%d\n",
+            __func__, ggml_get_name(tensor), ggml_type_name(tensor->type),
+            stats.n, min_out, max_out, stats.nan, stats.inf);
+}
+
+void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
+    const auto & patterns = nvfp4_debug_patterns();
+    if (patterns.empty() || !gf) {
+        return;
+    }
+
+    ggml_backend_sched_synchronize(sched);
+
+    std::unordered_set<const ggml_tensor *> seen;
+
+    for (const auto & pattern : patterns) {
+        if (pattern.empty()) {
+            continue;
+        }
+
+        if (pattern.back() != '*') {
+            ggml_tensor * t = ggml_graph_get_tensor(gf, pattern.c_str());
+            if (t && seen.insert(t).second) {
+                llama_tensor_stats stats;
+                if (compute_tensor_stats(t, stats)) {
+                    if (stats.nan > 0 || stats.inf > 0) {
+                        log_tensor_stats(t, stats);
+                    }
+                } else {
+                    LLAMA_LOG_WARN("%s: tensor=%s type=%s unsupported for stats\n",
+                            __func__, ggml_get_name(t), ggml_type_name(t->type));
+                }
+            }
+            continue;
+        }
+
+        const int n_nodes = ggml_graph_n_nodes(gf);
+        for (int i = 0; i < n_nodes; ++i) {
+            ggml_tensor * t = ggml_graph_node(gf, i);
+            if (!t) {
+                continue;
+            }
+            if (!match_pattern(ggml_get_name(t), pattern)) {
+                continue;
+            }
+            if (!seen.insert(t).second) {
+                continue;
+            }
+
+            llama_tensor_stats stats;
+            if (compute_tensor_stats(t, stats)) {
+                if (stats.nan > 0 || stats.inf > 0) {
+                    log_tensor_stats(t, stats);
+                }
+            } else {
+                LLAMA_LOG_WARN("%s: tensor=%s type=%s unsupported for stats\n",
+                        __func__, ggml_get_name(t), ggml_type_name(t->type));
+            }
+        }
+    }
+}
+
+} // namespace
 
 //
 // llama_context
@@ -836,6 +1079,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     ret = GGML_STATUS_SUCCESS;
+
+    if (getenv("LLAMA_NVFP4_TENSOR_DEBUG") != nullptr) {
+        debug_nvfp4_graph_tensors(sched.get(), res->get_gf());
+    }
 
     return res;
 }
