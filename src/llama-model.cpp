@@ -8982,12 +8982,8 @@ struct llm_build_qwen3 : public llm_graph_context {
                     w_scale_f32 = ggml_cast(ctx0, w_scale, GGML_TYPE_F32);
                 }
                 // Apply scalar scale on output to avoid dequantizing full weights per token.
-                // NVFP4 uses E4M3 dequant scale, so weight_scale_2 should divide the result.
-                if (w->type == GGML_TYPE_NVFP4) {
-                    res = ggml_div(ctx0, res, w_scale_f32);
-                } else {
-                    res = ggml_mul(ctx0, res, w_scale_f32);
-                }
+                // NVFP4 weight_scale_2 is stored as a reciprocal global scale, so we multiply.
+                res = ggml_mul(ctx0, res, w_scale_f32);
             }
 
             for (const auto & lora : *loras) {
