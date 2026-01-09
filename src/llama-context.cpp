@@ -75,6 +75,7 @@ const std::vector<std::string> & nvfp4_debug_patterns() {
     if (env_value == "1" || env_value == "default") {
         patterns = {
             "inp_embd",
+            "norm-0",
             "attn_norm-0",
             "Qcur-scaled-0",
             "Kcur-scaled-0",
@@ -1823,6 +1824,22 @@ llm_graph_cb llama_context::graph_get_cb() const {
             ggml_format_name(cur, "%s-%d", name, il);
         } else {
             ggml_set_name(cur, name);
+        }
+
+        if (getenv("LLAMA_NVFP4_FORCE_NORM_CPU") != nullptr && backend_cpu != nullptr) {
+            if (strcmp(name, "norm") == 0 ||
+                strcmp(name, "attn_norm") == 0 ||
+                strcmp(name, "ffn_norm") == 0 ||
+                strcmp(name, "result_norm") == 0) {
+                if (ggml_backend_supports_op(backend_cpu, cur)) {
+                    ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend_cpu);
+                    static bool logged = false;
+                    if (!logged) {
+                        LLAMA_LOG_INFO("%s: forcing norm ops to CPU backend\n", __func__);
+                        logged = true;
+                    }
+                }
+            }
         }
 
         if (!cparams.offload_kqv) {
