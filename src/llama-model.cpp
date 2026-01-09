@@ -17,6 +17,7 @@
 #include <cassert>
 #include <cmath>
 #include <cfloat>
+#include <cinttypes>
 #include <cstring>
 #include <cmath>
 #include <functional>
