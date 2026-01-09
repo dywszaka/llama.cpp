@@ -218,6 +218,7 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
     }
 
     const bool log_all = getenv("LLAMA_NVFP4_TENSOR_DEBUG_ALL") != nullptr;
+    const bool log_src = getenv("LLAMA_NVFP4_TENSOR_DEBUG_SRC") != nullptr;
 
     ggml_backend_sched_synchronize(sched);
 
@@ -235,6 +236,20 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
                 if (compute_tensor_stats(t, stats)) {
                     if (log_all || stats.nan > 0 || stats.inf > 0) {
                         log_tensor_stats(t, stats);
+                        if (log_src) {
+                            for (int si = 0; si < GGML_MAX_SRC; ++si) {
+                                const ggml_tensor * src = t->src[si];
+                                if (!src) {
+                                    continue;
+                                }
+                                llama_tensor_stats src_stats;
+                                if (compute_tensor_stats(src, src_stats)) {
+                                    LLAMA_LOG_WARN("%s: tensor=%s src%d=%s\n",
+                                            __func__, ggml_get_name(t), si, ggml_get_name(src));
+                                    log_tensor_stats(src, src_stats);
+                                }
+                            }
+                        }
                     }
                 } else {
                     LLAMA_LOG_WARN("%s: tensor=%s type=%s unsupported for stats\n",
@@ -265,6 +280,20 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
             if (compute_tensor_stats(t, stats)) {
                 if (log_all || stats.nan > 0 || stats.inf > 0) {
                     log_tensor_stats(t, stats);
+                    if (log_src) {
+                        for (int si = 0; si < GGML_MAX_SRC; ++si) {
+                            const ggml_tensor * src = t->src[si];
+                            if (!src) {
+                                continue;
+                            }
+                            llama_tensor_stats src_stats;
+                            if (compute_tensor_stats(src, src_stats)) {
+                                LLAMA_LOG_WARN("%s: tensor=%s src%d=%s\n",
+                                        __func__, ggml_get_name(t), si, ggml_get_name(src));
+                                log_tensor_stats(src, src_stats);
+                            }
+                        }
+                    }
                 }
             } else {
                 LLAMA_LOG_WARN("%s: tensor=%s type=%s unsupported for stats\n",
