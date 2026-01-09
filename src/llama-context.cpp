@@ -1,6 +1,8 @@
 #include "llama-context.h"
 
 #include "llama-impl.h"
+
+#include "ggml-backend.h"
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
@@ -194,9 +196,19 @@ bool compute_tensor_stats(const ggml_tensor * tensor, llama_tensor_stats & stats
 void log_tensor_stats(const ggml_tensor * tensor, const llama_tensor_stats & stats) {
     const float min_out = stats.finite ? stats.min : 0.0f;
     const float max_out = stats.finite ? stats.max : 0.0f;
-    LLAMA_LOG_WARN("%s: tensor=%s type=%s n=%" PRId64 " min=%.6f max=%.6f nan=%d inf=%d\n",
-            __func__, ggml_get_name(tensor), ggml_type_name(tensor->type),
-            stats.n, min_out, max_out, stats.nan, stats.inf);
+    const bool log_buf = getenv("LLAMA_NVFP4_TENSOR_DEBUG_BUF") != nullptr;
+    if (log_buf) {
+        const char * buf_name = (tensor && tensor->buffer) ? ggml_backend_buffer_name(tensor->buffer) : "none";
+        const int host = (tensor && tensor->buffer) ? (int) ggml_backend_buffer_is_host(tensor->buffer) : -1;
+        LLAMA_LOG_WARN("%s: tensor=%s type=%s n=%" PRId64 " min=%.6f max=%.6f nan=%d inf=%d buf=%s host=%d data=%p\n",
+                __func__, ggml_get_name(tensor), ggml_type_name(tensor->type),
+                stats.n, min_out, max_out, stats.nan, stats.inf, buf_name, host,
+                tensor ? tensor->data : nullptr);
+    } else {
+        LLAMA_LOG_WARN("%s: tensor=%s type=%s n=%" PRId64 " min=%.6f max=%.6f nan=%d inf=%d\n",
+                __func__, ggml_get_name(tensor), ggml_type_name(tensor->type),
+                stats.n, min_out, max_out, stats.nan, stats.inf);
+    }
 }
 
 void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
