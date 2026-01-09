@@ -1875,6 +1875,16 @@ llm_graph_cb llama_context::graph_get_cb() const {
                     }
                 }
             }
+            if (il == -1 && strcmp(name, "inp_embd") == 0 && model.hparams.n_layer > 0) {
+                const auto & dev_layer0 = model.dev_layer(0);
+                for (const auto & backend : backends) {
+                    if (ggml_backend_get_device(backend.get()) == dev_layer0) {
+                        if (ggml_backend_supports_op(backend.get(), cur)) {
+                            ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend.get());
+                        }
+                    }
+                }
+            }
         }
     };
 }
