@@ -5824,7 +5824,9 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             total_scales++;
             const bool ok = std::isfinite(value) && value != 0.0f;
             if (verbose) {
-                LLAMA_LOG_INFO("%s: nvfp4 scale: layer=%d tensor=%s value=%.9g\n", __func__, il, name, value);
+                const float inv = (value != 0.0f && std::isfinite(value)) ? (1.0f / value) : 0.0f;
+                LLAMA_LOG_INFO("%s: nvfp4 scale: layer=%d tensor=%s value=%.9g inv=%.9g\n",
+                               __func__, il, name, value, inv);
             }
             if (!ok) {
                 invalid_scales++;
@@ -8982,8 +8984,12 @@ struct llm_build_qwen3 : public llm_graph_context {
                     w_scale_f32 = ggml_cast(ctx0, w_scale, GGML_TYPE_F32);
                 }
                 // Apply scalar scale on output to avoid dequantizing full weights per token.
-                // NVFP4 weight_scale_2 is stored as a reciprocal global scale, so we multiply.
-                res = ggml_mul(ctx0, res, w_scale_f32);
+                // NVFP4: weight_scale_2 acts as global_scale, so dequant scale is weight_scale/global_scale.
+                if (w->type == GGML_TYPE_NVFP4) {
+                    res = ggml_div(ctx0, res, w_scale_f32);
+                } else {
+                    res = ggml_mul(ctx0, res, w_scale_f32);
+                }
             }
 
             for (const auto & lora : *loras) {
