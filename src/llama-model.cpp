@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cfloat>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <functional>
@@ -8976,6 +8977,11 @@ struct llm_build_qwen3 : public llm_graph_context {
         ggml_tensor * cur;
         ggml_tensor * inpL;
 
+        const bool nvfp4_scale_is_recip = []() {
+            const char * env = std::getenv("LLAMA_NVFP4_WEIGHT_SCALE_2_RECIP");
+            return env && std::strcmp(env, "0") != 0;
+        }();
+
         auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * x) -> ggml_tensor * {
             ggml_tensor * res = ggml_mul_mat(ctx0, w, x);
             if (w_scale) {
@@ -8984,9 +8990,10 @@ struct llm_build_qwen3 : public llm_graph_context {
                     w_scale_f32 = ggml_cast(ctx0, w_scale, GGML_TYPE_F32);
                 }
                 // Apply scalar scale on output to avoid dequantizing full weights per token.
-                // NVFP4: weight_scale_2 acts as global_scale, so dequant scale is weight_scale/global_scale.
                 if (w->type == GGML_TYPE_NVFP4) {
-                    res = ggml_div(ctx0, res, w_scale_f32);
+                    res = nvfp4_scale_is_recip ?
+                        ggml_mul(ctx0, res, w_scale_f32) :
+                        ggml_div(ctx0, res, w_scale_f32);
                 } else {
                     res = ggml_mul(ctx0, res, w_scale_f32);
                 }
