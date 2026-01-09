@@ -5703,6 +5703,68 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    if (getenv("LLAMA_NVFP4_TOK_EMBD_CPU_STATS") != nullptr) {
+        auto log_f32_stats = [&](const ggml_tensor * t, const char * label) {
+            if (!t) {
+                LLAMA_LOG_WARN("%s: %s tensor missing\n", __func__, label);
+                return;
+            }
+            if (t->type != GGML_TYPE_F32) {
+                LLAMA_LOG_WARN("%s: %s type=%s not f32, skipping cpu stats\n",
+                        __func__, label, ggml_type_name(t->type));
+                return;
+            }
+
+            const int64_t nbytes = ggml_nbytes(t);
+            if (nbytes <= 0) {
+                LLAMA_LOG_WARN("%s: %s has no data\n", __func__, label);
+                return;
+            }
+
+            const char * buf_name = t->buffer ? ggml_backend_buffer_name(t->buffer) : "none";
+            const int host = t->buffer ? (int) ggml_backend_buffer_is_host(t->buffer) : -1;
+
+            const size_t chunk_bytes = 4 * 1024 * 1024;
+            const size_t max_bytes = (size_t) nbytes;
+            std::vector<float> buf(chunk_bytes / sizeof(float));
+
+            int64_t nan = 0;
+            int64_t inf = 0;
+            int64_t finite = 0;
+            float min_v = std::numeric_limits<float>::infinity();
+            float max_v = -std::numeric_limits<float>::infinity();
+
+            for (size_t offset = 0; offset < max_bytes; offset += chunk_bytes) {
+                const size_t cur_bytes = std::min(chunk_bytes, max_bytes - offset);
+                GGML_ASSERT(cur_bytes % sizeof(float) == 0);
+                const size_t n = cur_bytes / sizeof(float);
+
+                ggml_backend_tensor_get(t, buf.data(), offset, cur_bytes);
+                for (size_t i = 0; i < n; ++i) {
+                    const float v = buf[i];
+                    if (std::isnan(v)) {
+                        nan++;
+                        continue;
+                    }
+                    if (std::isinf(v)) {
+                        inf++;
+                        continue;
+                    }
+                    finite++;
+                    min_v = std::min(min_v, v);
+                    max_v = std::max(max_v, v);
+                }
+            }
+
+            const float min_out = finite ? min_v : 0.0f;
+            const float max_out = finite ? max_v : 0.0f;
+            LLAMA_LOG_INFO("%s: %s cpu stats: nbytes=%" PRId64 " min=%.6g max=%.6g nan=%" PRId64 " inf=%" PRId64 " buf=%s host=%d\n",
+                    __func__, label, nbytes, min_out, max_out, nan, inf, buf_name, host);
+        };
+
+        log_f32_stats(tok_embd, "tok_embd");
+    }
+
     if (getenv("LLAMA_NVFP4_DEBUG") != nullptr) {
         auto fetch_scalar = [&](const ggml_tensor * t, float & out) -> bool {
             if (!t) {
