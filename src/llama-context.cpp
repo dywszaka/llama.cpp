@@ -1867,6 +1867,19 @@ llm_graph_cb llama_context::graph_get_cb() const {
             ggml_set_name(cur, name);
         }
 
+        if (getenv("LLAMA_NVFP4_TENSOR_DEBUG_PIN") != nullptr) {
+            const auto & patterns = nvfp4_debug_patterns();
+            for (const auto & pattern : patterns) {
+                if (pattern.empty()) {
+                    continue;
+                }
+                if (match_pattern(ggml_get_name(cur), pattern)) {
+                    ggml_set_output(cur);
+                    break;
+                }
+            }
+        }
+
         if (getenv("LLAMA_NVFP4_FORCE_NORM_CPU") != nullptr && backend_cpu != nullptr) {
             if (strcmp(name, "norm") == 0 ||
                 strcmp(name, "attn_norm") == 0 ||
