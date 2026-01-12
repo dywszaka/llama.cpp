@@ -146,7 +146,7 @@ static void nvfp4_to_f32_ref(
 }
 
 static bool nvfp4_scale_is_recip() {
-    const char * env = std::getenv("LLAMA_NVFP4_WEIGHT_SCALE_2_RECIP");
+    const char * env = std::getenv("LLAMA_NVFP4_INPUT_SCALE_RECIP");
     return env && std::strcmp(env, "0") != 0;
 }
 
