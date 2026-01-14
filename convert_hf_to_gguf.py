@@ -8574,6 +8574,10 @@ def parse_args() -> argparse.Namespace:
         help="name of the model",
     )
     parser.add_argument(
+        "--log-file", type=str, default=None,
+        help="Optional path to write logs to a file",
+    )
+    parser.add_argument(
         "--verbose", action="store_true",
         help="increase output verbosity",
     )
@@ -8668,10 +8672,16 @@ def main() -> None:
         ModelBase.print_registered_models()
         sys.exit(0)
 
-    if args.verbose:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_handlers = [logging.StreamHandler(sys.stdout)]
+    if args.log_file:
+        log_handlers.append(logging.FileHandler(args.log_file, mode="w"))
+
+    logging.basicConfig(
+        level=log_level,
+        handlers=log_handlers,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     if args.remote:
         hf_repo_id = args.model

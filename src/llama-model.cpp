@@ -12,18 +12,265 @@
 #include "llama-memory-recurrent.h"
 
 #include "ggml-cpp.h"
+#define GGML_COMMON_DECL_CPP
+#include "../ggml/src/ggml-common.h"
+#undef GGML_COMMON_DECL_CPP
+#include "../ggml/src/ggml-impl.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cfloat>
+#include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <functional>
+#include <limits>
+#include <cstdio>
 #include <map>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
+
+namespace {
+
+static float nvfp4_clampf(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static uint8_t nvfp4_fp32_to_e4m3(float x) {
+    struct e4m3_table {
+        float vals[256];
+        uint8_t valid[256];
+    };
+    static const e4m3_table table = []() {
+        e4m3_table t{};
+        for (int i = 0; i < 256; ++i) {
+            const float v = GGML_E4M3_TO_FP32((uint8_t) i);
+            t.vals[i] = v;
+            t.valid[i] = std::isfinite(v) ? 1 : 0;
+        }
+        return t;
+    }();
+
+    if (!std::isfinite(x)) {
+        return 0;
+    }
+
+    float best_err = std::numeric_limits<float>::infinity();
+    uint8_t best_i = 0;
+    for (int i = 0; i < 256; ++i) {
+        if (!table.valid[i]) {
+            continue;
+        }
+        const float err = fabsf(table.vals[i] - x);
+        if (err < best_err) {
+            best_err = err;
+            best_i = (uint8_t) i;
+        }
+    }
+
+    return best_i;
+}
+
+static float nvfp4_fp4_quantize(float x) {
+    static const float kvalues_fp4[16] = {
+        0.0f,  0.5f,  1.0f,  1.5f,
+        2.0f,  3.0f,  4.0f,  6.0f,
+        0.0f, -0.5f, -1.0f, -1.5f,
+       -2.0f, -3.0f, -4.0f, -6.0f,
+    };
+
+    float best = kvalues_fp4[0];
+    float best_err = fabsf(x - best);
+    for (int i = 1; i < 16; ++i) {
+        const float err = fabsf(x - kvalues_fp4[i]);
+        if (err < best_err) {
+            best_err = err;
+            best = kvalues_fp4[i];
+        }
+    }
+    return best;
+}
+
+static void nvfp4_quantize_row_ref(
+        const float * x,
+        float * q,
+        float * scales,
+        int64_t ncol,
+        float global_scale) {
+    static const int64_t qk = QK_NVFP4;
+    static const float k_fp4_max = 6.0f;
+
+    GGML_ASSERT(ncol % qk == 0);
+
+    const int64_t nblocks = ncol / qk;
+    for (int64_t ib = 0; ib < nblocks; ++ib) {
+        const int64_t base = ib * qk;
+        float vmax = 0.0f;
+        for (int64_t i = 0; i < qk; ++i) {
+            vmax = std::max(vmax, fabsf(x[base + i]));
+        }
+
+        float scale = global_scale * (vmax / k_fp4_max);
+        scale = nvfp4_clampf(scale, -448.0f, 448.0f);
+        const uint8_t scale_q = nvfp4_fp32_to_e4m3(scale);
+        const float scale_f = GGML_E4M3_TO_FP32(scale_q);
+        scales[ib] = scale_f;
+
+        const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
+        for (int64_t i = 0; i < qk; ++i) {
+            const float scaled = x[base + i] * inv_scale;
+            const float clipped = nvfp4_clampf(scaled, -k_fp4_max, k_fp4_max);
+            q[base + i] = nvfp4_fp4_quantize(clipped);
+        }
+    }
+}
+
+static void nvfp4_dequantize_row_ref(
+        const float * q,
+        const float * scales,
+        float * y,
+        int64_t ncol,
+        float global_scale) {
+    static const int64_t qk = QK_NVFP4;
+
+    GGML_ASSERT(ncol % qk == 0);
+
+    const int64_t nblocks = ncol / qk;
+    for (int64_t ib = 0; ib < nblocks; ++ib) {
+        const float scale_f = scales[ib];
+        const float out_scale = (global_scale != 0.0f) ? (scale_f / global_scale) : 0.0f;
+        const int64_t base = ib * qk;
+        for (int64_t i = 0; i < qk; ++i) {
+            y[base + i] = q[base + i] * out_scale;
+        }
+    }
+}
+
+static void nvfp4_to_f32_ref(
+        const float * x,
+        float * y,
+        int64_t ncol,
+        float global_scale,
+        std::vector<float> & q_buf,
+        std::vector<float> & scale_buf) {
+    q_buf.resize(ncol);
+    scale_buf.resize(ncol / QK_NVFP4);
+    nvfp4_quantize_row_ref(x, q_buf.data(), scale_buf.data(), ncol, global_scale);
+    nvfp4_dequantize_row_ref(q_buf.data(), scale_buf.data(), y, ncol, global_scale);
+}
+
+static bool nvfp4_fetch_scalar_f32(const ggml_tensor * t, float & out) {
+    if (!t || !t->data) {
+        return false;
+    }
+    const void * src = t->data;
+    switch (t->type) {
+        case GGML_TYPE_F32: {
+            float v = 0.0f;
+            memcpy(&v, src, sizeof(v));
+            out = v;
+            return true;
+        }
+        case GGML_TYPE_F16: {
+            ggml_fp16_t v = 0;
+            memcpy(&v, src, sizeof(v));
+            out = ggml_fp16_to_fp32(v);
+            return true;
+        }
+        case GGML_TYPE_BF16: {
+            ggml_bf16_t v = { 0 };
+            memcpy(&v, src, sizeof(v));
+            out = ggml_bf16_to_fp32(v);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+static void nvfp4_to_f32_op_impl(
+        ggml_tensor * dst,
+        const ggml_tensor * a,
+        const ggml_tensor * b,
+        int ith,
+        int nth,
+        void * userdata) {
+    GGML_UNUSED(userdata);
+
+    GGML_ASSERT(a->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(a));
+    GGML_ASSERT(ggml_is_contiguous(dst));
+
+    float global_scale = 0.0f;
+    if (!nvfp4_fetch_scalar_f32(b, global_scale)) {
+        memcpy(dst->data, a->data, ggml_nbytes(a));
+        return;
+    }
+
+    global_scale = (global_scale != 0.0f) ? (1.0f / global_scale) : 0.0f;
+
+    const int64_t ncols = a->ne[0];
+    const int64_t nrows = a->ne[1];
+    if (a->ne[2] != 1 || a->ne[3] != 1 || ncols % QK_NVFP4 != 0 || global_scale == 0.0f) {
+        memcpy(dst->data, a->data, ggml_nbytes(a));
+        return;
+    }
+
+    std::vector<float> q_buf;
+    std::vector<float> scale_buf;
+
+    const int64_t row_start = (nrows * ith) / nth;
+    const int64_t row_end   = (nrows * (ith + 1)) / nth;
+
+    const size_t row_stride = a->nb[1] / sizeof(float);
+    for (int64_t r = row_start; r < row_end; ++r) {
+        const float * x = (const float *) a->data + r * row_stride;
+        float * y = (float *) dst->data + r * row_stride;
+        const bool log_once = (ith == 0) && (r == row_start);
+        float before_vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const int64_t log_cnt = std::min<int64_t>(4, ncols);
+        if (log_once) {
+            for (int64_t i = 0; i < log_cnt; ++i) {
+                before_vals[i] = x[i];
+            }
+        }
+
+        nvfp4_to_f32_ref(x, y, ncols, global_scale, q_buf, scale_buf);
+
+        if (log_once) {
+            float after_vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (int64_t i = 0; i < log_cnt; ++i) {
+                after_vals[i] = y[i];
+            }
+            fprintf(
+                stderr,
+                "[NVFP4-DEQUANT] input before: x[:4]=[%.6f, %.6f, %.6f, %.6f], input_global_scale=%.6f\n",
+                before_vals[0], before_vals[1], before_vals[2], before_vals[3],
+                global_scale);
+            fprintf(
+                stderr,
+                "[NVFP4-DEQUANT]input afeter: x[:4]=[%.6f, %.6f, %.6f, %.6f]\n",
+                after_vals[0], after_vals[1], after_vals[2], after_vals[3]);
+        }
+    }
+}
+
+} // namespace
+
+extern "C" void ggml_nvfp4_to_f32_op(
+        ggml_tensor * dst,
+        const ggml_tensor * a,
+        const ggml_tensor * b,
+        int ith,
+        int nth,
+        void * userdata) {
+    nvfp4_to_f32_op_impl(dst, a, b, ith, nth, userdata);
+}
 
 const char * llm_type_name(llm_type type) {
     switch (type) {
@@ -3008,6 +3255,31 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, 0);
                         layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, 0);
                         layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
+
+                        // // 判断 ffn_up 是否是 nvpf4 精度，如果是，则增加 llama-model.h 中定义的 nvfp4 relevant tensors 的初始化
+                        if (layer.wq->type == GGML_TYPE_NVFP4) {
+                            layer.wq_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_Q, "input_scale", i), {1}, 0);
+                            layer.wk_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_K, "input_scale", i), {1}, 0);
+                            layer.wv_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_V, "input_scale", i), {1}, 0);
+                            layer.wo_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "input_scale", i), {1}, 0);
+
+                            layer.wq_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight_scale_2", i), {1}, 0);
+                            layer.wk_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_K, "weight_scale_2", i), {1}, 0);
+                            layer.wv_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_V, "weight_scale_2", i), {1}, 0);
+                            layer.wo_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight_scale_2", i), {1}, 0);
+
+                            layer.wk_k_scale = create_tensor(tn(LLM_TENSOR_ATTN_K, "k_scale", i), {1}, 0);
+                            layer.wv_v_scale = create_tensor(tn(LLM_TENSOR_ATTN_V, "v_scale", i), {1}, 0);
+
+                            layer.ffn_gate_inp_scale = create_tensor(tn(LLM_TENSOR_FFN_GATE, "input_scale", i), {1}, 0);
+                            layer.ffn_down_inp_scale = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "input_scale", i), {1}, 0);
+                            layer.ffn_up_inp_scale   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "input_scale", i), {1}, 0);
+
+                            layer.ffn_gate_weight_scale_2 = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight_scale_2", i), {1}, 0);
+                            layer.ffn_down_weight_scale_2 = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight_scale_2", i), {1}, 0);
+                            layer.ffn_up_weight_scale_2   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight_scale_2", i), {1}, 0);
+                        }
+
                     }
                 } break;
             case LLM_ARCH_QWEN3MOE:
@@ -5668,6 +5940,206 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         auto & bufs = it.second;
         if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
             return false;
+        }
+    }
+
+    if (getenv("LLAMA_NVFP4_TOK_EMBD_CPU_STATS") != nullptr) {
+        auto log_f32_stats = [&](const ggml_tensor * t, const char * label) {
+            if (!t) {
+                LLAMA_LOG_WARN("%s: %s tensor missing\n", __func__, label);
+                return;
+            }
+            if (t->type != GGML_TYPE_F32) {
+                LLAMA_LOG_WARN("%s: %s type=%s not f32, skipping cpu stats\n",
+                        __func__, label, ggml_type_name(t->type));
+                return;
+            }
+
+            const int64_t nbytes = ggml_nbytes(t);
+            if (nbytes <= 0) {
+                LLAMA_LOG_WARN("%s: %s has no data\n", __func__, label);
+                return;
+            }
+
+            const char * buf_name = t->buffer ? ggml_backend_buffer_name(t->buffer) : "none";
+            const int host = t->buffer ? (int) ggml_backend_buffer_is_host(t->buffer) : -1;
+
+            const size_t chunk_bytes = 4 * 1024 * 1024;
+            const size_t max_bytes = (size_t) nbytes;
+            std::vector<float> buf(chunk_bytes / sizeof(float));
+
+            int64_t nan = 0;
+            int64_t inf = 0;
+            int64_t finite = 0;
+            float min_v = std::numeric_limits<float>::infinity();
+            float max_v = -std::numeric_limits<float>::infinity();
+
+            for (size_t offset = 0; offset < max_bytes; offset += chunk_bytes) {
+                const size_t cur_bytes = std::min(chunk_bytes, max_bytes - offset);
+                GGML_ASSERT(cur_bytes % sizeof(float) == 0);
+                const size_t n = cur_bytes / sizeof(float);
+
+                ggml_backend_tensor_get(t, buf.data(), offset, cur_bytes);
+                for (size_t i = 0; i < n; ++i) {
+                    const float v = buf[i];
+                    if (std::isnan(v)) {
+                        nan++;
+                        continue;
+                    }
+                    if (std::isinf(v)) {
+                        inf++;
+                        continue;
+                    }
+                    finite++;
+                    min_v = std::min(min_v, v);
+                    max_v = std::max(max_v, v);
+                }
+            }
+
+            const float min_out = finite ? min_v : 0.0f;
+            const float max_out = finite ? max_v : 0.0f;
+            LLAMA_LOG_INFO("%s: %s cpu stats: nbytes=%" PRId64 " min=%.6g max=%.6g nan=%" PRId64 " inf=%" PRId64 " buf=%s host=%d\n",
+                    __func__, label, nbytes, min_out, max_out, nan, inf, buf_name, host);
+        };
+
+        log_f32_stats(tok_embd, "tok_embd");
+    }
+
+    if (getenv("LLAMA_NVFP4_DEBUG") != nullptr) {
+        auto fetch_scalar = [&](const ggml_tensor * t, float & out) -> bool {
+            if (!t) {
+                return false;
+            }
+            uint8_t tmp[4] = { 0, 0, 0, 0 };
+            const size_t nbytes = ggml_nbytes(t);
+            if (nbytes > sizeof(tmp)) {
+                return false;
+            }
+            ggml_backend_tensor_get(t, tmp, 0, nbytes);
+            switch (t->type) {
+                case GGML_TYPE_F32: {
+                    float v = 0.0f;
+                    memcpy(&v, tmp, sizeof(v));
+                    out = v;
+                    return true;
+                }
+                case GGML_TYPE_F16: {
+                    ggml_fp16_t v = 0;
+                    memcpy(&v, tmp, sizeof(v));
+                    out = ggml_fp16_to_fp32(v);
+                    return true;
+                }
+                case GGML_TYPE_BF16: {
+                    ggml_bf16_t v = { 0 };
+                    memcpy(&v, tmp, sizeof(v));
+                    out = ggml_bf16_to_fp32(v);
+                    return true;
+                }
+                default:
+                    return false;
+            }
+        };
+
+        int nvfp4_layers = 0;
+        int total_scales = 0;
+        int invalid_scales = 0;
+        int missing_scales = 0;
+
+        auto check_scale = [&](int il, const char * name, const ggml_tensor * t, bool verbose) {
+            if (!t) {
+                missing_scales++;
+                if (verbose) {
+                    LLAMA_LOG_WARN("%s: nvfp4 scale missing: layer=%d tensor=%s\n", __func__, il, name);
+                }
+                return;
+            }
+            float value = 0.0f;
+            if (!fetch_scalar(t, value)) {
+                invalid_scales++;
+                if (verbose) {
+                    LLAMA_LOG_WARN("%s: nvfp4 scale read failed: layer=%d tensor=%s type=%d\n", __func__, il, name, (int) t->type);
+                }
+                return;
+            }
+            total_scales++;
+            const bool ok = std::isfinite(value) && value != 0.0f;
+            if (verbose) {
+                const float inv = (value != 0.0f && std::isfinite(value)) ? (1.0f / value) : 0.0f;
+                LLAMA_LOG_INFO("%s: nvfp4 scale: layer=%d tensor=%s value=%.9g inv=%.9g\n",
+                               __func__, il, name, value, inv);
+            }
+            if (!ok) {
+                invalid_scales++;
+                LLAMA_LOG_WARN("%s: nvfp4 scale invalid: layer=%d tensor=%s value=%.9g\n", __func__, il, name, value);
+            }
+        };
+
+        for (int il = 0; il < n_layer; ++il) {
+            const auto & layer = layers[il];
+            if (!layer.wq || layer.wq->type != GGML_TYPE_NVFP4) {
+                continue;
+            }
+            nvfp4_layers++;
+            const bool verbose = il == 0;
+
+            check_scale(il, "wq.input_scale", layer.wq_inp_scale, verbose);
+            check_scale(il, "wk.input_scale", layer.wk_inp_scale, verbose);
+            check_scale(il, "wv.input_scale", layer.wv_inp_scale, verbose);
+            check_scale(il, "wo.input_scale", layer.wo_inp_scale, verbose);
+
+            check_scale(il, "wq.weight_scale_2", layer.wq_weight_scale_2, verbose);
+            check_scale(il, "wk.weight_scale_2", layer.wk_weight_scale_2, verbose);
+            check_scale(il, "wv.weight_scale_2", layer.wv_weight_scale_2, verbose);
+            check_scale(il, "wo.weight_scale_2", layer.wo_weight_scale_2, verbose);
+
+            check_scale(il, "ffn_up.input_scale",   layer.ffn_up_inp_scale, verbose);
+            check_scale(il, "ffn_gate.input_scale", layer.ffn_gate_inp_scale, verbose);
+            check_scale(il, "ffn_down.input_scale", layer.ffn_down_inp_scale, verbose);
+
+            check_scale(il, "ffn_up.weight_scale_2",   layer.ffn_up_weight_scale_2, verbose);
+            check_scale(il, "ffn_gate.weight_scale_2", layer.ffn_gate_weight_scale_2, verbose);
+            check_scale(il, "ffn_down.weight_scale_2", layer.ffn_down_weight_scale_2, verbose);
+        }
+
+        LLAMA_LOG_INFO("%s: nvfp4 scale check: layers=%d total=%d invalid=%d missing=%d\n",
+                       __func__, nvfp4_layers, total_scales, invalid_scales, missing_scales);
+
+        if (tok_embd && tok_embd->type == GGML_TYPE_NVFP4) {
+            const int64_t nbytes = ggml_nbytes(tok_embd);
+            const int64_t nblocks = nbytes / (int64_t) sizeof(block_nvfp4);
+            const int64_t sample_blocks = std::min<int64_t>(nblocks, 64);
+            if (sample_blocks > 0) {
+                std::vector<block_nvfp4> blocks(sample_blocks);
+                ggml_backend_tensor_get(tok_embd, blocks.data(), 0, sample_blocks * sizeof(block_nvfp4));
+
+                int nan_scales = 0;
+                int nan_bits = 0;
+                float min_scale = std::numeric_limits<float>::infinity();
+                float max_scale = -std::numeric_limits<float>::infinity();
+                int finite_scales = 0;
+
+                for (int64_t i = 0; i < sample_blocks; ++i) {
+                    const uint8_t e = blocks[i].e;
+                    if ((e & 0x7F) == 0x7F) {
+                        nan_bits++;
+                    }
+                    const float d = GGML_E4M3_TO_FP32_HALF(e);
+                    if (std::isnan(d)) {
+                        nan_scales++;
+                        continue;
+                    }
+                    if (std::isfinite(d)) {
+                        min_scale = std::min(min_scale, d);
+                        max_scale = std::max(max_scale, d);
+                        finite_scales++;
+                    }
+                }
+
+                const float min_out = finite_scales ? min_scale : 0.0f;
+                const float max_out = finite_scales ? max_scale : 0.0f;
+                LLAMA_LOG_INFO("%s: nvfp4 tok_embd scales: blocks=%" PRId64 " sample=%" PRId64 " nan=%d nan_bits=%d min=%.6g max=%.6g\n",
+                        __func__, nblocks, sample_blocks, nan_scales, nan_bits, min_out, max_out);
+            }
         }
     }
 
@@ -8744,6 +9216,46 @@ struct llm_build_qwen3 : public llm_graph_context {
         ggml_tensor * cur;
         ggml_tensor * inpL;
 
+        auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * w_inp_scale, ggml_tensor * x) -> ggml_tensor * {
+            ggml_tensor * x_used = x;
+            if (w->type == GGML_TYPE_NVFP4 && w_inp_scale) {
+                if (x_used->type != GGML_TYPE_F32) {
+                    x_used = ggml_cast(ctx0, x_used, GGML_TYPE_F32);
+                }
+                x_used = ggml_map_custom2(ctx0, x_used, w_inp_scale, ggml_nvfp4_to_f32_op, GGML_N_TASKS_MAX, nullptr);
+            }
+
+            ggml_tensor * res = ggml_mul_mat(ctx0, w, x_used);
+            if (w_scale) {
+                ggml_tensor * w_scale_f32 = w_scale;
+                if (w_scale->type != GGML_TYPE_F32) {
+                    w_scale_f32 = ggml_cast(ctx0, w_scale, GGML_TYPE_F32);
+                }
+                // Apply scalar scale on output to avoid dequantizing full weights per token.
+                res = ggml_mul(ctx0, res, w_scale_f32);
+            }
+
+            for (const auto & lora : *loras) {
+                llama_adapter_lora_weight * lw = lora.first->get_weight(w);
+                if (lw == nullptr) {
+                    continue;
+                }
+
+                const float adapter_scale = lora.second;
+                const float scale = lw->get_scale(lora.first->alpha, adapter_scale);
+
+                ggml_tensor * ab_cur = ggml_mul_mat(
+                        ctx0, lw->b,
+                        ggml_mul_mat(ctx0, lw->a, x_used)
+                        );
+
+                ab_cur = ggml_scale(ctx0, ab_cur, scale);
+                res = ggml_add(ctx0, res, ab_cur);
+            }
+
+            return res;
+        };
+
         inpL = build_inp_embd(model.tok_embd);
 
         // inp_pos - contains the positions
@@ -8765,14 +9277,35 @@ struct llm_build_qwen3 : public llm_graph_context {
             // self-attention
             {
                 // compute Q and K and RoPE them
-                ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
-                cb(Qcur, "Qcur", il);
+                ggml_tensor * Qcur = build_lora_mm_scaled(
+                        model.layers[il].wq,
+                        model.layers[il].wq_weight_scale_2,
+                        model.layers[il].wq_inp_scale,
+                        cur);
+                cb(Qcur, "Qcur-scaled", il);
 
-                ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
-                cb(Kcur, "Kcur", il);
+                ggml_tensor * Kcur = build_lora_mm_scaled(
+                        model.layers[il].wk,
+                        model.layers[il].wk_weight_scale_2,
+                        model.layers[il].wk_inp_scale,
+                        cur);
+                cb(Kcur, "Kcur-scaled", il);
 
-                ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
-                cb(Vcur, "Vcur", il);
+                ggml_tensor * Vcur = build_lora_mm_scaled(
+                        model.layers[il].wv,
+                        model.layers[il].wv_weight_scale_2,
+                        model.layers[il].wv_inp_scale,
+                        cur);
+                cb(Vcur, "Vcur-scaled", il);
+
+                // if (model.layers[il].wk_k_scale) {
+                //     Kcur = ggml_mul(ctx0, Kcur, model.layers[il].wk_k_scale);
+                //     cb(Kcur, "Kcur_k_scaled", il);
+                // }
+                // if (model.layers[il].wv_v_scale) {
+                //     Vcur = ggml_mul(ctx0, Vcur, model.layers[il].wv_v_scale);
+                //     cb(Vcur, "Vcur_v_scaled", il);
+                // }
 
                 Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
                 Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
@@ -8801,8 +9334,17 @@ struct llm_build_qwen3 : public llm_graph_context {
                 cb(Vcur, "Vcur", il);
 
                 cur = build_attn(inp_attn,
-                        model.layers[il].wo, model.layers[il].bo,
+                        nullptr, nullptr,
                         Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+
+                cur = build_lora_mm_scaled(
+                        model.layers[il].wo,
+                        model.layers[il].wo_weight_scale_2,
+                        model.layers[il].wo_inp_scale,
+                        cur);
+                if (model.layers[il].bo) {
+                    cur = ggml_add(ctx0, cur, model.layers[il].bo);
+                }
             }
 
             if (il == n_layer - 1 && inp_out_ids) {
@@ -8819,12 +9361,31 @@ struct llm_build_qwen3 : public llm_graph_context {
                     LLM_NORM_RMS, il);
             cb(cur, "ffn_norm", il);
 
-            cur = build_ffn(cur,
-                    model.layers[il].ffn_up,   NULL, NULL,
-                    model.layers[il].ffn_gate, NULL, NULL,
-                    model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+            {
+                ggml_tensor * up = build_lora_mm_scaled(
+                        model.layers[il].ffn_up,
+                        model.layers[il].ffn_up_weight_scale_2,
+                        model.layers[il].ffn_up_inp_scale,
+                        cur);
+                cb(up, "ffn_up", il);
+
+                ggml_tensor * gate = build_lora_mm_scaled(
+                        model.layers[il].ffn_gate,
+                        model.layers[il].ffn_gate_weight_scale_2,
+                        model.layers[il].ffn_gate_inp_scale,
+                        cur);
+                cb(gate, "ffn_gate", il);
+
+                cur = ggml_swiglu_split(ctx0, gate, up);
+                cb(cur, "ffn_swiglu", il);
+
+                cur = build_lora_mm_scaled(
+                        model.layers[il].ffn_down,
+                        model.layers[il].ffn_down_weight_scale_2,
+                        model.layers[il].ffn_down_inp_scale,
+                        cur);
+                cb(cur, "ffn_down", il);
+            }
             cb(cur, "ffn_out", il);
 
             cur = ggml_add(ctx0, cur, ffn_inp);

@@ -20,6 +20,7 @@ add_library(llama
             llama-hparams.cpp
             llama-impl.cpp
             llama-io.cpp
+            llama-log.cpp
             llama-kv-cache-unified.cpp
             llama-kv-cache-unified-iswa.cpp
             llama-memory.cpp
