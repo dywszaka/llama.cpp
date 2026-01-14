@@ -261,6 +261,46 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
     return d * sumi;
 }
 
+#define VDR_NVFP4_Q8_1_MMVQ 1
+#define VDR_NVFP4_Q8_1_MMQ  4
+
+static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_nvfp4 * bq4 = (const block_nvfp4 *) vbq + kbx;
+
+    const int q8_half = (kbx & 1) ? (QK8_1/2)/4 : 0;
+    const int * q8 = (const int *) bq8_1->qs + q8_half + 2*iqs;
+
+    int sumi = 0;
+#pragma unroll
+    for (int l = 0; l < VDR_NVFP4_Q8_1_MMVQ; ++l) {
+        const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
+        const int2 v = get_int_from_table_16(aux_q4, kvalues_nvfp4);
+
+        const uint32_t q8_0 = (uint32_t) q8[2*l + 0];
+        const uint32_t q8_1 = (uint32_t) q8[2*l + 1];
+
+        const uint32_t b0 =  q8_0        & 0xFFu;
+        const uint32_t b1 = (q8_0 >>  8) & 0xFFu;
+        const uint32_t b2 = (q8_0 >> 16) & 0xFFu;
+        const uint32_t b3 = (q8_0 >> 24) & 0xFFu;
+        const uint32_t b4 =  q8_1        & 0xFFu;
+        const uint32_t b5 = (q8_1 >>  8) & 0xFFu;
+        const uint32_t b6 = (q8_1 >> 16) & 0xFFu;
+        const uint32_t b7 = (q8_1 >> 24) & 0xFFu;
+
+        const uint32_t even = b0 | (b2 << 8) | (b4 << 16) | (b6 << 24);
+        const uint32_t odd  = b1 | (b3 << 8) | (b5 << 16) | (b7 << 24);
+
+        sumi = ggml_cuda_dp4a(v.x, (int) even, sumi);
+        sumi = ggml_cuda_dp4a(v.y, (int) odd,  sumi);
+    }
+
+    const float d = ggml_cuda_e4m3_to_fp32_half(bq4->e) * __low2float(bq8_1->ds);
+    return d * sumi;
+}
+
 #define VDR_Q2_K_Q8_1_MMVQ 1
 #define VDR_Q2_K_Q8_1_MMQ  4
 

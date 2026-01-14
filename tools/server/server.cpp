@@ -70,6 +70,35 @@ enum server_task_type {
     SERVER_TASK_TYPE_SET_LORA,
 };
 
+static std::string escape_token_piece(const std::string & text, size_t max_len) {
+    std::string out;
+    out.reserve(std::min(text.size(), max_len) * 4);
+
+    size_t count = 0;
+    for (unsigned char c : text) {
+        if (count++ >= max_len) {
+            out += "...";
+            break;
+        }
+        switch (c) {
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            case '\\': out += "\\\\"; break;
+            default:
+                if (c >= 0x20 && c < 0x7f) {
+                    out.push_back(static_cast<char>(c));
+                } else {
+                    char buf[5];
+                    snprintf(buf, sizeof(buf), "\\x%02X", c);
+                    out += buf;
+                }
+                break;
+        }
+    }
+    return out;
+}
+
 enum oaicompat_type {
     OAICOMPAT_TYPE_NONE,
     OAICOMPAT_TYPE_CHAT,
@@ -2297,6 +2326,10 @@ struct server_context {
         slot.state = SLOT_STATE_STARTED;
 
         SLT_INF(slot, "%s", "processing task\n");
+        SLT_INF(slot,
+                "params: stream=%d, n_predict=%d, n_ctx=%d, top_k=%d, top_p=%.3f, temp=%.3f\n",
+                slot.params.stream ? 1 : 0, slot.params.n_predict, slot.n_ctx,
+                slot.params.sampling.top_k, slot.params.sampling.top_p, slot.params.sampling.temp);
 
         return true;
     }
@@ -2312,7 +2345,14 @@ struct server_context {
     bool process_token(completion_token_output & result, server_slot & slot) {
         // remember which tokens were sampled - used for repetition penalties during sampling
         const std::string token_str = result.text_to_send;
+        const bool is_eog = llama_vocab_is_eog(vocab, result.tok);
         slot.sampled = result.tok;
+
+        if (slot.n_decoded <= 5 || token_str.empty()) {
+            const std::string token_dbg = escape_token_piece(token_str, 64);
+            SLT_INF(slot, "sampled token: tok=%d, piece_len=%zu, is_eog=%d, piece='%s'\n",
+                    result.tok, token_str.size(), is_eog ? 1 : 0, token_dbg.c_str());
+        }
 
         slot.generated_text += token_str;
         if (slot.params.return_tokens) {
@@ -2349,6 +2389,13 @@ struct server_context {
                 // add the token to slot queue and cache
             } else {
                 result.text_to_send = "";
+            }
+
+            if (result.text_to_send.empty() && (slot.n_decoded <= 5 || token_str.empty())) {
+                SLT_INF(slot,
+                        "empty send_text: incomplete=%d, send_text=%d, generated=%zu, sent=%zu\n",
+                        incomplete ? 1 : 0, send_text ? 1 : 0,
+                        slot.generated_text.size(), slot.n_sent_text);
             }
 
             slot.add_token(result);
@@ -2436,7 +2483,7 @@ struct server_context {
                     slot.n_decoded, slot.n_prompt_tokens, slot.n_past, slot.n_ctx);
         }
 
-        if (llama_vocab_is_eog(vocab, result.tok)) {
+        if (is_eog) {
             slot.stop           = STOP_TYPE_EOS;
             slot.has_next_token = false;
 
@@ -2560,6 +2607,12 @@ struct server_context {
         // populate res.probs_output
         if (slot.params.sampling.n_probs > 0) {
             res->prob_output = tkn; // copy the token probs
+        }
+
+        if (slot.n_decoded <= 5 || tkn.text_to_send.empty()) {
+            const std::string content_dbg = escape_token_piece(tkn.text_to_send, 64);
+            SLT_INF(slot, "partial send: tok=%d, content_len=%zu, content='%s'\n",
+                    tkn.tok, tkn.text_to_send.size(), content_dbg.c_str());
         }
 
         // populate timings if this is final response or timings_per_token is enabled
@@ -3506,7 +3559,11 @@ struct server_context {
                 batch.logits   + i,
             };
 
+            const int64_t t_decode_start_us = ggml_time_us();
+            SRV_INF("llama_decode begin, n_tokens = %d, n_batch = %d, i = %d\n", n_tokens, n_batch, i);
             const int ret = llama_decode(ctx, batch_view);
+            SRV_INF("llama_decode end, n_tokens = %d, n_batch = %d, i = %d, ret = %d, dt = %.3f ms\n",
+                    n_tokens, n_batch, i, ret, (ggml_time_us() - t_decode_start_us) / 1000.0);
 
             metrics.on_decoded(slots);
 
@@ -3711,15 +3768,19 @@ struct server_context {
                 common_batch_add  (slot.batch_spec, id, slot.n_past, { slot.id }, true);
 
                 for (size_t i = 0; i < draft.size(); ++i) {
-                    common_batch_add(slot.batch_spec, draft[i], slot.n_past + 1 + i, { slot.id }, true);
-                }
+                common_batch_add(slot.batch_spec, draft[i], slot.n_past + 1 + i, { slot.id }, true);
+            }
 
-                SLT_DBG(slot, "decoding speculative batch, size = %d\n", slot.batch_spec.n_tokens);
+            SLT_DBG(slot, "decoding speculative batch, size = %d\n", slot.batch_spec.n_tokens);
 
-                llama_decode(ctx, slot.batch_spec);
+            const int64_t t_decode_spec_start_us = ggml_time_us();
+            SLT_INF(slot, "llama_decode speculative begin, n_tokens = %d\n", slot.batch_spec.n_tokens);
+            llama_decode(ctx, slot.batch_spec);
+            SLT_INF(slot, "llama_decode speculative end, n_tokens = %d, dt = %.3f ms\n",
+                    slot.batch_spec.n_tokens, (ggml_time_us() - t_decode_spec_start_us) / 1000.0);
 
-                // the accepted tokens from the speculation
-                const auto ids = common_sampler_sample_and_accept_n(slot.smpl, ctx, draft);
+            // the accepted tokens from the speculation
+            const auto ids = common_sampler_sample_and_accept_n(slot.smpl, ctx, draft);
 
                 slot.n_past    += ids.size();
                 slot.n_decoded += ids.size();
