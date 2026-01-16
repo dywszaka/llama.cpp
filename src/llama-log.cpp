@@ -74,6 +74,7 @@ static bool env_log_all = false;
 static bool env_log_src = false;
 static bool env_log_buf = false;
 static bool env_logits_debug = false;
+static bool env_dequant_debug = false;
 static bool env_tensor_pin = false;
 
 static void ensure_env_cached() {
@@ -87,6 +88,7 @@ static void ensure_env_cached() {
     env_log_src = getenv("LLAMA_NVFP4_TENSOR_DEBUG_SRC") != nullptr;
     env_log_buf = getenv("LLAMA_NVFP4_TENSOR_DEBUG_BUF") != nullptr;
     env_logits_debug = getenv("LLAMA_NVFP4_LOGITS_DEBUG") != nullptr;
+    env_dequant_debug = getenv("LLAMA_NVFP4_DEQUANT_DEBUG") != nullptr;
     env_tensor_pin = getenv("LLAMA_NVFP4_TENSOR_DEBUG_PIN") != nullptr;
 }
 
@@ -113,6 +115,11 @@ bool nvfp4_log_buf() {
 bool nvfp4_logits_debug() {
     ensure_env_cached();
     return env_logits_debug;
+}
+
+bool nvfp4_dequant_debug() {
+    ensure_env_cached();
+    return env_dequant_debug;
 }
 
 bool nvfp4_tensor_pin_enabled() {

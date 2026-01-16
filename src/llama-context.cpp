@@ -1498,22 +1498,6 @@ llm_graph_cb llama_context::graph_get_cb() const {
 
         llama_log::nvfp4_pin_tensor_if_match(cur);
 
-        if (getenv("LLAMA_NVFP4_FORCE_NORM_CPU") != nullptr && backend_cpu != nullptr) {
-            if (strcmp(name, "norm") == 0 ||
-                strcmp(name, "attn_norm") == 0 ||
-                strcmp(name, "ffn_norm") == 0 ||
-                strcmp(name, "result_norm") == 0) {
-                if (ggml_backend_supports_op(backend_cpu, cur)) {
-                    ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend_cpu);
-                    static bool logged = false;
-                    if (!logged) {
-                        LLAMA_LOG_INFO("%s: forcing norm ops to CPU backend\n", __func__);
-                        logged = true;
-                    }
-                }
-            }
-        }
-
         if (!cparams.offload_kqv) {
             if (strcmp(name, "kqv_merged_cont") == 0) {
                 // all nodes between the KV store and the attention output are run on the CPU
@@ -1529,16 +1513,6 @@ llm_graph_cb llama_context::graph_get_cb() const {
                 const auto & dev_layer = model.dev_layer(il);
                 for (const auto & backend : backends) {
                     if (ggml_backend_get_device(backend.get()) == dev_layer) {
-                        if (ggml_backend_supports_op(backend.get(), cur)) {
-                            ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend.get());
-                        }
-                    }
-                }
-            }
-            if (il == -1 && strcmp(name, "inp_embd") == 0 && model.hparams.n_layer > 0) {
-                const auto & dev_layer0 = model.dev_layer(0);
-                for (const auto & backend : backends) {
-                    if (ggml_backend_get_device(backend.get()) == dev_layer0) {
                         if (ggml_backend_supports_op(backend.get(), cur)) {
                             ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend.get());
                         }

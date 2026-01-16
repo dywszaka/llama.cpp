@@ -432,29 +432,8 @@ static void llama_sampler_chain_apply(struct llama_sampler * smpl, llama_token_d
 
     time_meas tm(chain->t_sample_us, chain->params.no_perf);
 
-    static const bool sampler_chain_debug = (getenv("LLAMA_SAMPLER_CHAIN_DEBUG") != nullptr);
-    if (sampler_chain_debug) {
-        LLAMA_LOG_INFO("sampler_chain: begin (n_samplers=%zu, cur_p->size=%zu)\n",
-                chain->samplers.size(), cur_p ? cur_p->size : 0);
-    }
-
     for (auto * smpl : chain->samplers) {
-        const char * name = sampler_chain_debug ? llama_sampler_name(smpl) : nullptr;
-        const int64_t t_start_us = sampler_chain_debug ? ggml_time_us() : 0;
-        if (sampler_chain_debug) {
-            LLAMA_LOG_INFO("sampler_chain: apply begin (%s)\n", name ? name : "(null)");
-        }
-
         llama_sampler_apply(smpl, cur_p);
-
-        if (sampler_chain_debug) {
-            const double t_ms = (ggml_time_us() - t_start_us) / 1000.0;
-            LLAMA_LOG_INFO("sampler_chain: apply end (%s, dt=%.3f ms)\n", name ? name : "(null)", t_ms);
-        }
-    }
-
-    if (sampler_chain_debug) {
-        LLAMA_LOG_INFO("%s", "sampler_chain: end\n");
     }
 }
 

@@ -220,54 +220,6 @@ void ggml_vec_dot_mxfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     *s = sumf;
 }
 
-void ggml_vec_dot_nvfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
-    assert(nrc == 1);
-    UNUSED(nrc);
-    UNUSED(bx);
-    UNUSED(by);
-    UNUSED(bs);
-    GGML_ASSERT(n % QK8_0 == 0);
-    GGML_ASSERT(n % QK_NVFP4 == 0);
-    static_assert(QK8_0 == 2 * QK_NVFP4, "q8_0 block must contain two nvfp4 blocks");
-
-    const block_nvfp4 * GGML_RESTRICT x = vx;
-    const block_q8_0  * GGML_RESTRICT y = vy;
-
-    const int nb = n / QK8_0;
-
-    float sumf = 0;
-
-    for (int ib = 0; ib < nb; ++ib) {
-        const block_nvfp4 * GGML_RESTRICT x0 = &x[2*ib + 0];
-        const block_nvfp4 * GGML_RESTRICT x1 = &x[2*ib + 1];
-        const int8_t  * GGML_RESTRICT yq = y[ib].qs;
-
-        int32_t sumi0 = 0;
-        int32_t sumi1 = 0;
-
-        // 每个 NVFP4 块有 8 个 uint8，每个包含 2 个 4 位值
-        // qs[j] 的低 4 位对应位置 2*j，高 4 位对应位置 2*j+1
-        // x0 块对应 Q8_0 块的前 16 个值，x1 块对应后 16 个值
-        for (int j = 0; j < QK_NVFP4/2; ++j) {
-            const int8_t xv00 = kvalues_nvfp4[x0->qs[j] & 0x0F];  // x0 的位置 2*j
-            const int8_t xv01 = kvalues_nvfp4[x0->qs[j] >> 4];    // x0 的位置 2*j+1
-            const int8_t xv10 = kvalues_nvfp4[x1->qs[j] & 0x0F];  // x1 的位置 2*j
-            const int8_t xv11 = kvalues_nvfp4[x1->qs[j] >> 4];    // x1 的位置 2*j+1
-
-            // x0 对应 y 的位置 0-15，x1 对应 y 的位置 16-31
-            sumi0 += yq[2*j + 0] * xv00;
-            sumi0 += yq[2*j + 1] * xv01;
-            sumi1 += yq[16 + 2*j + 0] * xv10;
-            sumi1 += yq[16 + 2*j + 1] * xv11;
-        }
-
-        const float d = GGML_CPU_FP16_TO_FP32(y[ib].d);
-        sumf += d * (GGML_E4M3_TO_FP32_HALF(x0->e) * sumi0 + GGML_E4M3_TO_FP32_HALF(x1->e) * sumi1);
-    }
-
-    *s = sumf;
-}
-
 void ggml_vec_dot_nvfp4_f32_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     assert(nrc == 1);
     UNUSED(nrc);

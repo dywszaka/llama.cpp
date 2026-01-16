@@ -1032,9 +1032,10 @@ bool llama_model_loader::load_all_data(
 
         size_t n_size = ggml_nbytes(cur);
 
+        const bool tensor_preview_enabled = getenv("LLAMA_TENSOR_PREVIEW_DEBUG") != nullptr;
         bool logged_preview = false;
         const auto log_tensor_preview = [&](const void * data_ptr, size_t available) {
-            if (logged_preview || data_ptr == nullptr || available == 0) {
+            if (!tensor_preview_enabled || logged_preview || data_ptr == nullptr || available == 0) {
                 return;
             }
             logged_preview = true;

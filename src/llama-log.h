@@ -25,6 +25,7 @@ bool nvfp4_log_all();
 bool nvfp4_log_src();
 bool nvfp4_log_buf();
 bool nvfp4_logits_debug();
+bool nvfp4_dequant_debug();
 bool nvfp4_tensor_pin_enabled();
 
 const std::vector<std::string> & nvfp4_debug_patterns();

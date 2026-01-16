@@ -5,6 +5,7 @@
 #include "llama-batch.h"
 #include "llama-cparams.h"
 #include "llama-model-loader.h"
+#include "llama-log.h"
 
 #include "llama-kv-cache-unified.h"
 #include "llama-kv-cache-unified-iswa.h"
@@ -231,7 +232,8 @@ static void nvfp4_to_f32_op_impl(
     for (int64_t r = row_start; r < row_end; ++r) {
         const float * x = (const float *) a->data + r * row_stride;
         float * y = (float *) dst->data + r * row_stride;
-        const bool log_once = (ith == 0) && (r == row_start);
+        const bool log_once = llama_log::nvfp4_dequant_debug() &&
+                              (ith == 0) && (r == row_start);
         float before_vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         const int64_t log_cnt = std::min<int64_t>(4, ncols);
         if (log_once) {
@@ -254,7 +256,7 @@ static void nvfp4_to_f32_op_impl(
                 global_scale);
             fprintf(
                 stderr,
-                "[NVFP4-DEQUANT]input afeter: x[:4]=[%.6f, %.6f, %.6f, %.6f]\n",
+                "[NVFP4-DEQUANT]input after: x[:4]=[%.6f, %.6f, %.6f, %.6f]\n",
                 after_vals[0], after_vals[1], after_vals[2], after_vals[3]);
         }
     }
@@ -5943,206 +5945,6 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    if (getenv("LLAMA_NVFP4_TOK_EMBD_CPU_STATS") != nullptr) {
-        auto log_f32_stats = [&](const ggml_tensor * t, const char * label) {
-            if (!t) {
-                LLAMA_LOG_WARN("%s: %s tensor missing\n", __func__, label);
-                return;
-            }
-            if (t->type != GGML_TYPE_F32) {
-                LLAMA_LOG_WARN("%s: %s type=%s not f32, skipping cpu stats\n",
-                        __func__, label, ggml_type_name(t->type));
-                return;
-            }
-
-            const int64_t nbytes = ggml_nbytes(t);
-            if (nbytes <= 0) {
-                LLAMA_LOG_WARN("%s: %s has no data\n", __func__, label);
-                return;
-            }
-
-            const char * buf_name = t->buffer ? ggml_backend_buffer_name(t->buffer) : "none";
-            const int host = t->buffer ? (int) ggml_backend_buffer_is_host(t->buffer) : -1;
-
-            const size_t chunk_bytes = 4 * 1024 * 1024;
-            const size_t max_bytes = (size_t) nbytes;
-            std::vector<float> buf(chunk_bytes / sizeof(float));
-
-            int64_t nan = 0;
-            int64_t inf = 0;
-            int64_t finite = 0;
-            float min_v = std::numeric_limits<float>::infinity();
-            float max_v = -std::numeric_limits<float>::infinity();
-
-            for (size_t offset = 0; offset < max_bytes; offset += chunk_bytes) {
-                const size_t cur_bytes = std::min(chunk_bytes, max_bytes - offset);
-                GGML_ASSERT(cur_bytes % sizeof(float) == 0);
-                const size_t n = cur_bytes / sizeof(float);
-
-                ggml_backend_tensor_get(t, buf.data(), offset, cur_bytes);
-                for (size_t i = 0; i < n; ++i) {
-                    const float v = buf[i];
-                    if (std::isnan(v)) {
-                        nan++;
-                        continue;
-                    }
-                    if (std::isinf(v)) {
-                        inf++;
-                        continue;
-                    }
-                    finite++;
-                    min_v = std::min(min_v, v);
-                    max_v = std::max(max_v, v);
-                }
-            }
-
-            const float min_out = finite ? min_v : 0.0f;
-            const float max_out = finite ? max_v : 0.0f;
-            LLAMA_LOG_INFO("%s: %s cpu stats: nbytes=%" PRId64 " min=%.6g max=%.6g nan=%" PRId64 " inf=%" PRId64 " buf=%s host=%d\n",
-                    __func__, label, nbytes, min_out, max_out, nan, inf, buf_name, host);
-        };
-
-        log_f32_stats(tok_embd, "tok_embd");
-    }
-
-    if (getenv("LLAMA_NVFP4_DEBUG") != nullptr) {
-        auto fetch_scalar = [&](const ggml_tensor * t, float & out) -> bool {
-            if (!t) {
-                return false;
-            }
-            uint8_t tmp[4] = { 0, 0, 0, 0 };
-            const size_t nbytes = ggml_nbytes(t);
-            if (nbytes > sizeof(tmp)) {
-                return false;
-            }
-            ggml_backend_tensor_get(t, tmp, 0, nbytes);
-            switch (t->type) {
-                case GGML_TYPE_F32: {
-                    float v = 0.0f;
-                    memcpy(&v, tmp, sizeof(v));
-                    out = v;
-                    return true;
-                }
-                case GGML_TYPE_F16: {
-                    ggml_fp16_t v = 0;
-                    memcpy(&v, tmp, sizeof(v));
-                    out = ggml_fp16_to_fp32(v);
-                    return true;
-                }
-                case GGML_TYPE_BF16: {
-                    ggml_bf16_t v = { 0 };
-                    memcpy(&v, tmp, sizeof(v));
-                    out = ggml_bf16_to_fp32(v);
-                    return true;
-                }
-                default:
-                    return false;
-            }
-        };
-
-        int nvfp4_layers = 0;
-        int total_scales = 0;
-        int invalid_scales = 0;
-        int missing_scales = 0;
-
-        auto check_scale = [&](int il, const char * name, const ggml_tensor * t, bool verbose) {
-            if (!t) {
-                missing_scales++;
-                if (verbose) {
-                    LLAMA_LOG_WARN("%s: nvfp4 scale missing: layer=%d tensor=%s\n", __func__, il, name);
-                }
-                return;
-            }
-            float value = 0.0f;
-            if (!fetch_scalar(t, value)) {
-                invalid_scales++;
-                if (verbose) {
-                    LLAMA_LOG_WARN("%s: nvfp4 scale read failed: layer=%d tensor=%s type=%d\n", __func__, il, name, (int) t->type);
-                }
-                return;
-            }
-            total_scales++;
-            const bool ok = std::isfinite(value) && value != 0.0f;
-            if (verbose) {
-                const float inv = (value != 0.0f && std::isfinite(value)) ? (1.0f / value) : 0.0f;
-                LLAMA_LOG_INFO("%s: nvfp4 scale: layer=%d tensor=%s value=%.9g inv=%.9g\n",
-                               __func__, il, name, value, inv);
-            }
-            if (!ok) {
-                invalid_scales++;
-                LLAMA_LOG_WARN("%s: nvfp4 scale invalid: layer=%d tensor=%s value=%.9g\n", __func__, il, name, value);
-            }
-        };
-
-        for (int il = 0; il < n_layer; ++il) {
-            const auto & layer = layers[il];
-            if (!layer.wq || layer.wq->type != GGML_TYPE_NVFP4) {
-                continue;
-            }
-            nvfp4_layers++;
-            const bool verbose = il == 0;
-
-            check_scale(il, "wq.input_scale", layer.wq_inp_scale, verbose);
-            check_scale(il, "wk.input_scale", layer.wk_inp_scale, verbose);
-            check_scale(il, "wv.input_scale", layer.wv_inp_scale, verbose);
-            check_scale(il, "wo.input_scale", layer.wo_inp_scale, verbose);
-
-            check_scale(il, "wq.weight_scale_2", layer.wq_weight_scale_2, verbose);
-            check_scale(il, "wk.weight_scale_2", layer.wk_weight_scale_2, verbose);
-            check_scale(il, "wv.weight_scale_2", layer.wv_weight_scale_2, verbose);
-            check_scale(il, "wo.weight_scale_2", layer.wo_weight_scale_2, verbose);
-
-            check_scale(il, "ffn_up.input_scale",   layer.ffn_up_inp_scale, verbose);
-            check_scale(il, "ffn_gate.input_scale", layer.ffn_gate_inp_scale, verbose);
-            check_scale(il, "ffn_down.input_scale", layer.ffn_down_inp_scale, verbose);
-
-            check_scale(il, "ffn_up.weight_scale_2",   layer.ffn_up_weight_scale_2, verbose);
-            check_scale(il, "ffn_gate.weight_scale_2", layer.ffn_gate_weight_scale_2, verbose);
-            check_scale(il, "ffn_down.weight_scale_2", layer.ffn_down_weight_scale_2, verbose);
-        }
-
-        LLAMA_LOG_INFO("%s: nvfp4 scale check: layers=%d total=%d invalid=%d missing=%d\n",
-                       __func__, nvfp4_layers, total_scales, invalid_scales, missing_scales);
-
-        if (tok_embd && tok_embd->type == GGML_TYPE_NVFP4) {
-            const int64_t nbytes = ggml_nbytes(tok_embd);
-            const int64_t nblocks = nbytes / (int64_t) sizeof(block_nvfp4);
-            const int64_t sample_blocks = std::min<int64_t>(nblocks, 64);
-            if (sample_blocks > 0) {
-                std::vector<block_nvfp4> blocks(sample_blocks);
-                ggml_backend_tensor_get(tok_embd, blocks.data(), 0, sample_blocks * sizeof(block_nvfp4));
-
-                int nan_scales = 0;
-                int nan_bits = 0;
-                float min_scale = std::numeric_limits<float>::infinity();
-                float max_scale = -std::numeric_limits<float>::infinity();
-                int finite_scales = 0;
-
-                for (int64_t i = 0; i < sample_blocks; ++i) {
-                    const uint8_t e = blocks[i].e;
-                    if ((e & 0x7F) == 0x7F) {
-                        nan_bits++;
-                    }
-                    const float d = GGML_E4M3_TO_FP32_HALF(e);
-                    if (std::isnan(d)) {
-                        nan_scales++;
-                        continue;
-                    }
-                    if (std::isfinite(d)) {
-                        min_scale = std::min(min_scale, d);
-                        max_scale = std::max(max_scale, d);
-                        finite_scales++;
-                    }
-                }
-
-                const float min_out = finite_scales ? min_scale : 0.0f;
-                const float max_out = finite_scales ? max_scale : 0.0f;
-                LLAMA_LOG_INFO("%s: nvfp4 tok_embd scales: blocks=%" PRId64 " sample=%" PRId64 " nan=%d nan_bits=%d min=%.6g max=%.6g\n",
-                        __func__, nblocks, sample_blocks, nan_scales, nan_bits, min_out, max_out);
-            }
-        }
-    }
-
     if (use_mmap_buffer) {
         for (auto & mapping : ml.mappings) {
             pimpl->mappings.emplace_back(std::move(mapping));
@@ -9297,15 +9099,6 @@ struct llm_build_qwen3 : public llm_graph_context {
                         model.layers[il].wv_inp_scale,
                         cur);
                 cb(Vcur, "Vcur-scaled", il);
-
-                // if (model.layers[il].wk_k_scale) {
-                //     Kcur = ggml_mul(ctx0, Kcur, model.layers[il].wk_k_scale);
-                //     cb(Kcur, "Kcur_k_scaled", il);
-                // }
-                // if (model.layers[il].wv_v_scale) {
-                //     Vcur = ggml_mul(ctx0, Vcur, model.layers[il].wv_v_scale);
-                //     cb(Vcur, "Vcur_v_scaled", il);
-                // }
 
                 Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
                 Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
