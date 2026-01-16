@@ -51,7 +51,7 @@ void quantize_row_mxfp4(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, i
 }
 
 void quantize_row_nvfp4(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
-    quantize_row_nvfp4_ref(x, y, k);
+    quantize_row_nvfp4_ref_default(x, y, k);
 }
 
 //

@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-void ggml_nvfp4_to_f32_op(
+void ggml_nvfp4_act_roundtrip_op(
         struct ggml_tensor * dst,
         const struct ggml_tensor * a,
         const struct ggml_tensor * b,
