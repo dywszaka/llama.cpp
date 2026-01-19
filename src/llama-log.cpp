@@ -283,12 +283,10 @@ static bool tensor_preview_enabled() {
     return enabled;
 }
 
-void log_tensor_preview(const ggml_tensor * tensor, const void * data_ptr, size_t available, bool & logged_preview) {
-    if (!tensor_preview_enabled() || logged_preview || tensor == nullptr || data_ptr == nullptr || available == 0) {
+void log_tensor_preview(const ggml_tensor * tensor, const void * data_ptr, size_t available) {
+    if (!tensor_preview_enabled() || tensor == nullptr || data_ptr == nullptr || available == 0) {
         return;
     }
-    logged_preview = true;
-
     const char * tensor_name = ggml_get_name(tensor);
     const char * type_name   = ggml_type_name(tensor->type);
 

@@ -2,7 +2,6 @@
 
 #include "llama-impl.h"
 
-#include "ggml-backend.h"
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-log.h"
@@ -10,14 +9,10 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 
-#include <algorithm>
-#include <cmath>
 #include <cinttypes>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
-#include <string>
-#include <vector>
 
 //
 // llama_context
