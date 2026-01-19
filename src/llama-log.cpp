@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cctype>
 #include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -270,6 +271,56 @@ void log_tensor_stats(const ggml_tensor * tensor, const llama_tensor_stats & sta
                 __func__, ggml_get_name(tensor), ggml_type_name(tensor->type),
                 stats.n, min_out, max_out, stats.nan, stats.inf);
     }
+}
+
+static bool tensor_preview_enabled() {
+    static bool cached = false;
+    static bool enabled = false;
+    if (!cached) {
+        cached = true;
+        enabled = getenv("LLAMA_TENSOR_PREVIEW_DEBUG") != nullptr;
+    }
+    return enabled;
+}
+
+void log_tensor_preview(const ggml_tensor * tensor, const void * data_ptr, size_t available, bool & logged_preview) {
+    if (!tensor_preview_enabled() || logged_preview || tensor == nullptr || data_ptr == nullptr || available == 0) {
+        return;
+    }
+    logged_preview = true;
+
+    const char * tensor_name = ggml_get_name(tensor);
+    const char * type_name   = ggml_type_name(tensor->type);
+
+    std::printf("\n[TENSOR LOAD] %s | weight precision: %s\n", tensor_name, type_name);
+
+    if (tensor->type == GGML_TYPE_NVFP4 && available >= ggml_type_size(tensor->type)) {
+        const uint8_t * raw_block = static_cast<const uint8_t *>(data_ptr);
+        const uint8_t scale = raw_block[0];
+        const size_t qk = (size_t) ggml_blck_size(tensor->type); // number of 4-bit values, expected 16
+        const size_t qs_bytes = std::min<size_t>(available > 1 ? available - 1 : 0, qk / 2); // expect 8 bytes
+        const uint8_t * qs    = raw_block + 1; // skip scale byte
+
+        std::printf("  nvfp4 first block: scale=%u | qs (%zu bytes):", scale, qs_bytes);
+        for (size_t i = 0; i < qs_bytes; ++i) {
+            std::printf(" %u", qs[i]);
+        }
+        std::printf("\n");
+    } else if (tensor->type == GGML_TYPE_F32 && available >= sizeof(float)) {
+        const float * vals = static_cast<const float *>(data_ptr);
+        std::printf("  f32 first value: %.9g\n", vals[0]);
+    } else {
+        const size_t count       = std::min<size_t>(available, (size_t) 10);
+        const uint8_t * bytes    = static_cast<const uint8_t *>(data_ptr);
+
+        std::printf("  first %zu uint8 values:", count);
+        for (size_t i = 0; i < count; ++i) {
+            std::printf(" %u", bytes[i]);
+        }
+        std::printf("\n");
+    }
+
+    std::fflush(stdout);
 }
 
 void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {

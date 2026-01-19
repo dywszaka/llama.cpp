@@ -6,6 +6,7 @@
 #include "llama-cparams.h"
 #include "llama-model-loader.h"
 #include "llama-log.h"
+#include "llama-nvfp4.h"
 
 #include "llama-kv-cache-unified.h"
 #include "llama-kv-cache-unified-iswa.h"
@@ -13,28 +14,18 @@
 #include "llama-memory-recurrent.h"
 
 #include "ggml-cpp.h"
-#define GGML_COMMON_DECL_CPP
-#include "../ggml/src/ggml-common.h"
-#undef GGML_COMMON_DECL_CPP
-#include "../ggml/src/ggml-impl.h"
-#include "llama-nvfp4.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cfloat>
-#include <cinttypes>
-#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <functional>
-#include <limits>
-#include <cstdio>
 #include <map>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
-#include <vector>
 
 const char * llm_type_name(llm_type type) {
     switch (type) {

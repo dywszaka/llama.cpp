@@ -3,6 +3,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 
+#include <cstddef>
 #include <limits>
 #include <string>
 #include <vector>
@@ -32,6 +33,7 @@ const std::vector<std::string> & nvfp4_debug_patterns();
 
 bool compute_tensor_stats(const ggml_tensor * tensor, llama_tensor_stats & stats);
 void log_tensor_stats(const ggml_tensor * tensor, const llama_tensor_stats & stats);
+void log_tensor_preview(const ggml_tensor * tensor, const void * data_ptr, size_t available, bool & logged_preview);
 
 void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf);
 void debug_nvfp4_norm_weights(const struct llama_model & model);

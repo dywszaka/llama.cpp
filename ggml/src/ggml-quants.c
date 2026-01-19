@@ -397,7 +397,8 @@ void quantize_row_nvfp4_ref(const float * GGML_RESTRICT x, block_nvfp4 * GGML_RE
 }
 
 void quantize_row_nvfp4_ref_default(const float * GGML_RESTRICT x, block_nvfp4 * GGML_RESTRICT y, int64_t k) {
-    quantize_row_nvfp4_ref(x, y, k, 1.0f);
+    fprintf(stderr, "%s: NVFP4 quantization without global scale is not supported", __func__);
+    abort();
 }
 
 void dequantize_row_q4_0(const block_q4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
@@ -553,7 +554,8 @@ void dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_REST
 }
 
 void dequantize_row_nvfp4_default(const block_nvfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    dequantize_row_nvfp4(x, y, k, 1.0f);
+    fprintf(stderr, "%s: NVFP4 dequantization without global scale is not supported", __func__);
+    abort();
 }
 
 //

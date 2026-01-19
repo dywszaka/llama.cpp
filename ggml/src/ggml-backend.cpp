@@ -16,8 +16,6 @@
 #include "ggml-debug.h"
 
 #include <assert.h>
-#include <cinttypes>
-#include <cmath>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>

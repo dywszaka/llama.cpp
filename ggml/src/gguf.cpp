@@ -738,18 +738,7 @@ struct gguf_context * gguf_init_from_file(const char * fname, struct gguf_init_p
         return nullptr;
     }
 
-    // Get file size for debugging
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    GGML_LOG_INFO("%s: file size = %ld bytes\n", __func__, file_size);
-
     struct gguf_context * result = gguf_init_from_file_impl(file, params);
-    if (!result) {
-        GGML_LOG_ERROR("%s: gguf_init_from_file_impl failed for '%s'\n", __func__, fname);
-    } else {
-        GGML_LOG_INFO("%s: successfully loaded '%s'\n", __func__, fname);
-    }
     fclose(file);
     return result;
 }
