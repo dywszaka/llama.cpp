@@ -453,7 +453,11 @@ class GGUFWriter:
                 for ti in tensors.values():
                     assert ti.tensor is not None  # can only iterate once over the tensors
                     assert ti.tensor.nbytes == ti.nbytes
-                    ti.tensor.tofile(fout)
+                    try:
+                        ti.tensor.tofile(fout)
+                    except Exception as e:
+                        logger.error(f"Error writing tensor of shape {ti.shape} and dtype {ti.tensor.dtype} to file: {e}")
+                        raise
                     if shard_bar is not None:
                         shard_bar.update(ti.nbytes)
                     if bar is not None:

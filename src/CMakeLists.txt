@@ -20,12 +20,14 @@ add_library(llama
             llama-hparams.cpp
             llama-impl.cpp
             llama-io.cpp
+            llama-log.cpp
             llama-kv-cache-unified.cpp
             llama-kv-cache-unified-iswa.cpp
             llama-memory.cpp
             llama-memory-hybrid.cpp
             llama-memory-recurrent.cpp
             llama-mmap.cpp
+            llama-nvfp4.cpp
             llama-model-loader.cpp
             llama-model-saver.cpp
             llama-model.cpp

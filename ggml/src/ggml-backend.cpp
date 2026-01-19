@@ -13,6 +13,8 @@
 #include "ggml-alloc.h"
 #include "ggml-impl.h"
 
+#include "ggml-debug.h"
+
 #include <assert.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -373,6 +375,8 @@ void ggml_backend_tensor_copy(struct ggml_tensor * src, struct ggml_tensor * dst
         ggml_backend_tensor_set(dst, data, 0, nbytes);
         free(data);
     }
+
+    ggml_debug_nvfp4_copy(src, dst);
 }
 
 void ggml_backend_tensor_copy_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, struct ggml_tensor * src, struct ggml_tensor * dst) {

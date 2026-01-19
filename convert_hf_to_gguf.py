@@ -245,7 +245,7 @@ class ModelBase:
                 return False
         return name == (key_name + suffix)
 
-    def map_tensor_name(self, name: str, try_suffixes: Sequence[str] = (".weight", ".bias")) -> str:
+    def map_tensor_name(self, name: str, try_suffixes: Sequence[str] = (".weight", ".bias", ".weight_scale", ".weight_scale_2", ".input_scale", ".k_scale", ".v_scale")) -> str:
         new_name = self.tensor_map.get_name(key=name, try_suffixes=try_suffixes)
         if new_name is None:
             raise ValueError(f"Can not map tensor {name!r}")
@@ -422,7 +422,11 @@ class ModelBase:
         raise NotImplementedError("write_vocab() must be implemented in subclasses")
 
     def write(self):
-        self.prepare_tensors()
+        if self.ftype == gguf.LlamaFileType.MOSTLY_NVFP4:
+            from convert_nvfp4_utils import prepare_tensors_for_nvfp4 as prepare_tensors_nvfp4
+            prepare_tensors_nvfp4(self)
+        else:
+            self.prepare_tensors()
         self.prepare_metadata(vocab_only=False)
         self.gguf_writer.write_header_to_file(path=self.fname_out)
         self.gguf_writer.write_kv_data_to_file()
@@ -8501,7 +8505,17 @@ class LazyTorchTensor(gguf.LazyBase):
     def from_safetensors_slice(cls, st_slice: Any) -> Tensor:
         dtype = cls._dtype_str_map[st_slice.get_dtype()]
         shape: tuple[int, ...] = tuple(st_slice.get_shape())
-        lazy = cls(meta=cls.meta_with_dtype_and_shape(dtype, shape), args=(st_slice,), func=lambda s: s[:])
+        
+        # 处理 0 维张量（标量）
+        if len(shape) == 0:
+            # 0 维张量不能使用切片，使用 [()] 获取标量值
+            # safetensors 的 slice 返回的是数组，需要转换为 tensor
+            func = lambda s: torch.as_tensor(s[()], dtype=dtype)
+        else:
+            # 正常张量使用切片
+            func = lambda s: s[:]
+        
+        lazy = cls(meta=cls.meta_with_dtype_and_shape(dtype, shape), args=(st_slice,), func=func)
         return cast(torch.Tensor, lazy)
 
     @classmethod
@@ -8537,8 +8551,8 @@ def parse_args() -> argparse.Namespace:
         help="path to write to; default: based on input. {ftype} will be replaced by the outtype.",
     )
     parser.add_argument(
-        "--outtype", type=str, choices=["f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"], default="f16",
-        help="output format - use f32 for float32, f16 for float16, bf16 for bfloat16, q8_0 for Q8_0, tq1_0 or tq2_0 for ternary, and auto for the highest-fidelity 16-bit float type depending on the first loaded tensor type",
+        "--outtype", type=str, choices=["f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "nvfp4", "auto"], default="f16",
+        help="output format - use f32 for float32, f16 for float16, bf16 for bfloat16, q8_0 for Q8_0, tq1_0 or tq2_0 for ternary, nvfp4 for NVFP4, and auto for the highest-fidelity 16-bit float type depending on the first loaded tensor type",
     )
     parser.add_argument(
         "--bigendian", action="store_true",
@@ -8560,6 +8574,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-name", type=str, default=None,
         help="name of the model",
+    )
+    parser.add_argument(
+        "--log-file", type=str, default=None,
+        help="Optional path to write logs to a file",
     )
     parser.add_argument(
         "--verbose", action="store_true",
@@ -8656,10 +8674,16 @@ def main() -> None:
         ModelBase.print_registered_models()
         sys.exit(0)
 
-    if args.verbose:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_handlers = [logging.StreamHandler(sys.stdout)]
+    if args.log_file:
+        log_handlers.append(logging.FileHandler(args.log_file, mode="w"))
+
+    logging.basicConfig(
+        level=log_level,
+        handlers=log_handlers,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     if args.remote:
         hf_repo_id = args.model
@@ -8684,6 +8708,7 @@ def main() -> None:
         "q8_0": gguf.LlamaFileType.MOSTLY_Q8_0,
         "tq1_0": gguf.LlamaFileType.MOSTLY_TQ1_0,
         "tq2_0": gguf.LlamaFileType.MOSTLY_TQ2_0,
+        "nvfp4": gguf.LlamaFileType.MOSTLY_NVFP4,
         "auto": gguf.LlamaFileType.GUESSED,
     }
 

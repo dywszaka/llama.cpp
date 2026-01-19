@@ -365,6 +365,31 @@ struct llama_layer {
     struct ggml_tensor * laurel_r             = nullptr;
     struct ggml_tensor * laurel_post_norm     = nullptr;
 
+    // nvfp4 relevant tensors start ======
+    // attention input scale
+    struct ggml_tensor * wk_inp_scale  = nullptr;
+    struct ggml_tensor * wo_inp_scale  = nullptr;
+    struct ggml_tensor * wq_inp_scale  = nullptr;
+    struct ggml_tensor * wv_inp_scale  = nullptr;
+    // attention tensor wise global weight scale
+    struct ggml_tensor * wk_weight_scale_2 = nullptr;
+    struct ggml_tensor * wo_weight_scale_2 = nullptr;
+    struct ggml_tensor * wq_weight_scale_2 = nullptr;
+    struct ggml_tensor * wv_weight_scale_2 = nullptr;
+    // attention k/v scale
+    struct ggml_tensor * wk_k_scale = nullptr;
+    struct ggml_tensor * wv_v_scale = nullptr;
+
+    // ffn input scale
+    struct ggml_tensor * ffn_down_inp_scale = nullptr;
+    struct ggml_tensor * ffn_up_inp_scale   = nullptr;
+    struct ggml_tensor * ffn_gate_inp_scale = nullptr;
+    // ffn tensor wise global weight scale
+    struct ggml_tensor * ffn_down_weight_scale_2 = nullptr;
+    struct ggml_tensor * ffn_up_weight_scale_2   = nullptr;
+    struct ggml_tensor * ffn_gate_weight_scale_2 = nullptr;
+    // nvfp4 relevant tensors end ======
+
     // openai-moe
     struct ggml_tensor * attn_sinks = nullptr;
 

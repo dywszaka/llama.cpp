@@ -5,6 +5,8 @@
 #include "llama-batch.h"
 #include "llama-cparams.h"
 #include "llama-model-loader.h"
+#include "llama-log.h"
+#include "llama-nvfp4.h"
 
 #include "llama-kv-cache-unified.h"
 #include "llama-kv-cache-unified-iswa.h"
@@ -3008,6 +3010,31 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, 0);
                         layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, 0);
                         layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
+
+                        // // 判断 ffn_up 是否是 nvpf4 精度，如果是，则增加 llama-model.h 中定义的 nvfp4 relevant tensors 的初始化
+                        if (layer.wq->type == GGML_TYPE_NVFP4) {
+                            layer.wq_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_Q, "input_scale", i), {1}, 0);
+                            layer.wk_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_K, "input_scale", i), {1}, 0);
+                            layer.wv_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_V, "input_scale", i), {1}, 0);
+                            layer.wo_inp_scale = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "input_scale", i), {1}, 0);
+
+                            layer.wq_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight_scale_2", i), {1}, 0);
+                            layer.wk_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_K, "weight_scale_2", i), {1}, 0);
+                            layer.wv_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_V, "weight_scale_2", i), {1}, 0);
+                            layer.wo_weight_scale_2 = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight_scale_2", i), {1}, 0);
+
+                            layer.wk_k_scale = create_tensor(tn(LLM_TENSOR_ATTN_K, "k_scale", i), {1}, 0);
+                            layer.wv_v_scale = create_tensor(tn(LLM_TENSOR_ATTN_V, "v_scale", i), {1}, 0);
+
+                            layer.ffn_gate_inp_scale = create_tensor(tn(LLM_TENSOR_FFN_GATE, "input_scale", i), {1}, 0);
+                            layer.ffn_down_inp_scale = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "input_scale", i), {1}, 0);
+                            layer.ffn_up_inp_scale   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "input_scale", i), {1}, 0);
+
+                            layer.ffn_gate_weight_scale_2 = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight_scale_2", i), {1}, 0);
+                            layer.ffn_down_weight_scale_2 = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight_scale_2", i), {1}, 0);
+                            layer.ffn_up_weight_scale_2   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight_scale_2", i), {1}, 0);
+                        }
+
                     }
                 } break;
             case LLM_ARCH_QWEN3MOE:
@@ -8744,6 +8771,46 @@ struct llm_build_qwen3 : public llm_graph_context {
         ggml_tensor * cur;
         ggml_tensor * inpL;
 
+        auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * w_inp_scale, ggml_tensor * x) -> ggml_tensor * {
+            ggml_tensor * x_used = x;
+            if (w->type == GGML_TYPE_NVFP4 && w_inp_scale) {
+                if (x_used->type != GGML_TYPE_F32) {
+                    x_used = ggml_cast(ctx0, x_used, GGML_TYPE_F32);
+                }
+                x_used = ggml_map_custom2(ctx0, x_used, w_inp_scale, ggml_nvfp4_act_roundtrip_op, GGML_N_TASKS_MAX, nullptr);
+            }
+
+            ggml_tensor * res = ggml_mul_mat(ctx0, w, x_used);
+            if (w_scale) {
+                ggml_tensor * w_scale_f32 = w_scale;
+                if (w_scale->type != GGML_TYPE_F32) {
+                    w_scale_f32 = ggml_cast(ctx0, w_scale, GGML_TYPE_F32);
+                }
+                // Apply scalar scale on output to avoid dequantizing full weights per token.
+                res = ggml_mul(ctx0, res, w_scale_f32);
+            }
+
+            for (const auto & lora : *loras) {
+                llama_adapter_lora_weight * lw = lora.first->get_weight(w);
+                if (lw == nullptr) {
+                    continue;
+                }
+
+                const float adapter_scale = lora.second;
+                const float scale = lw->get_scale(lora.first->alpha, adapter_scale);
+
+                ggml_tensor * ab_cur = ggml_mul_mat(
+                        ctx0, lw->b,
+                        ggml_mul_mat(ctx0, lw->a, x_used)
+                        );
+
+                ab_cur = ggml_scale(ctx0, ab_cur, scale);
+                res = ggml_add(ctx0, res, ab_cur);
+            }
+
+            return res;
+        };
+
         inpL = build_inp_embd(model.tok_embd);
 
         // inp_pos - contains the positions
@@ -8765,14 +8832,26 @@ struct llm_build_qwen3 : public llm_graph_context {
             // self-attention
             {
                 // compute Q and K and RoPE them
-                ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
-                cb(Qcur, "Qcur", il);
+                ggml_tensor * Qcur = build_lora_mm_scaled(
+                        model.layers[il].wq,
+                        model.layers[il].wq_weight_scale_2,
+                        model.layers[il].wq_inp_scale,
+                        cur);
+                cb(Qcur, "Qcur-scaled", il);
 
-                ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
-                cb(Kcur, "Kcur", il);
+                ggml_tensor * Kcur = build_lora_mm_scaled(
+                        model.layers[il].wk,
+                        model.layers[il].wk_weight_scale_2,
+                        model.layers[il].wk_inp_scale,
+                        cur);
+                cb(Kcur, "Kcur-scaled", il);
 
-                ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
-                cb(Vcur, "Vcur", il);
+                ggml_tensor * Vcur = build_lora_mm_scaled(
+                        model.layers[il].wv,
+                        model.layers[il].wv_weight_scale_2,
+                        model.layers[il].wv_inp_scale,
+                        cur);
+                cb(Vcur, "Vcur-scaled", il);
 
                 Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
                 Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
@@ -8801,8 +8880,17 @@ struct llm_build_qwen3 : public llm_graph_context {
                 cb(Vcur, "Vcur", il);
 
                 cur = build_attn(inp_attn,
-                        model.layers[il].wo, model.layers[il].bo,
+                        nullptr, nullptr,
                         Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+
+                cur = build_lora_mm_scaled(
+                        model.layers[il].wo,
+                        model.layers[il].wo_weight_scale_2,
+                        model.layers[il].wo_inp_scale,
+                        cur);
+                if (model.layers[il].bo) {
+                    cur = ggml_add(ctx0, cur, model.layers[il].bo);
+                }
             }
 
             if (il == n_layer - 1 && inp_out_ids) {
@@ -8819,12 +8907,31 @@ struct llm_build_qwen3 : public llm_graph_context {
                     LLM_NORM_RMS, il);
             cb(cur, "ffn_norm", il);
 
-            cur = build_ffn(cur,
-                    model.layers[il].ffn_up,   NULL, NULL,
-                    model.layers[il].ffn_gate, NULL, NULL,
-                    model.layers[il].ffn_down, NULL, NULL,
-                    NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+            {
+                ggml_tensor * up = build_lora_mm_scaled(
+                        model.layers[il].ffn_up,
+                        model.layers[il].ffn_up_weight_scale_2,
+                        model.layers[il].ffn_up_inp_scale,
+                        cur);
+                cb(up, "ffn_up", il);
+
+                ggml_tensor * gate = build_lora_mm_scaled(
+                        model.layers[il].ffn_gate,
+                        model.layers[il].ffn_gate_weight_scale_2,
+                        model.layers[il].ffn_gate_inp_scale,
+                        cur);
+                cb(gate, "ffn_gate", il);
+
+                cur = ggml_swiglu_split(ctx0, gate, up);
+                cb(cur, "ffn_swiglu", il);
+
+                cur = build_lora_mm_scaled(
+                        model.layers[il].ffn_down,
+                        model.layers[il].ffn_down_weight_scale_2,
+                        model.layers[il].ffn_down_inp_scale,
+                        cur);
+                cb(cur, "ffn_down", il);
+            }
             cb(cur, "ffn_out", il);
 
             cur = ggml_add(ctx0, cur, ffn_inp);

@@ -304,6 +304,103 @@ void quantize_row_mxfp4_ref(const float * GGML_RESTRICT x, block_mxfp4 * GGML_RE
     }
 }
 
+static uint8_t best_index_e4m3(float x) {
+    struct nvfp4_e4m3_table {
+        float vals[256];
+        uint8_t valid[256];
+    };
+    static struct nvfp4_e4m3_table table;
+    static int table_initialized = 0;
+
+    if (!table_initialized) {
+        for (int i = 0; i < 256; ++i) {
+            const float v = GGML_E4M3_TO_FP32((uint8_t) i);
+            table.vals[i] = v;
+            table.valid[i] = isfinite(v) ? 1 : 0;
+        }
+        table_initialized = 1;
+    }
+
+    if (!isfinite(x)) {
+        return 0;
+    }
+
+    float best_err = INFINITY;
+    uint8_t best_i = 0;
+    for (int i = 0; i < 256; ++i) {
+        if (!table.valid[i]) {
+            continue;
+        }
+        const float err = fabsf(table.vals[i] - x);
+        if (err < best_err) {
+            best_err = err;
+            best_i = (uint8_t) i;
+        }
+    }
+
+    return best_i;
+}
+
+static inline uint8_t best_index_nvfp4(float x) {
+    uint8_t best_index = 0;
+    float best_err = fabsf((float) kvalues_nvfp4[0] - x);
+
+    for (int i = 1; i < 16; ++i) {
+        const float err = fabsf((float) kvalues_nvfp4[i] - x);
+        if (err < best_err) {
+            best_index = (uint8_t) i;
+            best_err = err;
+        }
+    }
+
+    return best_index;
+}
+
+void quantize_row_nvfp4_ref(const float * GGML_RESTRICT x, block_nvfp4 * GGML_RESTRICT y, int64_t k, float global_scale) {
+    static const int qk = QK_NVFP4;
+    static const float k_fp4_max = 6.0f;
+
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        float vmax = 0.0f;
+
+        for (int j = 0; j < qk; ++j) {
+            const float v = x[ib*qk + j];
+            const float av = fabsf(v);
+            if (av > vmax) {
+                vmax = av;
+            }
+        }
+
+        float scale = global_scale * (vmax / k_fp4_max);
+
+        const uint8_t scale_q = best_index_e4m3(scale);
+        y[ib].e = scale_q;
+
+        const float scale_f = GGML_E4M3_TO_FP32_HALF(scale_q);
+        const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
+
+
+        for (int j = 0; j < qk/2; ++j) {
+            float v0 = x[ib*qk + 2*j + 0] * inv_scale;
+            float v1 = x[ib*qk + 2*j + 1] * inv_scale;
+
+            const uint8_t q0 = best_index_nvfp4(v0);
+            const uint8_t q1 = best_index_nvfp4(v1);
+
+            y[ib].qs[j] = q0 | (q1 << 4);
+        }
+    }
+}
+
+void quantize_row_nvfp4_ref_default(const float * GGML_RESTRICT x, block_nvfp4 * GGML_RESTRICT y, int64_t k) {
+    fprintf(stderr, "%s: NVFP4 quantization without global scale is not supported", __func__);
+    abort();
+}
+
 void dequantize_row_q4_0(const block_q4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK4_0;
 
@@ -432,6 +529,33 @@ void dequantize_row_mxfp4(const block_mxfp4 * GGML_RESTRICT x, float * GGML_REST
             y[i*qk + j + qk/2] = x1*d;
         }
     }
+}
+
+void dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k, float global_scale) {
+    static const int qk = QK_NVFP4;
+
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_E4M3_TO_FP32_HALF(x[i].e);
+        const float out_scale = (global_scale != 0.0f) ? (d / global_scale) : 0.0f;
+
+        // 每个 qs[j] 包含两个 4 位值：低位对应位置 2j，高位对应位置 2j+1
+        for (int j = 0; j < qk/2; ++j) {
+            const int8_t x0 = kvalues_nvfp4[x[i].qs[j] & 0x0F];  // 低 4 位 -> 位置 2*j
+            const int8_t x1 = kvalues_nvfp4[x[i].qs[j] >>   4];  // 高 4 位 -> 位置 2*j+1
+
+            y[i*qk + 2*j + 0] = x0*out_scale;
+            y[i*qk + 2*j + 1] = x1*out_scale;
+        }
+    }
+}
+
+void dequantize_row_nvfp4_default(const block_nvfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    fprintf(stderr, "%s: NVFP4 dequantization without global scale is not supported", __func__);
+    abort();
 }
 
 //
@@ -2096,6 +2220,11 @@ size_t quantize_mxfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
     GGML_UNUSED(quant_weights);
     quantize_row_mxfp4_ref(src, dst, (int64_t)nrow*n_per_row);
     return nrow * ggml_row_size(GGML_TYPE_MXFP4, n_per_row);
+}
+
+size_t quantize_nvfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    fprintf(stderr, "%s: NVFP4 quantization is not supported", __func__);
+    abort();
 }
 
 // ====================== Ternary (de)-quantization (BitNet b1.58 and TriLMs)

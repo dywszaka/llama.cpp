@@ -626,6 +626,13 @@ class MODEL_TENSOR(IntEnum):
     NEXTN_SHARED_HEAD_HEAD = auto()
     NEXTN_SHARED_HEAD_NORM = auto()
 
+    # nvfp4 global scale
+    INPUT_SCALE          = auto()
+    WEIGHT_SCALE         = auto()
+    WEIGHT_SCALE_2       = auto()
+    K_SCALE              = auto()
+    V_SCALE              = auto()
+
 
 MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.MMPROJ:           "clip", # dummy arch for clip.cpp
@@ -2728,6 +2735,7 @@ class GGMLQuantizationType(IntEnum):
     TQ1_0   = 34
     TQ2_0   = 35
     MXFP4   = 39
+    NVFP4   = 40
 
 
 class ExpertGatingFuncType(IntEnum):
@@ -2779,6 +2787,7 @@ class LlamaFileType(IntEnum):
     # MOSTLY_Q4_0_8_8      = 35  # removed from gguf files, use Q4_0 and runtime repack
     MOSTLY_TQ1_0         = 36  # except 1d tensors
     MOSTLY_TQ2_0         = 37  # except 1d tensors
+    MOSTLY_NVFP4         = 38  # except 1d tensors
 
     GUESSED              = 1024  # not specified in the model file
 
@@ -2869,6 +2878,7 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.TQ1_0:   (256, 2 + 4 * 13),
     GGMLQuantizationType.TQ2_0:   (256, 2 + 64),
     GGMLQuantizationType.MXFP4:   (32, 1 + 16),
+    GGMLQuantizationType.NVFP4:   (16, 1 + 8),  # 16 values (8 uint8) + 1 F8 weight_scale
 }
 
 

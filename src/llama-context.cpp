@@ -1,8 +1,10 @@
 #include "llama-context.h"
 
 #include "llama-impl.h"
+
 #include "llama-batch.h"
 #include "llama-io.h"
+#include "llama-log.h"
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
@@ -371,7 +373,13 @@ llama_context::~llama_context() {
 }
 
 void llama_context::synchronize() {
+    const int64_t t_sync_start_us = ggml_time_us();
     ggml_backend_sched_synchronize(sched.get());
+    const double t_sync_ms = (ggml_time_us() - t_sync_start_us) / 1000.0;
+    if (t_sync_ms > 100.0) {
+        LLAMA_LOG_WARN("%s: backend sync took %.3f ms (n_queued_tokens=%" PRId64 ")\n",
+                __func__, t_sync_ms, n_queued_tokens);
+    }
 
     // FIXME: if multiple single tokens are evaluated without a synchronization,
     // the stats will be added to the prompt evaluation stats
@@ -551,6 +559,8 @@ float * llama_context::get_logits_ith(int32_t i) {
             throw std::runtime_error(format("corrupt output buffer (j=%" PRId64 ", n_outputs=%d)", j, n_outputs));
         }
 
+        llama_log::nvfp4_log_logits_if_enabled(i, j, model.vocab.n_tokens(), logits + j*model.vocab.n_tokens());
+
         return logits + j*model.vocab.n_tokens();
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: invalid logits id %d, reason: %s\n", __func__, i, err.what());
@@ -724,8 +734,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
+    const bool can_reuse = !graph_reuse_disable && res->can_reuse(gparams);
 
-    if (!graph_reuse_disable && res->can_reuse(gparams)) {
+    LLAMA_LOG_DEBUG("%s: start, gtype = %d, n_tokens = %u, can_reuse = %d\n",
+            __func__, (int) gtype, ubatch.n_tokens, can_reuse ? 1 : 0);
+
+    if (can_reuse) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         n_reused++;
@@ -754,6 +768,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         }
     }
 
+    if (gf) {
+        LLAMA_LOG_DEBUG("%s: graph ready, n_nodes = %d\n", __func__, ggml_graph_n_nodes(gf));
+    }
+
     // set the input data for the input tensors
     {
         //const auto t_start_us = ggml_time_us();
@@ -763,7 +781,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
+    const int64_t t_compute_start_us = ggml_time_us();
+    LLAMA_LOG_DEBUG("%s: graph_compute begin\n", __func__);
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    LLAMA_LOG_DEBUG("%s: graph_compute end, status = %d, dt = %.3f ms\n",
+            __func__, status, (ggml_time_us() - t_compute_start_us) / 1000.0);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
@@ -771,6 +793,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     ret = GGML_STATUS_SUCCESS;
+
+    if (llama_log::nvfp4_enabled()) {
+        llama_log::debug_nvfp4_graph_tensors(sched.get(), res->get_gf());
+        llama_log::debug_nvfp4_norm_weights(model);
+    }
 
     return res;
 }
@@ -1463,6 +1490,8 @@ llm_graph_cb llama_context::graph_get_cb() const {
         } else {
             ggml_set_name(cur, name);
         }
+
+        llama_log::nvfp4_pin_tensor_if_match(cur);
 
         if (!cparams.offload_kqv) {
             if (strcmp(name, "kqv_merged_cont") == 0) {
