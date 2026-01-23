@@ -42,6 +42,22 @@ static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, con
     return make_int2(*((const int *) &val0_8), *((const int *) &val1_8));
 }
 
+// NVFP4 解码：按低/高 nibble 交错顺序 (lo0,hi0,lo1,hi1)(lo2,hi2,lo3,hi3)
+// 方便与 load_tiles_nvfp4 的共享内存布局一致
+static __device__ __forceinline__ int2 get_int_from_table_16_nvfp4(const int & q4, const int8_t * table) {
+    const int      lo32   = (q4 >> 0) & 0x0F0F0F0F;
+    const int8_t * lo8    = (const int8_t *) &lo32;
+    const int      hi32   = (q4 >> 4) & 0x0F0F0F0F;
+    const int8_t * hi8    = (const int8_t *) &hi32;
+
+    const char4 val0_8 = make_char4(
+        table[lo8[0]], table[hi8[0]], table[lo8[1]], table[hi8[1]]);
+    const char4 val1_8 = make_char4(
+        table[lo8[2]], table[hi8[2]], table[lo8[3]], table[hi8[3]]);
+
+    return make_int2(*((const int *) &val0_8), *((const int *) &val1_8));
+}
+
 // VDR = vec dot ratio, how many contiguous integers each thread processes when the vec dot kernel is called
 // MMVQ = mul_mat_vec_q, MMQ = mul_mat_q
 
@@ -258,6 +274,30 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
     }
 
     const float d = ggml_cuda_e8m0_to_fp32(bq4->e) * 0.5f * __low2float(bq8_1->ds);
+    return d * sumi;
+}
+
+#define VDR_NVFP4_Q8_1_MMVQ 2
+#define VDR_NVFP4_Q8_1_MMQ  4
+
+static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_nvfp4 * bq4 = (const block_nvfp4 *) vbq + kbx;
+
+    const int * q8 = (const int *) bq8_1->qs + iqs;
+
+    int sumi = 0;
+#pragma unroll
+    for (int l = 0; l < VDR_NVFP4_Q8_1_MMVQ; ++l) {
+        const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
+        const int2 v = get_int_from_table_16_nvfp4(aux_q4, kvalues_nvfp4);
+
+        sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
+        sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
+    }
+
+    const float d = ggml_cuda_e4m3_to_fp32_half(bq4->e) * __low2float(bq8_1->ds);
     return d * sumi;
 }
 

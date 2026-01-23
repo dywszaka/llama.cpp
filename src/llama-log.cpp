@@ -252,6 +252,25 @@ bool compute_tensor_stats(const ggml_tensor * tensor, llama_tensor_stats & stats
     return false;
 }
 
+static void log_tensor_first4_f32(const ggml_tensor * tensor) {
+    if (!nvfp4_enabled() || !tensor || tensor->type != GGML_TYPE_F32 || ggml_nelements(tensor) <= 0) {
+        return;
+    }
+
+    const int64_t n = ggml_nelements(tensor);
+    const size_t nread = std::min<int64_t>(4, n);
+    float buf[4] = {};
+    ggml_backend_tensor_get(tensor, buf, 0, nread * sizeof(float));
+
+    char values[128];
+    int off = snprintf(values, sizeof(values), "%g", buf[0]);
+    for (size_t i = 1; i < nread && off < (int) sizeof(values); ++i) {
+        off += snprintf(values + off, sizeof(values) - off, " %g", buf[i]);
+    }
+
+    LLAMA_LOG_WARN("%s: tensor=%s first%zu=%s\n", __func__, ggml_get_name(tensor), nread, values);
+}
+
 void log_tensor_stats(const ggml_tensor * tensor, const llama_tensor_stats & stats) {
     if (!nvfp4_enabled()) {
         return;
@@ -349,6 +368,7 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
                 llama_tensor_stats stats;
                 if (compute_tensor_stats(t, stats)) {
                     if (log_all || stats.nan > 0 || stats.inf > 0) {
+                        log_tensor_first4_f32(t);
                         log_tensor_stats(t, stats);
                         if (log_src) {
                             for (int si = 0; si < GGML_MAX_SRC; ++si) {
@@ -393,6 +413,7 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
             llama_tensor_stats stats;
             if (compute_tensor_stats(t, stats)) {
                 if (log_all || stats.nan > 0 || stats.inf > 0) {
+                    log_tensor_first4_f32(t);
                     log_tensor_stats(t, stats);
                     if (log_src) {
                         for (int si = 0; si < GGML_MAX_SRC; ++si) {

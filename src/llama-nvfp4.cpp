@@ -133,4 +133,3 @@ extern "C" void ggml_nvfp4_act_roundtrip_op(
         void * userdata) {
     nvfp4_act_roundtrip_op_impl(dst, a, b, ith, nth, userdata);
 }
-

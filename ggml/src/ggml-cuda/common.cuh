@@ -556,6 +556,48 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
 #endif // CUDART_VERSION >= 12050
 }
 
+static __host__ __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32(uint8_t x) {
+    const uint32_t sign     = (uint32_t)(x & 0x80) << 24;
+    const uint32_t exponent = (x >> 3) & 0x0F;
+    const uint32_t mantissa = x & 0x07;
+
+    uint32_t bits;
+
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+#if defined(__CUDA_ARCH__)
+            const int leading = __clz(mantissa);
+#else
+            const int leading = __builtin_clz(mantissa);
+#endif
+            const int shift = leading - (sizeof(int) * 8 - 3);
+            const uint32_t man = mantissa << (shift + 20);
+            const uint32_t exp = (127 - 6 - shift) << 23;
+            bits = sign | exp | man;
+        }
+    } else if (exponent == 0x0F) {
+        if (mantissa == 0x7) {
+            bits = sign | 0x7F800000 | (1u << 22); // NaN
+        } else {
+            bits = sign | 0x43E00000; // max finite 448.0f
+        }
+    } else {
+        const uint32_t exp = (exponent - 7 + 127) << 23;
+        const uint32_t man = mantissa << (23 - 3);
+        bits = sign | exp | man;
+    }
+
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+static __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32_half(uint8_t x) {
+    return ggml_cuda_e4m3_to_fp32(x) * 0.5f;
+}
+
 typedef void (*dequantize_kernel_t)(const void * vx, const int64_t ib, const int iqs, dfloat2 & v);
 
 static __device__ __forceinline__ float get_alibi_slope(
@@ -619,6 +661,13 @@ struct ggml_cuda_type_traits<GGML_TYPE_MXFP4> {
     static constexpr int qk = QK_MXFP4;
     static constexpr int qr = QR_MXFP4;
     static constexpr int qi = QI_MXFP4;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_NVFP4> {
+    static constexpr int qk = QK_NVFP4;
+    static constexpr int qr = QR_NVFP4;
+    static constexpr int qi = QI_NVFP4;
 };
 
 template<>
