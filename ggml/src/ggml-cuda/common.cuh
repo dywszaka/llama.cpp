@@ -572,10 +572,10 @@ static __host__ __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32(uint8_t 
 #else
             const int leading = __builtin_clz(mantissa);
 #endif
-            const int shift = leading - (sizeof(int) * 8 - 3);
-            const uint32_t man = mantissa << (shift + 20);
-            const uint32_t exp = (127 - 6 - shift) << 23;
-            bits = sign | exp | man;
+            const int shift = leading - 29;
+            const uint32_t man = mantissa << shift;
+            const uint32_t exp = 127 - 6 - shift;
+            bits = sign | (exp << 23) | (man & 0x7) << 20;
         }
     } else if (exponent == 0x0F) {
         if (mantissa == 0x7) {
