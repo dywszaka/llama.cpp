@@ -1,6 +1,9 @@
 #include "mmq.cuh"
 #include "quantize.cuh"
+#include "ggml-impl.h"
 
+#include <cstdio>
+#include <cstring>
 #include <vector>
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
@@ -71,6 +74,37 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
     }
 }
 
+static bool ggml_cuda_should_log_qcur(const ggml_tensor * dst) {
+    const char * name = dst ? ggml_get_name(dst) : nullptr;
+    return name && (strstr(name, "Qcur-scaled-0") != nullptr || strstr(name, "Qcur-mm-0") != nullptr);
+}
+
+static bool ggml_cuda_can_log(cudaStream_t stream) {
+    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+    const cudaError_t err = cudaStreamIsCapturing(stream, &status);
+    return err == cudaSuccess && status == cudaStreamCaptureStatusNone;
+}
+
+static void ggml_cuda_log_nvfp4_block(const uint8_t * bytes, size_t nbytes, const ggml_tensor * dst) {
+    if (!bytes || nbytes == 0) {
+        return;
+    }
+
+    char buf[512];
+    int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s nvfp4 block scale=%u bytes:",
+            __func__, dst ? ggml_get_name(dst) : "unknown", (unsigned) bytes[0]);
+    for (size_t i = 1; i < nbytes && off > 0 && off < (int) sizeof(buf); ++i) {
+        off += std::snprintf(buf + off, sizeof(buf) - off, " %u", (unsigned) bytes[i]);
+    }
+    GGML_LOG_INFO("%s\n", buf);
+}
+
+static void ggml_cuda_log_f32_first4(const char * label, const float vals[4], const ggml_tensor * dst) {
+    GGML_LOG_INFO("%s: dst=%s %s first4=%.9g %.9g %.9g %.9g\n",
+            __func__, dst ? ggml_get_name(dst) : "unknown", label,
+            vals[0], vals[1], vals[2], vals[3]);
+}
+
 void ggml_cuda_mul_mat_q(
         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst) {
     GGML_ASSERT(        src1->type == GGML_TYPE_F32);
@@ -94,6 +128,34 @@ void ggml_cuda_mul_mat_q(
     const char  * src0_d = (const char  *) src0->data;
     const float * src1_d = (const float *) src1->data;
     float       *  dst_d = (float       *)  dst->data;
+
+    const bool log_qcur = ggml_cuda_should_log_qcur(dst);
+    const bool can_log = log_qcur && ggml_cuda_can_log(stream);
+    if (can_log) {
+        if (src0->type == GGML_TYPE_NVFP4) {
+            const size_t block_bytes = ggml_type_size(src0->type);
+            std::vector<uint8_t> block(block_bytes);
+            CUDA_CHECK(cudaMemcpyAsync(block.data(), src0_d, block_bytes, cudaMemcpyDeviceToHost, stream));
+            float in_vals[4] = {};
+            if (src1->type == GGML_TYPE_F32) {
+                CUDA_CHECK(cudaMemcpyAsync(in_vals, src1_d, sizeof(in_vals), cudaMemcpyDeviceToHost, stream));
+            }
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            ggml_cuda_log_nvfp4_block(block.data(), block_bytes, dst);
+            if (src1->type == GGML_TYPE_F32) {
+                ggml_cuda_log_f32_first4("input", in_vals, dst);
+            }
+        } else {
+            GGML_LOG_INFO("%s: dst=%s src0 type=%s (not NVFP4)\n",
+                    __func__, ggml_get_name(dst), ggml_type_name(src0->type));
+            if (src1->type == GGML_TYPE_F32) {
+                float in_vals[4] = {};
+                CUDA_CHECK(cudaMemcpyAsync(in_vals, src1_d, sizeof(in_vals), cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+                ggml_cuda_log_f32_first4("input", in_vals, dst);
+            }
+        }
+    }
 
     // If src0 is a temporary compute buffer, clear any potential padding.
     if (ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE) {
@@ -142,6 +204,12 @@ void ggml_cuda_mul_mat_q(
             ne03, ne13, s03, s13, s3,
             use_stream_k};
         ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
+        if (can_log) {
+            float out_vals[4] = {};
+            CUDA_CHECK(cudaMemcpyAsync(out_vals, dst_d, sizeof(out_vals), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            ggml_cuda_log_f32_first4("output", out_vals, dst);
+        }
         return;
     }
 
@@ -228,6 +296,13 @@ void ggml_cuda_mul_mat_q(
         use_stream_k};
 
     ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
+
+    if (can_log) {
+        float out_vals[4] = {};
+        CUDA_CHECK(cudaMemcpyAsync(out_vals, dst_d, sizeof(out_vals), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        ggml_cuda_log_f32_first4("output", out_vals, dst);
+    }
 }
 
 void ggml_cuda_op_mul_mat_q(

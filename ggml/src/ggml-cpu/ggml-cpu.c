@@ -1212,6 +1212,38 @@ void ggml_compute_forward_mul_mat(
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
 
+    const char * dst_name = ggml_get_name(dst);
+    const bool log_qcur = dst_name && strstr(dst_name, "Qcur-mm-0") != NULL;
+    if (log_qcur && params->ith == 0) {
+        if (src0->type == GGML_TYPE_NVFP4) {
+            const size_t block_bytes = ggml_type_size(src0->type);
+            const uint8_t * bytes = (const uint8_t *) src0->data;
+            if (bytes && block_bytes > 0) {
+                char buf[512];
+                int off = snprintf(buf, sizeof(buf), "%s: dst=%s nvfp4 block scale=%u bytes:",
+                                   __func__, dst_name, (unsigned) bytes[0]);
+                for (size_t i = 1; i < block_bytes && off > 0 && off < (int) sizeof(buf); ++i) {
+                    off += snprintf(buf + off, sizeof(buf) - off, " %u", (unsigned) bytes[i]);
+                }
+                GGML_LOG_INFO("%s\n", buf);
+            }
+        } else {
+            GGML_LOG_INFO("%s: dst=%s src0 type=%s (not NVFP4)\n",
+                          __func__, dst_name, ggml_type_name(src0->type));
+        }
+
+        if (src1->type == GGML_TYPE_F32) {
+            float in_vals[4] = {
+                ggml_get_f32_1d(src1, 0),
+                ggml_get_f32_1d(src1, 1),
+                ggml_get_f32_1d(src1, 2),
+                ggml_get_f32_1d(src1, 3),
+            };
+            GGML_LOG_INFO("%s: dst=%s input first4=%.9g %.9g %.9g %.9g\n",
+                          __func__, dst_name, in_vals[0], in_vals[1], in_vals[2], in_vals[3]);
+        }
+    }
+
     GGML_TENSOR_BINARY_OP_LOCALS
 
     const int ith = params->ith;
@@ -1396,6 +1428,20 @@ UseGgmlGemm2:;
         }
 
         current_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
+    }
+
+    if (log_qcur) {
+        ggml_barrier(params->threadpool);
+        if (ith == 0 && dst->type == GGML_TYPE_F32) {
+            float out_vals[4] = {
+                ggml_get_f32_1d(dst, 0),
+                ggml_get_f32_1d(dst, 1),
+                ggml_get_f32_1d(dst, 2),
+                ggml_get_f32_1d(dst, 3),
+            };
+            GGML_LOG_INFO("%s: dst=%s output first4=%.9g %.9g %.9g %.9g\n",
+                          __func__, dst_name, out_vals[0], out_vals[1], out_vals[2], out_vals[3]);
+        }
     }
 }
 

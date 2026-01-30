@@ -9,6 +9,7 @@
 
 #include <float.h>
 #include <algorithm>
+#include <cstdio>
 
 // ggml_compute_forward_dup
 
@@ -5282,6 +5283,20 @@ static void ggml_compute_forward_get_rows_f32(
         ggml_vec_cpy_f32(nc,
                 (float *) ((char *)  dst->data + i10*nb1  + i11*nb2  + i12*nb3),
                 (float *) ((char *) src0->data + i01*nb01 + i11*nb02 + i12*nb03));
+    }
+
+    if (params->ith == 0) {
+        const int64_t n = ggml_nelements(dst);
+        const int64_t nread = n < 4 ? n : 4;
+        if (nread > 0) {
+            const float * out = (const float *) dst->data;
+            char values[128];
+            int off = std::snprintf(values, sizeof(values), "%.9g", out[0]);
+            for (int64_t i = 1; i < nread && off > 0 && off < (int) sizeof(values); ++i) {
+                off += std::snprintf(values + off, sizeof(values) - off, " %.9g", out[i]);
+            }
+            GGML_LOG_INFO("%s: dst=%s first%lld=%s\n", __func__, ggml_get_name(dst), (long long) nread, values);
+        }
     }
 }
 

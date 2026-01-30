@@ -260,7 +260,20 @@ static void log_tensor_first4_f32(const ggml_tensor * tensor) {
     const int64_t n = ggml_nelements(tensor);
     const size_t nread = std::min<int64_t>(4, n);
     float buf[4] = {};
-    ggml_backend_tensor_get(tensor, buf, 0, nread * sizeof(float));
+    const bool contiguous = ggml_is_contiguous(tensor);
+    if (contiguous) {
+        ggml_backend_tensor_get(tensor, buf, 0, nread * sizeof(float));
+    } else {
+        for (size_t i = 0; i < nread; ++i) {
+            int64_t i0 = 0;
+            int64_t i1 = 0;
+            int64_t i2 = 0;
+            int64_t i3 = 0;
+            ggml_unravel_index(tensor, (int64_t) i, &i0, &i1, &i2, &i3);
+            const size_t offset = (size_t) (i0*tensor->nb[0] + i1*tensor->nb[1] + i2*tensor->nb[2] + i3*tensor->nb[3]);
+            ggml_backend_tensor_get(tensor, &buf[i], offset, sizeof(float));
+        }
+    }
 
     char values[128];
     int off = snprintf(values, sizeof(values), "%g", buf[0]);
@@ -268,7 +281,9 @@ static void log_tensor_first4_f32(const ggml_tensor * tensor) {
         off += snprintf(values + off, sizeof(values) - off, " %g", buf[i]);
     }
 
-    LLAMA_LOG_WARN("%s: tensor=%s first%zu=%s\n", __func__, ggml_get_name(tensor), nread, values);
+    const char * contig_tag = contiguous ? "" : " (non-contig)";
+    LLAMA_LOG_WARN("%s: tensor=%s%s first%zu=%s\n",
+            __func__, ggml_get_name(tensor), contig_tag, nread, values);
 }
 
 void log_tensor_stats(const ggml_tensor * tensor, const llama_tensor_stats & stats) {

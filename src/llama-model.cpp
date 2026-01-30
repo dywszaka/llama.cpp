@@ -26,6 +26,7 @@
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 
 const char * llm_type_name(llm_type type) {
     switch (type) {
@@ -8771,7 +8772,7 @@ struct llm_build_qwen3 : public llm_graph_context {
         ggml_tensor * cur;
         ggml_tensor * inpL;
 
-        auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * w_inp_scale, ggml_tensor * x) -> ggml_tensor * {
+        auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * w_inp_scale, ggml_tensor * x, const char * name, int il) -> ggml_tensor * {
             ggml_tensor * x_used = x;
             if (w->type == GGML_TYPE_NVFP4 && w_inp_scale) {
                 if (x_used->type != GGML_TYPE_F32) {
@@ -8781,6 +8782,8 @@ struct llm_build_qwen3 : public llm_graph_context {
             }
 
             ggml_tensor * res = ggml_mul_mat(ctx0, w, x_used);
+            
+            cb(res, name, il);
             if (w_scale) {
                 ggml_tensor * w_scale_f32 = w_scale;
                 if (w_scale->type != GGML_TYPE_F32) {
@@ -8836,21 +8839,21 @@ struct llm_build_qwen3 : public llm_graph_context {
                         model.layers[il].wq,
                         model.layers[il].wq_weight_scale_2,
                         model.layers[il].wq_inp_scale,
-                        cur);
+                        cur, "Qcur-mm", il);
                 cb(Qcur, "Qcur-scaled", il);
 
                 ggml_tensor * Kcur = build_lora_mm_scaled(
                         model.layers[il].wk,
                         model.layers[il].wk_weight_scale_2,
                         model.layers[il].wk_inp_scale,
-                        cur);
+                        cur, "Kcur-mm", il);
                 cb(Kcur, "Kcur-scaled", il);
 
                 ggml_tensor * Vcur = build_lora_mm_scaled(
                         model.layers[il].wv,
                         model.layers[il].wv_weight_scale_2,
                         model.layers[il].wv_inp_scale,
-                        cur);
+                        cur, "Vcur-mm", il);
                 cb(Vcur, "Vcur-scaled", il);
 
                 Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
@@ -8887,7 +8890,7 @@ struct llm_build_qwen3 : public llm_graph_context {
                         model.layers[il].wo,
                         model.layers[il].wo_weight_scale_2,
                         model.layers[il].wo_inp_scale,
-                        cur);
+                        cur, "attn_out-mm", il);
                 if (model.layers[il].bo) {
                     cur = ggml_add(ctx0, cur, model.layers[il].bo);
                 }
@@ -8912,14 +8915,14 @@ struct llm_build_qwen3 : public llm_graph_context {
                         model.layers[il].ffn_up,
                         model.layers[il].ffn_up_weight_scale_2,
                         model.layers[il].ffn_up_inp_scale,
-                        cur);
+                        cur, "ffn_up_mm", il);
                 cb(up, "ffn_up", il);
 
                 ggml_tensor * gate = build_lora_mm_scaled(
                         model.layers[il].ffn_gate,
                         model.layers[il].ffn_gate_weight_scale_2,
                         model.layers[il].ffn_gate_inp_scale,
-                        cur);
+                        cur, "ffn_gate_mm", il);
                 cb(gate, "ffn_gate", il);
 
                 cur = ggml_swiglu_split(ctx0, gate, up);
@@ -8929,7 +8932,7 @@ struct llm_build_qwen3 : public llm_graph_context {
                         model.layers[il].ffn_down,
                         model.layers[il].ffn_down_weight_scale_2,
                         model.layers[il].ffn_down_inp_scale,
-                        cur);
+                        cur, "ffn_down_mm", il);
                 cb(cur, "ffn_down", il);
             }
             cb(cur, "ffn_out", il);
