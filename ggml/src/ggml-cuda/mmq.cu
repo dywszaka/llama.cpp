@@ -204,6 +204,11 @@ void ggml_cuda_mul_mat_q(
             ne03, ne13, s03, s13, s3,
             use_stream_k};
         ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
+        const char * sync_env = std::getenv("LLAMA_NVFP4_PRINTF_SYNC");
+        if (src0->type == GGML_TYPE_NVFP4 && sync_env && sync_env[0] != '\0' && sync_env[0] != '0') {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            fflush(stdout);
+        }
         if (can_log) {
             float out_vals[4] = {};
             CUDA_CHECK(cudaMemcpyAsync(out_vals, dst_d, sizeof(out_vals), cudaMemcpyDeviceToHost, stream));

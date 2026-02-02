@@ -2,7 +2,13 @@
 #include "quantize.cuh"
 #include "vecdotq.cuh"
 
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+
+__device__ int ggml_cuda_nvfp4_mmvq_dbg_once = 0;
+static std::atomic<bool> ggml_nvfp4_mmvq_host_printed(false);
 
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
 
@@ -177,10 +183,30 @@ static __global__ void mul_mat_vec_q(
     const int kbx_offset = sample_x*stride_sample_x + channel_x*stride_channel_x + row0*stride_row_x;
 
     for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
-        const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+        const int kby = (kbx * qk) / QK8_1; // y block index that aligns with kbx
+        const int kby_off = (kbx * qk) % QK8_1;
 
         // x block quant index when casting the quants to int
-        const int kqs = vdr * (tid % (qi/vdr));
+        const int kqs = vdr * (tid % (qi/vdr)) + kby_off / 4;
+
+        if constexpr (type == GGML_TYPE_NVFP4) {
+            if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 &&
+                threadIdx.x == 0 && threadIdx.y == 0 && kbx == 0 &&
+                atomicCAS(&ggml_cuda_nvfp4_mmvq_dbg_once, 0, 1) == 0) {
+                const int idx_x = kbx_offset + kbx;
+                const block_nvfp4 * bx = (const block_nvfp4 *) vx + idx_x;
+                const block_q8_1  * by = y + kby;
+                printf("MMVQ NVFP4 debug: kbx=%d kby=%d kby_off=%d kqs=%d e=%u qs=%u %u %u %u %u %u %u %u | "
+                       "q8 ds=(%g,%g) qs=%d %d %d %d %d %d %d %d\n",
+                       kbx, kby, kby_off, kqs,
+                       (unsigned) bx->e,
+                       (unsigned) bx->qs[0], (unsigned) bx->qs[1], (unsigned) bx->qs[2], (unsigned) bx->qs[3],
+                       (unsigned) bx->qs[4], (unsigned) bx->qs[5], (unsigned) bx->qs[6], (unsigned) bx->qs[7],
+                       __low2float(by->ds), __high2float(by->ds),
+                       (int) by->qs[0], (int) by->qs[1], (int) by->qs[2], (int) by->qs[3],
+                       (int) by->qs[4], (int) by->qs[5], (int) by->qs[6], (int) by->qs[7]);
+            }
+        }
 
 #pragma unroll
         for (int j = 0; j < ncols_dst; ++j) {
@@ -531,6 +557,19 @@ void ggml_cuda_mul_mat_vec_q(
     const int32_t *  ids_d = ids ? (const int32_t *)  ids->data : nullptr;
     float         *  dst_d =       (float         *)  dst->data;
 
+    {
+        const size_t printf_fifo = 1 << 20;
+        CUDA_CHECK(cudaDeviceSetLimit(cudaLimitPrintfFifoSize, printf_fifo));
+    }
+
+    const bool allow_mmvq_debug =
+        src0->type == GGML_TYPE_NVFP4 &&
+        !ggml_nvfp4_mmvq_host_printed.exchange(true);
+    if (allow_mmvq_debug) {
+        int zero = 0;
+        CUDA_CHECK(cudaMemcpyToSymbol(ggml_cuda_nvfp4_mmvq_dbg_once, &zero, sizeof(int)));
+    }
+
     // If src0 is a temporary compute buffer, clear any potential padding.
     if (ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE) {
         const size_t size_data  = ggml_nbytes(src0);
@@ -576,6 +615,12 @@ void ggml_cuda_mul_mat_vec_q(
         ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
         ne02, nchannels_y, nchannels_dst, s02, stride_channel_y, stride_channel_dst,
         ne03,              ne3,           s03, s13,              s3,                 stream);
+
+    const char * sync_env = std::getenv("LLAMA_NVFP4_PRINTF_SYNC");
+    if (src0->type == GGML_TYPE_NVFP4 && sync_env && sync_env[0] != '\0' && sync_env[0] != '0') {
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        fflush(stdout);
+    }
 }
 
 void ggml_cuda_op_mul_mat_vec_q(

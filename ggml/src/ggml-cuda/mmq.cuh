@@ -7,6 +7,9 @@
 
 #include <climits>
 #include <cstdint>
+#include <cstdio>
+
+extern __device__ int ggml_cuda_nvfp4_tile_dbg_once;
 
 using namespace ggml_cuda_mma;
 
@@ -215,7 +218,7 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
         case GGML_TYPE_Q5_1:    return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_Q8_0:    return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_MXFP4:   return MMQ_MMA_TILE_X_K_Q8_1;
-        case GGML_TYPE_NVFP4:   return MMQ_MMA_TILE_X_K_NVFP4;
+        case GGML_TYPE_NVFP4:   return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_Q2_K:    return MMQ_MMA_TILE_X_K_Q2_K;
         case GGML_TYPE_Q3_K:    return MMQ_MMA_TILE_X_K_Q3_K;
         case GGML_TYPE_Q4_K:    return MMQ_MMA_TILE_X_K_Q8_1;
@@ -802,6 +805,19 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const int2 v = get_int_from_table_16_nvfp4(aux_q4, kvalues_nvfp4);
 
         const int k0 = kbx * (QK_NVFP4/4) + 2*kqsx;
+
+#if !defined(GGML_USE_HIP)
+        if (atomicCAS(&ggml_cuda_nvfp4_tile_dbg_once, 0, 1) == 0) {
+            const float d = ggml_cuda_e4m3_to_fp32_half(bxi->e);
+            printf("NVFP4 load_tiles first: kbx0=%d i=%d kbx=%d kqsx=%d k0=%d e=%u qs=%u %u %u %u %u %u %u %u | "
+                   "aux_q4=0x%08x v.x=%d v.y=%d d=%g\n",
+                   kbx0, i, kbx, kqsx, k0,
+                   (unsigned) bxi->e,
+                   (unsigned) bxi->qs[0], (unsigned) bxi->qs[1], (unsigned) bxi->qs[2], (unsigned) bxi->qs[3],
+                   (unsigned) bxi->qs[4], (unsigned) bxi->qs[5], (unsigned) bxi->qs[6], (unsigned) bxi->qs[7],
+                   (unsigned) aux_q4, v.x, v.y, d);
+        }
+#endif
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
         x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + 0] = v.x;

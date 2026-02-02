@@ -3,6 +3,9 @@
 #include "common.cuh"
 
 #include <cstdint>
+#include <cstdio>
+
+extern __device__ int ggml_cuda_nvfp4_dbg_once;
 
 static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32) {
     const uint8_t * x8 = (const uint8_t *) x;
@@ -282,10 +285,21 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
 
 static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
-
+    
     const block_nvfp4 * bq4 = (const block_nvfp4 *) vbq + kbx;
 
     const int * q8 = (const int *) bq8_1->qs + iqs;
+
+    if (atomicCAS(&ggml_cuda_nvfp4_dbg_once, 0, 1) == 0) {
+        printf("NVFP4 vec_dot first: kbx=%d iqs=%d e=%u qs=%u %u %u %u %u %u %u %u | q8 ds=(%g,%g) qs=%d %d %d %d %d %d %d %d\n",
+               kbx, iqs,
+               (unsigned) bq4->e,
+               (unsigned) bq4->qs[0], (unsigned) bq4->qs[1], (unsigned) bq4->qs[2], (unsigned) bq4->qs[3],
+               (unsigned) bq4->qs[4], (unsigned) bq4->qs[5], (unsigned) bq4->qs[6], (unsigned) bq4->qs[7],
+               __low2float(bq8_1->ds), __high2float(bq8_1->ds),
+               (int) bq8_1->qs[0], (int) bq8_1->qs[1], (int) bq8_1->qs[2], (int) bq8_1->qs[3],
+               (int) bq8_1->qs[4], (int) bq8_1->qs[5], (int) bq8_1->qs[6], (int) bq8_1->qs[7]);
+    }
 
     int sumi = 0;
 #pragma unroll
@@ -293,8 +307,8 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
         const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
         const int2 v = get_int_from_table_16_nvfp4(aux_q4, kvalues_nvfp4);
 
-        sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
-        sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
+        sumi = ggml_cuda_dp4a(v.x, q8[2*l + 0], sumi);
+        sumi = ggml_cuda_dp4a(v.y, q8[2*l + 1], sumi);
     }
 
     const float d = ggml_cuda_e4m3_to_fp32_half(bq4->e) * __low2float(bq8_1->ds);
