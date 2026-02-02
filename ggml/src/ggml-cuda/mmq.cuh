@@ -807,15 +807,32 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const int k0 = kbx * (QK_NVFP4/4) + 2*kqsx;
 
 #if !defined(GGML_USE_HIP)
-        if (atomicCAS(&ggml_cuda_nvfp4_tile_dbg_once, 0, 1) == 0) {
+        if (kbx0 == 0 && i == 0 && kbx == 0 && kqsx == 0 &&
+            atomicCAS(&ggml_cuda_nvfp4_tile_dbg_once, 0, 1) == 0) {
             const float d = ggml_cuda_e4m3_to_fp32_half(bxi->e);
-            printf("NVFP4 load_tiles first: kbx0=%d i=%d kbx=%d kqsx=%d k0=%d e=%u qs=%u %u %u %u %u %u %u %u | "
-                   "aux_q4=0x%08x v.x=%d v.y=%d d=%g\n",
-                   kbx0, i, kbx, kqsx, k0,
-                   (unsigned) bxi->e,
-                   (unsigned) bxi->qs[0], (unsigned) bxi->qs[1], (unsigned) bxi->qs[2], (unsigned) bxi->qs[3],
-                   (unsigned) bxi->qs[4], (unsigned) bxi->qs[5], (unsigned) bxi->qs[6], (unsigned) bxi->qs[7],
-                   (unsigned) aux_q4, v.x, v.y, d);
+            printf("\nNVFP4 load_tiles first: kbx0=%d i=%d kbx=%d kqsx=%d k0=%d e=%u vals:",
+                   kbx0, i, kbx, kqsx, k0, (unsigned) bxi->e);
+            for (int qi = 0; qi < QK_NVFP4/2; ++qi) {
+                const uint8_t q = bxi->qs[qi];
+                printf(" %u %u", (unsigned) (q & 0x0F), (unsigned) (q >> 4));
+            }
+            const int8_t * v0 = (const int8_t *) &v.x;
+            const int8_t * v1 = (const int8_t *) &v.y;
+            const int8_t q4_0 = (int8_t) ((aux_q4 >>  0) & 0x0F);
+            const int8_t q4_1 = (int8_t) ((aux_q4 >>  4) & 0x0F);
+            const int8_t q4_2 = (int8_t) ((aux_q4 >>  8) & 0x0F);
+            const int8_t q4_3 = (int8_t) ((aux_q4 >> 12) & 0x0F);
+            const int8_t q4_4 = (int8_t) ((aux_q4 >> 16) & 0x0F);
+            const int8_t q4_5 = (int8_t) ((aux_q4 >> 20) & 0x0F);
+            const int8_t q4_6 = (int8_t) ((aux_q4 >> 24) & 0x0F);
+            const int8_t q4_7 = (int8_t) ((aux_q4 >> 28) & 0x0F);
+            printf(" | aux_q4=0x%08x aux_q4_nibbles=%d %d %d %d %d %d %d %d v8=%d %d %d %d %d %d %d %d d=%g\n",
+                   (unsigned) aux_q4,
+                   (int) q4_0, (int) q4_1, (int) q4_2, (int) q4_3,
+                   (int) q4_4, (int) q4_5, (int) q4_6, (int) q4_7,
+                   (int) v0[0], (int) v0[1], (int) v0[2], (int) v0[3],
+                   (int) v1[0], (int) v1[1], (int) v1[2], (int) v1[3],
+                   d);
         }
 #endif
 
@@ -3246,6 +3263,32 @@ static __global__ void mul_mat_q(
 
     constexpr int qk    = ggml_cuda_type_traits<type>::qk;
     constexpr int mmq_y = get_mmq_y_device();
+
+#if !defined(GGML_USE_HIP)
+    if constexpr (type == GGML_TYPE_NVFP4) {
+        if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 &&
+            threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+            const block_nvfp4 * bx = (const block_nvfp4 *) x;
+            printf("mul_mat_q nvfp4 x block0: e_u8=%u vals:", (unsigned) bx->e);
+            for (int i = 0; i < QK_NVFP4/2; ++i) {
+                const uint8_t q = bx->qs[i];
+                printf(" %u %u", (unsigned) (q & 0x0F), (unsigned) (q >> 4));
+            }
+            printf("\n");
+
+            const block_q8_1_mmq * by = (const block_q8_1_mmq *) y;
+            printf("mul_mat_q y block0: d4=%.9g %.9g %.9g %.9g\n",
+                   by->d4[0], by->d4[1], by->d4[2], by->d4[3]);
+            for (int i = 0; i < 4*QK8_1; i += 32) {
+                printf("mul_mat_q y block0 qs[%d..%d]:", i, i + 31);
+                for (int j = i; j < i + 32; ++j) {
+                    printf(" %d", (int) by->qs[j]);
+                }
+                printf("\n");
+            }
+        }
+    }
+#endif
 
     const int ntx = (ncols_dst + mmq_x - 1) / mmq_x; // Number of tiles x
     const int nty = (nrows_x   + mmq_y - 1) / mmq_y; // Number of tiles y

@@ -85,16 +85,14 @@ static bool ggml_cuda_can_log(cudaStream_t stream) {
     return err == cudaSuccess && status == cudaStreamCaptureStatusNone;
 }
 
-static void ggml_cuda_log_nvfp4_block(const uint8_t * bytes, size_t nbytes, const ggml_tensor * dst) {
-    if (!bytes || nbytes == 0) {
-        return;
-    }
-
+static void ggml_cuda_log_nvfp4_block(const block_nvfp4 & block, const ggml_tensor * dst) {
     char buf[512];
-    int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s nvfp4 block scale=%u bytes:",
-            __func__, dst ? ggml_get_name(dst) : "unknown", (unsigned) bytes[0]);
-    for (size_t i = 1; i < nbytes && off > 0 && off < (int) sizeof(buf); ++i) {
-        off += std::snprintf(buf + off, sizeof(buf) - off, " %u", (unsigned) bytes[i]);
+    int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s nvfp4 scale_u8=%u vals:",
+            __func__, dst ? ggml_get_name(dst) : "unknown", (unsigned) block.e);
+    for (int i = 0; i < QK_NVFP4/2 && off > 0 && off < (int) sizeof(buf); ++i) {
+        const uint8_t q = block.qs[i];
+        off += std::snprintf(buf + off, sizeof(buf) - off, " %u %u",
+                (unsigned) (q & 0x0F), (unsigned) (q >> 4));
     }
     GGML_LOG_INFO("%s\n", buf);
 }
@@ -103,6 +101,65 @@ static void ggml_cuda_log_f32_first4(const char * label, const float vals[4], co
     GGML_LOG_INFO("%s: dst=%s %s first4=%.9g %.9g %.9g %.9g\n",
             __func__, dst ? ggml_get_name(dst) : "unknown", label,
             vals[0], vals[1], vals[2], vals[3]);
+}
+
+static const char * ggml_cuda_mmq_layout_name(mmq_q8_1_ds_layout layout) {
+    switch (layout) {
+        case MMQ_Q8_1_DS_LAYOUT_D4:
+            return "D4";
+        case MMQ_Q8_1_DS_LAYOUT_DS4:
+            return "DS4";
+        case MMQ_Q8_1_DS_LAYOUT_D2S6:
+            return "D2S6";
+        default:
+            return "unknown";
+    }
+}
+
+static void ggml_cuda_log_block_q8_1_mmq(const block_q8_1_mmq & block, ggml_type type_x, const ggml_tensor * dst) {
+    const mmq_q8_1_ds_layout layout = mmq_get_q8_1_ds_layout(type_x);
+    GGML_LOG_INFO("%s: dst=%s block_q8_1_mmq layout=%s\n",
+            __func__, dst ? ggml_get_name(dst) : "unknown", ggml_cuda_mmq_layout_name(layout));
+
+    switch (layout) {
+        case MMQ_Q8_1_DS_LAYOUT_D4:
+            GGML_LOG_INFO("%s: dst=%s d4=%.9g %.9g %.9g %.9g\n",
+                    __func__, dst ? ggml_get_name(dst) : "unknown",
+                    block.d4[0], block.d4[1], block.d4[2], block.d4[3]);
+            break;
+        case MMQ_Q8_1_DS_LAYOUT_DS4: {
+            const uint16_t * u16 = reinterpret_cast<const uint16_t *>(block.ds4);
+            char buf[256];
+            int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s ds4_u16:",
+                    __func__, dst ? ggml_get_name(dst) : "unknown");
+            for (int i = 0; i < 8 && off > 0 && off < (int) sizeof(buf); ++i) {
+                off += std::snprintf(buf + off, sizeof(buf) - off, " %u", (unsigned) u16[i]);
+            }
+            GGML_LOG_INFO("%s\n", buf);
+        } break;
+        case MMQ_Q8_1_DS_LAYOUT_D2S6: {
+            const uint16_t * u16 = reinterpret_cast<const uint16_t *>(block.d2s6);
+            char buf[256];
+            int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s d2s6_u16:",
+                    __func__, dst ? ggml_get_name(dst) : "unknown");
+            for (int i = 0; i < 8 && off > 0 && off < (int) sizeof(buf); ++i) {
+                off += std::snprintf(buf + off, sizeof(buf) - off, " %u", (unsigned) u16[i]);
+            }
+            GGML_LOG_INFO("%s\n", buf);
+        } break;
+        default:
+            break;
+    }
+
+    for (int i = 0; i < 4*QK8_1; i += 32) {
+        char buf[512];
+        int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s qs[%d..%d]:",
+                __func__, dst ? ggml_get_name(dst) : "unknown", i, i + 31);
+        for (int j = i; j < i + 32 && off > 0 && off < (int) sizeof(buf); ++j) {
+            off += std::snprintf(buf + off, sizeof(buf) - off, " %d", (int) block.qs[j]);
+        }
+        GGML_LOG_INFO("%s\n", buf);
+    }
 }
 
 void ggml_cuda_mul_mat_q(
@@ -133,15 +190,14 @@ void ggml_cuda_mul_mat_q(
     const bool can_log = log_qcur && ggml_cuda_can_log(stream);
     if (can_log) {
         if (src0->type == GGML_TYPE_NVFP4) {
-            const size_t block_bytes = ggml_type_size(src0->type);
-            std::vector<uint8_t> block(block_bytes);
-            CUDA_CHECK(cudaMemcpyAsync(block.data(), src0_d, block_bytes, cudaMemcpyDeviceToHost, stream));
+            block_nvfp4 block = {};
+            CUDA_CHECK(cudaMemcpyAsync(&block, src0_d, sizeof(block), cudaMemcpyDeviceToHost, stream));
             float in_vals[4] = {};
             if (src1->type == GGML_TYPE_F32) {
                 CUDA_CHECK(cudaMemcpyAsync(in_vals, src1_d, sizeof(in_vals), cudaMemcpyDeviceToHost, stream));
             }
             CUDA_CHECK(cudaStreamSynchronize(stream));
-            ggml_cuda_log_nvfp4_block(block.data(), block_bytes, dst);
+            ggml_cuda_log_nvfp4_block(block, dst);
             if (src1->type == GGML_TYPE_F32) {
                 ggml_cuda_log_f32_first4("input", in_vals, dst);
             }
@@ -192,6 +248,12 @@ void ggml_cuda_mul_mat_q(
             quantize_mmq_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type,
                 ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
             CUDA_CHECK(cudaGetLastError());
+        }
+        if (can_log && src0->type == GGML_TYPE_NVFP4) {
+            block_q8_1_mmq y_block = {};
+            CUDA_CHECK(cudaMemcpyAsync(&y_block, src1_q8_1.get(), sizeof(y_block), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            ggml_cuda_log_block_q8_1_mmq(y_block, src0->type, dst);
         }
 
         const int64_t s12 = ne11*ne10_padded * sizeof(block_q8_1)/(QK8_1*sizeof(int));
@@ -287,6 +349,12 @@ void ggml_cuda_mul_mat_q(
         quantize_mmq_q8_1_cuda(src1_d, ids_src1_dev, src1_q8_1.get(), src0->type,
             ne10, s11, s12, s13, ne10_padded, ne11_flat, ne12_flat, ne13_flat, stream);
         CUDA_CHECK(cudaGetLastError());
+    }
+    if (can_log && src0->type == GGML_TYPE_NVFP4) {
+        block_q8_1_mmq y_block = {};
+        CUDA_CHECK(cudaMemcpyAsync(&y_block, src1_q8_1.get(), sizeof(y_block), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        ggml_cuda_log_block_q8_1_mmq(y_block, src0->type, dst);
     }
 
     const int64_t s12 = ne11*ne10_padded * sizeof(block_q8_1)/(QK8_1*sizeof(int));
