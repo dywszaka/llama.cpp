@@ -3207,14 +3207,21 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         if constexpr (type == GGML_TYPE_NVFP4) {
             if (offset_x + kb0 == 0 && threadIdx.x == 0 && threadIdx.y == 0 &&
                 atomicCAS(&ggml_cuda_nvfp4_tile_xy_dbg_once, 0, 1) == 0) {
-                printf("NVFP4 mmq tile_xy first: offset_x=%d kb0=%d mmq_x=%d mmq_y=%d tile_x:",
+                printf("NVFP4 mmq tile_xy first: offset_x=%d kb0=%d mmq_x=%d mmq_y=%d",
                        offset_x, kb0, mmq_x, mmq_y);
+                // tile_x stores packed int8 values in int32 lanes; decode to match load_tiles_nvfp4 debug.
+                const int8_t * tile_x_qs8 = (const int8_t *) tile_x;
+                printf(" tile_x_qs8:");
                 for (int idx = 0; idx < 16; ++idx) {
-                    printf(" %d", tile_x[idx]);
+                    printf(" %d", (int) tile_x_qs8[idx]);
                 }
-                printf(" | tile_y:");
-                for (int idx = 0; idx < 16; ++idx) {
-                    printf(" %d", tile_y[idx]);
+                const float * tile_y_d4 = (const float *) tile_y;
+                const int8_t * tile_y_qs8 = (const int8_t *) (tile_y + 4);
+                printf(" | tile_y_d4: %.9g %.9g %.9g %.9g",
+                       tile_y_d4[0], tile_y_d4[1], tile_y_d4[2], tile_y_d4[3]);
+                printf(" | tile_y_qs8[0..31]:");
+                for (int idx = 0; idx < 32; ++idx) {
+                    printf(" %d", (int) tile_y_qs8[idx]);
                 }
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
                 const float * tile_x_df = (const float *) (tile_x + MMQ_TILE_NE_K*2);
