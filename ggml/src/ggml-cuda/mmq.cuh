@@ -10,6 +10,7 @@
 #include <cstdio>
 
 extern __device__ int ggml_cuda_nvfp4_tile_dbg_once;
+extern __device__ int ggml_cuda_nvfp4_tile_xy_dbg_once;
 
 using namespace ggml_cuda_mma;
 
@@ -3201,6 +3202,35 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         }
 
         __syncthreads();
+
+#if !defined(GGML_USE_HIP)
+        if constexpr (type == GGML_TYPE_NVFP4) {
+            if (offset_x + kb0 == 0 && threadIdx.x == 0 && threadIdx.y == 0 &&
+                atomicCAS(&ggml_cuda_nvfp4_tile_xy_dbg_once, 0, 1) == 0) {
+                printf("NVFP4 mmq tile_xy first: offset_x=%d kb0=%d mmq_x=%d mmq_y=%d tile_x:",
+                       offset_x, kb0, mmq_x, mmq_y);
+                for (int idx = 0; idx < 16; ++idx) {
+                    printf(" %d", tile_x[idx]);
+                }
+                printf(" | tile_y:");
+                for (int idx = 0; idx < 16; ++idx) {
+                    printf(" %d", tile_y[idx]);
+                }
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
+                const float * tile_x_df = (const float *) (tile_x + MMQ_TILE_NE_K*2);
+#else
+                constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_NVFP4, mmq_y);
+                const float * tile_x_df = (const float *) (tile_x + txs.qs);
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
+                constexpr int scale_per_row = MMQ_TILE_NE_K / QI_NVFP4;
+                printf(" | tile_x_scale_row0:");
+                for (int idx = 0; idx < scale_per_row; ++idx) {
+                    printf(" %g", tile_x_df[idx]);
+                }
+                printf("\n");
+            }
+        }
+#endif
 
         vec_dot(tile_x, tile_y, sum, 0);
 
