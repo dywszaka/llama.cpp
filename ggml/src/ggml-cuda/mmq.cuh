@@ -3213,8 +3213,8 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
                 const int tile_x_ints = mmq_y * mmq_get_mma_tile_x_k(GGML_TYPE_NVFP4);
 #else
-                constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_NVFP4, mmq_y);
-                const int tile_x_ints = txs.qs + txs.dm + txs.sc;
+                constexpr tile_x_sizes txs_dbg = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_NVFP4, mmq_y);
+                const int tile_x_ints = txs_dbg.qs + txs_dbg.dm + txs_dbg.sc;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
                 printf(" | tile_x_ints=%d tile_y_ints=%d", tile_x_ints, tile_y_ints);
                 // tile_x stores packed int8 values in int32 lanes; decode to match load_tiles_nvfp4 debug.
