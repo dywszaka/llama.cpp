@@ -198,18 +198,19 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
     }
 }
 
-#define MMQ_MMA_TILE_X_K_Q8_0 (2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_0                   + 4)
-#define MMQ_MMA_TILE_X_K_Q8_1 (2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_0                   + 4)
-#define MMQ_MMA_TILE_X_K_Q2_K (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K                           + 4)
-#define MMQ_MMA_TILE_X_K_Q3_K (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/2                         + 4)
-#define MMQ_MMA_TILE_X_K_Q6_K (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/QI6_K   + MMQ_TILE_NE_K/8 + 7)
-#define MMQ_MMA_TILE_X_K_NVFP4 MMQ_MMA_TILE_X_K_Q8_1
+#define MMQ_MMA_TILE_X_K_Q8_0  (2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_0                    + 4)
+#define MMQ_MMA_TILE_X_K_Q8_1  (2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_0                    + 4)
+#define MMQ_MMA_TILE_X_K_Q2_K  (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K                            + 4)
+#define MMQ_MMA_TILE_X_K_Q3_K  (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/2                          + 4)
+#define MMQ_MMA_TILE_X_K_Q6_K  (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/QI6_K    + MMQ_TILE_NE_K/8 + 7)
+#define MMQ_MMA_TILE_X_K_NVFP4 (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/QI_NVFP4                   + 4)
 
 static_assert(MMQ_MMA_TILE_X_K_Q8_0 % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_Q8_1 % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_Q2_K % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_Q3_K % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_Q6_K % 8 == 4, "Wrong padding.");
+static_assert(MMQ_MMA_TILE_X_K_NVFP4 % 8 == 4, "Wrong padding.");
 
 static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
     switch (type) {
@@ -219,7 +220,7 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
         case GGML_TYPE_Q5_1:    return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_Q8_0:    return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_MXFP4:   return MMQ_MMA_TILE_X_K_Q8_1;
-        case GGML_TYPE_NVFP4:   return MMQ_MMA_TILE_X_K_Q8_1;
+        case GGML_TYPE_NVFP4:   return MMQ_MMA_TILE_X_K_NVFP4;
         case GGML_TYPE_Q2_K:    return MMQ_MMA_TILE_X_K_Q2_K;
         case GGML_TYPE_Q3_K:    return MMQ_MMA_TILE_X_K_Q3_K;
         case GGML_TYPE_Q4_K:    return MMQ_MMA_TILE_X_K_Q8_1;
@@ -838,8 +839,8 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 #endif
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + 0] = v.x;
-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + 1] = v.y;
+        x_qs[i*MMQ_MMA_TILE_X_K_NVFP4 + k0 + 0] = v.x;
+        x_qs[i*MMQ_MMA_TILE_X_K_NVFP4 + k0 + 1] = v.y;
 #else
         x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 0] = v.x;
         x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 1] = v.y;
@@ -861,7 +862,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const block_nvfp4 * bxi = (const block_nvfp4 *) x + kbx0 + i*stride + kbxd;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
-        x_df[i*MMQ_MMA_TILE_X_K_Q8_1                 + kbxd] = ggml_cuda_e4m3_to_fp32_half(bxi->e);
+        x_df[i*MMQ_MMA_TILE_X_K_NVFP4                + kbxd] = ggml_cuda_e4m3_to_fp32_half(bxi->e);
 #else
         x_df[i*(MMQ_TILE_NE_K/QI_NVFP4) + i/QI_NVFP4 + kbxd] = ggml_cuda_e4m3_to_fp32_half(bxi->e);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
@@ -3051,8 +3052,8 @@ template <int mmq_x, int mmq_y, bool need_check>
 struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_NVFP4> {
     static constexpr int              vdr          = VDR_NVFP4_Q8_1_MMQ;
     static constexpr load_tiles_mmq_t load_tiles   = load_tiles_nvfp4<mmq_y, need_check>;
-    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
-    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_16_q8_1_mma<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_16_q8_1_dp4a<mmq_x, mmq_y>;
 };
 
 template <int mmq_x, int mmq_y, bool need_check>
