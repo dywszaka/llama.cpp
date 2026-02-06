@@ -3231,6 +3231,12 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
                 for (int idx = 0; idx < 32; ++idx) {
                     printf(" %d", (int) tile_y_qs8[idx]);
                 }
+                const int block_ints = (int) (sizeof(block_q8_1_mmq) / sizeof(int));
+                const int blocks_per_kb0 = (qk * block_ints) / (4 * QK8_1);
+                const int tile_y_block_k = kb0 * blocks_per_kb0;
+                const int tile_y_block_base = tile_y_block_k * ncols_y;
+                printf(" | tile_y_block_k=%d blocks_per_kb0=%d ncols_y=%d tile_y_block_base=%d",
+                       tile_y_block_k, blocks_per_kb0, ncols_y, tile_y_block_base);
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
                 const float * tile_x_df = (const float *) (tile_x + MMQ_TILE_NE_K*2);
 #else
