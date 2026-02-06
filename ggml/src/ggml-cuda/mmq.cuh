@@ -3208,8 +3208,12 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         if constexpr (type == GGML_TYPE_NVFP4) {
             if (offset_x + kb0 == 0 && threadIdx.x == 0 && threadIdx.y == 0 &&
                 atomicCAS(&ggml_cuda_nvfp4_tile_xy_dbg_once, 0, 1) == 0) {
-                printf("NVFP4 mmq tile_xy first: offset_x=%d kb0=%d mmq_x=%d mmq_y=%d tile_x_max_i=%d stride_row_x=%d",
-                       offset_x, kb0, mmq_x, mmq_y, tile_x_max_i, stride_row_x);
+                printf("NVFP4 mmq tile_xy first: offset_x=%d kb0=%d mmq_x=%d mmq_y=%d"
+                       " stride_row_x=%d ncols_y=%d stride_col_dst=%d"
+                       " tile_x_max_i=%d tile_y_max_j=%d kb0_start=%d kb0_stop=%d",
+                       offset_x, kb0, mmq_x, mmq_y,
+                       stride_row_x, ncols_y, stride_col_dst,
+                       tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
                 const int tile_y_ints = mmq_x*MMQ_TILE_Y_K;
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
                 const int tile_x_ints = mmq_y * mmq_get_mma_tile_x_k(GGML_TYPE_NVFP4);
