@@ -6,8 +6,6 @@
 #include <cstring>
 #include <vector>
 
-__device__ int ggml_cuda_nvfp4_tile_xy_dbg_once = 0;
-
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
         case GGML_TYPE_Q4_0:

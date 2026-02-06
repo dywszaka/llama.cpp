@@ -3160,6 +3160,58 @@ struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_IQ4_XS> {
     static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
 };
 
+template <ggml_type type, int mmq_x, int mmq_y>
+static __device__ __forceinline__ void mmq_check_vec_dot_tiles_fp4(
+        const int * __restrict__ tile_x,
+        const int * __restrict__ tile_y,
+        const int k00) {
+#ifndef NDEBUG
+    if constexpr (type == GGML_TYPE_MXFP4 || type == GGML_TYPE_NVFP4) {
+        constexpr int qk = ggml_cuda_type_traits<type>::qk;
+        constexpr int qi = ggml_cuda_type_traits<type>::qi;
+        constexpr int tile_y_ints_per_row = (int) (sizeof(block_q8_1_mmq) / sizeof(int));
+
+        static_assert(sizeof(block_q8_1_mmq) == MMQ_TILE_Y_K * sizeof(int), "Unexpected tile_y row size.");
+        static_assert(MMQ_ITER_K % qk == 0, "MMQ_ITER_K must be divisible by qk.");
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
+        constexpr int tile_x_ints_per_row = mmq_get_mma_tile_x_k(type);
+        static_assert(tile_x_ints_per_row % 8 == 4, "MMA tile_x row padding mismatch.");
+#else
+        constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(type, mmq_y);
+        constexpr int tile_x_ints_per_row = txs.qs / mmq_y;
+        static_assert(txs.qs % mmq_y == 0, "tile_x.qs must be row-major.");
+        static_assert(tile_x_ints_per_row == 2*MMQ_TILE_NE_K + 1, "DP4A tile_x row stride mismatch.");
+        static_assert(txs.dm == mmq_y*MMQ_TILE_NE_K/qi + mmq_y/qi, "DP4A tile_x scale layout mismatch.");
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
+
+        if (threadIdx.x == 0 && threadIdx.y == 0) {
+            bool ok = true;
+            ok = ok && tile_x != nullptr;
+            ok = ok && tile_y != nullptr;
+            ok = ok && (k00 == 0 || k00 == MMQ_TILE_NE_K);
+            ok = ok && (((uintptr_t) tile_x) % alignof(int) == 0);
+            ok = ok && (((uintptr_t) tile_y) % alignof(int) == 0);
+            ok = ok && (tile_y_ints_per_row == MMQ_TILE_Y_K);
+            ok = ok && (tile_x_ints_per_row > MMQ_TILE_NE_K);
+
+            if (!ok) {
+                printf("mmq vec_dot precheck failed: type=%d mmq_x=%d mmq_y=%d k00=%d qk=%d qi=%d"
+                       " tile_x=%p tile_y=%p tile_x_row_ints=%d tile_y_row_ints=%d\n",
+                       (int) type, mmq_x, mmq_y, k00, qk, qi,
+                       (const void *) tile_x, (const void *) tile_y,
+                       tile_x_ints_per_row, tile_y_ints_per_row);
+                __trap();
+            }
+        }
+    }
+#else
+    GGML_UNUSED(tile_x);
+    GGML_UNUSED(tile_y);
+    GGML_UNUSED(k00);
+#endif // NDEBUG
+}
+
 template <ggml_type type, int mmq_x, bool need_check, bool fixup>
 static __device__ __forceinline__ void mul_mat_q_process_tile(
         const char * __restrict__ x, const int offset_x, const int * __restrict__ y,
@@ -3257,7 +3309,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
             }
         }
 #endif
-
+        mmq_check_vec_dot_tiles_fp4<type, mmq_x, mmq_y>(tile_x, tile_y, 0);
         vec_dot(tile_x, tile_y, sum, 0);
 
         __syncthreads();
@@ -3274,6 +3326,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
         __syncthreads();
 
+        mmq_check_vec_dot_tiles_fp4<type, mmq_x, mmq_y>(tile_x, tile_y, MMQ_TILE_NE_K);
         vec_dot(tile_x, tile_y, sum, MMQ_TILE_NE_K);
 
         __syncthreads();
