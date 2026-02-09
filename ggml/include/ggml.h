@@ -1299,6 +1299,16 @@ extern "C" {
             struct ggml_tensor * a,
             enum ggml_prec       prec);
 
+    // bind an optional NVFP4 input scale tensor to a GGML_OP_MUL_MAT node
+    // this is currently a placeholder channel for backend-specific handling
+    GGML_API void ggml_mul_mat_set_nvfp4_input_scale(
+            struct ggml_tensor       * mul_mat,
+            const struct ggml_tensor * scale);
+
+    // fetch the optional NVFP4 input scale tensor bound via ggml_mul_mat_set_nvfp4_input_scale()
+    GGML_API const struct ggml_tensor * ggml_mul_mat_get_nvfp4_input_scale(
+            const struct ggml_tensor * mul_mat);
+
     // indirect matrix multiplication
     GGML_API struct ggml_tensor * ggml_mul_mat_id(
             struct ggml_context * ctx,

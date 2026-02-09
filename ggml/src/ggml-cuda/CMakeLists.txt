@@ -110,6 +110,10 @@ if (CUDAToolkit_FOUND)
         target_link_libraries(ggml-cuda PRIVATE CUDA::cudart CUDA::cublas)
     endif()
 
+    if (TARGET CUDA::cublasLt)
+        target_link_libraries(ggml-cuda PRIVATE CUDA::cublasLt)
+    endif()
+
     if (GGML_CUDA_NO_VMM)
         # No VMM requested, no need to link directly with the cuda driver lib (libcuda.so)
     else()

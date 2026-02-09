@@ -6,7 +6,6 @@
 #include "llama-cparams.h"
 #include "llama-model-loader.h"
 #include "llama-log.h"
-#include "llama-nvfp4.h"
 
 #include "llama-kv-cache-unified.h"
 #include "llama-kv-cache-unified-iswa.h"
@@ -8774,14 +8773,14 @@ struct llm_build_qwen3 : public llm_graph_context {
 
         auto build_lora_mm_scaled = [&](ggml_tensor * w, ggml_tensor * w_scale, ggml_tensor * w_inp_scale, ggml_tensor * x, const char * name, int il) -> ggml_tensor * {
             ggml_tensor * x_used = x;
-            if (w->type == GGML_TYPE_NVFP4 && w_inp_scale) {
-                if (x_used->type != GGML_TYPE_F32) {
-                    x_used = ggml_cast(ctx0, x_used, GGML_TYPE_F32);
-                }
-                x_used = ggml_map_custom2(ctx0, x_used, w_inp_scale, ggml_nvfp4_act_roundtrip_op, GGML_N_TASKS_MAX, nullptr);
+            if (w->type == GGML_TYPE_NVFP4 && x_used->type != GGML_TYPE_F32) {
+                x_used = ggml_cast(ctx0, x_used, GGML_TYPE_F32);
             }
 
             ggml_tensor * res = ggml_mul_mat(ctx0, w, x_used);
+            if (w->type == GGML_TYPE_NVFP4 && w_inp_scale != nullptr) {
+                ggml_mul_mat_set_nvfp4_input_scale(res, w_inp_scale);
+            }
             
             cb(res, name, il);
             if (w_scale) {

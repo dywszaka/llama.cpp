@@ -854,6 +854,14 @@ struct ggml_tensor_extra_gpu {
     cudaEvent_t events[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS]; // events for synchronizing multiple GPUs
 };
 
+struct ggml_cuda_nvfp4_cache_entry {
+    const void * src0_data = nullptr;
+    int64_t ne[GGML_MAX_DIMS] = { 0, 0, 0, 0 };
+    size_t  nb[GGML_MAX_DIMS] = { 0, 0, 0, 0 };
+    void * repacked = nullptr;
+    size_t nbytes = 0;
+};
+
 
 #if (defined(GGML_CUDA_USE_GRAPHS) || defined(GGML_HIP_GRAPHS)) || defined(GGML_MUSA_GRAPHS)
 #define USE_CUDA_GRAPH
@@ -905,6 +913,10 @@ struct ggml_backend_cuda_context {
 
     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
+#if GGML_CUDA_HAS_CUBLASLT
+    cublasLtHandle_t cublaslt_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
+    std::vector<ggml_cuda_nvfp4_cache_entry> nvfp4_repack_cache[GGML_CUDA_MAX_DEVICES];
+#endif
 
     std::unique_ptr<ggml_cuda_graph> cuda_graph;
 
@@ -939,6 +951,20 @@ struct ggml_backend_cuda_context {
     cublasHandle_t cublas_handle() {
         return cublas_handle(device);
     }
+
+#if GGML_CUDA_HAS_CUBLASLT
+    cublasLtHandle_t cublaslt_handle(int device) {
+        if (cublaslt_handles[device] == nullptr) {
+            ggml_cuda_set_device(device);
+            CUBLAS_CHECK(cublasLtCreate(&cublaslt_handles[device]));
+        }
+        return cublaslt_handles[device];
+    }
+
+    cublasLtHandle_t cublaslt_handle() {
+        return cublaslt_handle(device);
+    }
+#endif
 
     // pool
     std::unique_ptr<ggml_cuda_pool> pools[GGML_CUDA_MAX_DEVICES];
