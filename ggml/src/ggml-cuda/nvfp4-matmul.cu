@@ -184,12 +184,12 @@ static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4(float x) {
     return best_index;
 }
 
-static __device__ __forceinline__ uint8_t ggml_cuda_best_index_e4m3_half(float x) {
+static __device__ __forceinline__ uint8_t ggml_cuda_best_index_e4m3(float x) {
     uint8_t best_index = 0;
     float best_err = INFINITY;
 
     for (int i = 0; i < 256; ++i) {
-        const float v = ggml_cuda_e4m3_to_fp32_half((uint8_t) i);
+        const float v = ggml_cuda_e4m3_to_fp32((uint8_t) i);
         if (!isfinite(v)) {
             continue;
         }
@@ -230,7 +230,7 @@ static __global__ void quantize_row_nvfp4_kernel(
     float scale_f = 0.0f;
     if (lane == 0) {
         const float scale = global_scale * (vmax / 6.0f);
-        const uint8_t scale_q = ggml_cuda_best_index_e4m3_half(scale);
+        const uint8_t scale_q = ggml_cuda_best_index_e4m3(scale);
         y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].e = scale_q;
         scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
     }
@@ -698,6 +698,167 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                     (unsigned) (dump_blocks > 1 ? b_scale_repacked[1] : 0),
                     (unsigned) (dump_blocks > 2 ? b_scale_repacked[2] : 0),
                     (unsigned) (dump_blocks > 3 ? b_scale_repacked[3] : 0));
+        }
+
+        // One-time deep probe: sample multiple outer/inner coordinates to validate
+        // both scale channel and packed data channel mapping.
+        static std::atomic<bool> deep_probe_logged(false);
+        const bool run_deep_probe = !deep_probe_logged.exchange(true);
+        if (run_deep_probe) {
+            auto probe_matrix = [&](const char * tag,
+                                    const block_nvfp4 * src_blocks,
+                                    const void * repacked_data,
+                                    const void * repacked_scale,
+                                    int64_t outer_valid,
+                                    int64_t scale_inner_padded_local) {
+                if (outer_valid <= 0 || nblk_k <= 0) {
+                    return;
+                }
+
+                std::vector<int64_t> outer_samples;
+                auto push_unique_outer = [&](int64_t v) {
+                    if (v < 0 || v >= outer_valid) {
+                        return;
+                    }
+                    for (int64_t x : outer_samples) {
+                        if (x == v) {
+                            return;
+                        }
+                    }
+                    if (outer_samples.size() < 4) {
+                        outer_samples.push_back(v);
+                    }
+                };
+
+                push_unique_outer(0);
+                push_unique_outer(1);
+                push_unique_outer(31);
+                push_unique_outer(32);
+                push_unique_outer(127);
+                push_unique_outer(128);
+                push_unique_outer(outer_valid - 1);
+                if (outer_samples.size() < 4) {
+                    push_unique_outer((outer_valid - 1) / 2);
+                }
+
+                std::vector<int64_t> inner_samples;
+                auto push_unique_inner = [&](int64_t v) {
+                    if (v < 0 || v >= nblk_k) {
+                        return;
+                    }
+                    for (int64_t x : inner_samples) {
+                        if (x == v) {
+                            return;
+                        }
+                    }
+                    if (inner_samples.size() < 4) {
+                        inner_samples.push_back(v);
+                    }
+                };
+
+                push_unique_inner(0);
+                push_unique_inner(1);
+                push_unique_inner(3);
+                push_unique_inner(4);
+                push_unique_inner(nblk_k / 2);
+                push_unique_inner(nblk_k - 1);
+                if (inner_samples.size() < 4) {
+                    push_unique_inner(2);
+                }
+
+                const int64_t row_data_bytes = ne10 / 2;
+                int samples = 0;
+                int scale_mismatch = 0;
+                int data_mismatch = 0;
+
+                for (int64_t outer : outer_samples) {
+                    for (int64_t inner : inner_samples) {
+                        const int64_t src_idx = outer * nblk_k + inner;
+                        const int64_t scale_idx = linear_scale_layout
+                                ? (outer * scale_inner_padded_local + inner)
+                                : ggml_cuda_nvfp4_scale_tiled_index(outer, inner, scale_inner_padded_local);
+                        const int64_t data_off = outer * row_data_bytes + inner * (QK_NVFP4 / 2);
+
+                        block_nvfp4 src_block = {};
+                        uint8_t rep_scale = 0;
+                        uint8_t rep_qs[QK_NVFP4 / 2] = { 0 };
+
+                        CUDA_CHECK(cudaMemcpyAsync(
+                                &src_block,
+                                src_blocks + src_idx,
+                                sizeof(src_block),
+                                cudaMemcpyDeviceToHost,
+                                stream));
+                        CUDA_CHECK(cudaMemcpyAsync(
+                                &rep_scale,
+                                (const uint8_t *) repacked_scale + scale_idx,
+                                sizeof(rep_scale),
+                                cudaMemcpyDeviceToHost,
+                                stream));
+                        CUDA_CHECK(cudaMemcpyAsync(
+                                rep_qs,
+                                (const uint8_t *) repacked_data + data_off,
+                                sizeof(rep_qs),
+                                cudaMemcpyDeviceToHost,
+                                stream));
+                        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+                        const bool scale_ok = (src_block.e == rep_scale);
+                        const bool data_ok = (memcmp(src_block.qs, rep_qs, sizeof(rep_qs)) == 0);
+                        samples += 1;
+                        if (!scale_ok) {
+                            scale_mismatch += 1;
+                        }
+                        if (!data_ok) {
+                            data_mismatch += 1;
+                        }
+
+                        GGML_LOG_INFO(
+                                "%s: deep-probe %s %s o=%lld i=%lld "
+                                "scale[src=%u rep=%u ok=%d idx=%lld] "
+                                "data[src0=%u src7=%u rep0=%u rep7=%u ok=%d off=%lld]\n",
+                                __func__,
+                                ggml_get_name(dst),
+                                tag,
+                                (long long) outer,
+                                (long long) inner,
+                                (unsigned) src_block.e,
+                                (unsigned) rep_scale,
+                                scale_ok ? 1 : 0,
+                                (long long) scale_idx,
+                                (unsigned) src_block.qs[0],
+                                (unsigned) src_block.qs[QK_NVFP4 / 2 - 1],
+                                (unsigned) rep_qs[0],
+                                (unsigned) rep_qs[QK_NVFP4 / 2 - 1],
+                                data_ok ? 1 : 0,
+                                (long long) data_off);
+                    }
+                }
+
+                GGML_LOG_INFO(
+                        "%s: deep-probe summary %s %s samples=%d scale_mismatch=%d data_mismatch=%d\n",
+                        __func__,
+                        ggml_get_name(dst),
+                        tag,
+                        samples,
+                        scale_mismatch,
+                        data_mismatch);
+            };
+
+            probe_matrix(
+                    "A",
+                    (const block_nvfp4 *) src0->data,
+                    src0_repacked.data,
+                    src0_repacked.scale,
+                    ne01,
+                    src0_repacked.scale_inner_padded);
+            probe_matrix(
+                    "B",
+                    (const block_nvfp4 *) src1_q_nvfp4.get(),
+                    (const void *) src1_repacked_data.get(),
+                    (const void *) src1_repacked_scale.get(),
+                    ne11,
+                    scale_inner_padded);
         }
     }
 
