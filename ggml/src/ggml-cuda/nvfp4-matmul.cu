@@ -290,6 +290,13 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         return false;
     }
 
+    // cuBLASLt native FP4 matmul is restrictive on GEMM dimensions.
+    // In practice, non-16-aligned M/N/K (especially small N like 1/9 in decode) often fails with INVALID_VALUE.
+    if ((ne01 % 16) != 0 || (ne11 % 16) != 0 || (ne10 % 16) != 0) {
+        log_skip("native FP4 requires M/N/K to be multiples of 16");
+        return false;
+    }
+
     if (ne10 % QK_NVFP4 != 0) {
         log_skip("K dimension is not divisible by QK_NVFP4");
         return false;
@@ -455,6 +462,15 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                         "%s: hint: CUBLAS_STATUS_NOT_SUPPORTED usually means this GPU/toolkit/shape does not support "
                         "the requested FP4 Lt matmul path; fallback kernels will be used.\n",
                         __func__);
+            }
+            if (st == CUBLAS_STATUS_INVALID_VALUE) {
+                GGML_LOG_WARN(
+                        "%s: hint: CUBLAS_STATUS_INVALID_VALUE is commonly caused by unsupported FP4 dimension constraints. "
+                        "Check M=%lld N=%lld K=%lld (recommended multiples of 16).\n",
+                        __func__,
+                        (long long) ne01,
+                        (long long) ne11,
+                        (long long) ne10);
             }
         }
         return false;
