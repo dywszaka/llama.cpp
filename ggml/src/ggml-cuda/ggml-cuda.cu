@@ -523,9 +523,13 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
             CUBLAS_CHECK(cublasLtDestroy(cublaslt_handles[i]));
         }
         for (ggml_cuda_nvfp4_cache_entry & entry : nvfp4_repack_cache[i]) {
-            if (entry.repacked != nullptr) {
-                CUDA_CHECK(cudaFree(entry.repacked));
-                entry.repacked = nullptr;
+            if (entry.data_repacked != nullptr) {
+                CUDA_CHECK(cudaFree(entry.data_repacked));
+                entry.data_repacked = nullptr;
+            }
+            if (entry.scale_repacked != nullptr) {
+                CUDA_CHECK(cudaFree(entry.scale_repacked));
+                entry.scale_repacked = nullptr;
             }
         }
         nvfp4_repack_cache[i].clear();
@@ -1999,6 +2003,15 @@ static bool ggml_cuda_nvfp4_native_enabled() {
     return cached != 0;
 }
 
+static bool ggml_cuda_nvfp4_native_no_fallback() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
@@ -2012,9 +2025,13 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_nvfp4_native_enabled() &&
         src0->type == GGML_TYPE_NVFP4 &&
         src1->type == GGML_TYPE_F32 &&
-        dst->type == GGML_TYPE_F32 &&
-        ggml_cuda_mul_mat_nvfp4_native(ctx, src0, src1, dst)) {
-        return;
+        dst->type == GGML_TYPE_F32) {
+        if (ggml_cuda_mul_mat_nvfp4_native(ctx, src0, src1, dst)) {
+            return;
+        }
+        if (ggml_cuda_nvfp4_native_no_fallback()) {
+            GGML_ABORT("%s: native NVFP4 path failed and GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK=1", __func__);
+        }
     }
 
     bool use_mul_mat_vec_f = (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_BF16)

@@ -858,8 +858,12 @@ struct ggml_cuda_nvfp4_cache_entry {
     const void * src0_data = nullptr;
     int64_t ne[GGML_MAX_DIMS] = { 0, 0, 0, 0 };
     size_t  nb[GGML_MAX_DIMS] = { 0, 0, 0, 0 };
-    void * repacked = nullptr;
-    size_t nbytes = 0;
+    void * data_repacked = nullptr;
+    void * scale_repacked = nullptr;
+    size_t data_nbytes = 0;
+    size_t scale_nbytes = 0;
+    int64_t scale_inner_padded = 0;
+    int64_t scale_outer_padded = 0;
 };
 
 
