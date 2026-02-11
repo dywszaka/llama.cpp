@@ -99,15 +99,6 @@ static bool ggml_cuda_nvfp4_native_validate_enabled() {
     return cached != 0;
 }
 
-static bool ggml_cuda_nvfp4_alpha_div_input_scale_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("GGML_CUDA_NVFP4_ALPHA_DIV_INPUT_SCALE");
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
 static const char * ggml_cuda_nvfp4_scale_channel_attr_diag() {
 #if GGML_CUDA_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS
     return "enabled via cublas version gate (CUBLAS_VERSION>=130000)";
@@ -283,7 +274,7 @@ static inline int64_t ggml_cuda_pad_i64(int64_t x, int64_t a) {
     return ((x + a - 1) / a) * a;
 }
 
-static __device__ __forceinline__ int64_t ggml_cuda_nvfp4_scale_tiled_index(
+static __host__ __device__ __forceinline__ int64_t ggml_cuda_nvfp4_scale_tiled_index(
         int64_t outer,
         int64_t inner,
         int64_t n_inner_padded) {
@@ -510,7 +501,6 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     const bool no_fallback = ggml_cuda_nvfp4_native_no_fallback_enabled();
     const bool linear_scale_layout = ggml_cuda_nvfp4_scale_linear_layout_enabled();
     const bool validate_enabled = ggml_cuda_nvfp4_native_validate_enabled();
-    const bool alpha_div_input_scale = ggml_cuda_nvfp4_alpha_div_input_scale_enabled();
     const bool verbose_skip = debug_enabled || no_fallback;
     auto log_skip = [&](const char * reason) {
         if (verbose_skip) {
@@ -636,8 +626,79 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 (long long) scale_inner_padded);
         GGML_LOG_INFO("%s: scale layout mode for %s: %s\n",
                 __func__, ggml_get_name(dst), linear_scale_layout ? "linear" : "tiled-128x4");
-        GGML_LOG_INFO("%s: alpha mode for %s: %s\n",
-                __func__, ggml_get_name(dst), alpha_div_input_scale ? "out_scale/global_scale" : "out_scale");
+        GGML_LOG_INFO("%s: alpha mode for %s: out_scale\n",
+                __func__, ggml_get_name(dst));
+
+        // Compare first-row source scale bytes against repacked channel bytes.
+        // This helps verify channel split/indexing before Lt matmul.
+        const int64_t dump_blocks = std::min<int64_t>(nblk_k, 4);
+        if (dump_blocks > 0) {
+            std::vector<block_nvfp4> a_blocks((size_t) dump_blocks);
+            std::vector<block_nvfp4> b_blocks((size_t) dump_blocks);
+            std::vector<uint8_t> a_scale_src((size_t) dump_blocks, 0);
+            std::vector<uint8_t> b_scale_src((size_t) dump_blocks, 0);
+            std::vector<uint8_t> a_scale_repacked((size_t) dump_blocks, 0);
+            std::vector<uint8_t> b_scale_repacked((size_t) dump_blocks, 0);
+
+            CUDA_CHECK(cudaMemcpyAsync(
+                    a_blocks.data(),
+                    (const char *) src0->data,
+                    (size_t) dump_blocks * sizeof(block_nvfp4),
+                    cudaMemcpyDeviceToHost,
+                    stream));
+            CUDA_CHECK(cudaMemcpyAsync(
+                    b_blocks.data(),
+                    (const char *) src1_q_nvfp4.get(),
+                    (size_t) dump_blocks * sizeof(block_nvfp4),
+                    cudaMemcpyDeviceToHost,
+                    stream));
+
+            for (int64_t i = 0; i < dump_blocks; ++i) {
+                const int64_t scale_idx = linear_scale_layout ?
+                        i : ggml_cuda_nvfp4_scale_tiled_index(0, i, scale_inner_padded);
+                CUDA_CHECK(cudaMemcpyAsync(
+                        &a_scale_repacked[(size_t) i],
+                        (const uint8_t *) src0_repacked.scale + scale_idx,
+                        sizeof(uint8_t),
+                        cudaMemcpyDeviceToHost,
+                        stream));
+                CUDA_CHECK(cudaMemcpyAsync(
+                        &b_scale_repacked[(size_t) i],
+                        (const uint8_t *) src1_repacked_scale.get() + scale_idx,
+                        sizeof(uint8_t),
+                        cudaMemcpyDeviceToHost,
+                        stream));
+            }
+
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+
+            for (int64_t i = 0; i < dump_blocks; ++i) {
+                a_scale_src[(size_t) i] = a_blocks[(size_t) i].e;
+                b_scale_src[(size_t) i] = b_blocks[(size_t) i].e;
+            }
+
+            GGML_LOG_INFO(
+                    "%s: scale-byte probe %s row0 first4 A[src=%u,%u,%u,%u repacked=%u,%u,%u,%u] "
+                    "B[src=%u,%u,%u,%u repacked=%u,%u,%u,%u]\n",
+                    __func__,
+                    ggml_get_name(dst),
+                    (unsigned) (dump_blocks > 0 ? a_scale_src[0] : 0),
+                    (unsigned) (dump_blocks > 1 ? a_scale_src[1] : 0),
+                    (unsigned) (dump_blocks > 2 ? a_scale_src[2] : 0),
+                    (unsigned) (dump_blocks > 3 ? a_scale_src[3] : 0),
+                    (unsigned) (dump_blocks > 0 ? a_scale_repacked[0] : 0),
+                    (unsigned) (dump_blocks > 1 ? a_scale_repacked[1] : 0),
+                    (unsigned) (dump_blocks > 2 ? a_scale_repacked[2] : 0),
+                    (unsigned) (dump_blocks > 3 ? a_scale_repacked[3] : 0),
+                    (unsigned) (dump_blocks > 0 ? b_scale_src[0] : 0),
+                    (unsigned) (dump_blocks > 1 ? b_scale_src[1] : 0),
+                    (unsigned) (dump_blocks > 2 ? b_scale_src[2] : 0),
+                    (unsigned) (dump_blocks > 3 ? b_scale_src[3] : 0),
+                    (unsigned) (dump_blocks > 0 ? b_scale_repacked[0] : 0),
+                    (unsigned) (dump_blocks > 1 ? b_scale_repacked[1] : 0),
+                    (unsigned) (dump_blocks > 2 ? b_scale_repacked[2] : 0),
+                    (unsigned) (dump_blocks > 3 ? b_scale_repacked[3] : 0));
+        }
     }
 
     cublasLtMatmulDesc_t op_desc = nullptr;
@@ -735,10 +796,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             out_scale = scale_val;
         }
     }
-    float matmul_alpha = out_scale;
-    if (alpha_div_input_scale && std::isfinite(global_scale) && global_scale != 0.0f) {
-        matmul_alpha = out_scale / global_scale;
-    }
+    const float matmul_alpha = out_scale;
 
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "matmul";
@@ -774,6 +832,9 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             std::vector<block_nvfp4> x_q((size_t) nblk);
             std::vector<float> x_roundtrip((size_t) ne10);
             std::vector<float> w_deq((size_t) ne10);
+            std::vector<float> x_roundtrip_no_scale((size_t) ne10);
+            std::vector<float> w_no_scale((size_t) ne10);
+            std::vector<float> x_no_scale((size_t) ne10);
 
             const char * w_row_ptr = (const char *) src0->data + 0 * src0->nb[1];
             const char * x_row_ptr = (const char *) src1->data + 0 * src1->nb[1];
@@ -784,12 +845,41 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             quantize_row_nvfp4_ref(x_row.data(), x_q.data(), ne10, global_scale);
             dequantize_row_nvfp4(x_q.data(), x_roundtrip.data(), ne10, global_scale);
             dequantize_row_nvfp4(w_row.data(), w_deq.data(), ne10, 1.0f);
+            quantize_row_nvfp4_ref(x_row.data(), x_q.data(), ne10, 1.0f);
+            dequantize_row_nvfp4(x_q.data(), x_roundtrip_no_scale.data(), ne10, 1.0f);
+
+            auto dequantize_row_nvfp4_no_scale = [](const block_nvfp4 * q, float * out, int64_t k) {
+                GGML_ASSERT(k % QK_NVFP4 == 0);
+                const int64_t nb = k / QK_NVFP4;
+                for (int64_t ib = 0; ib < nb; ++ib) {
+                    for (int j = 0; j < QK_NVFP4/2; ++j) {
+                        const uint8_t packed = q[ib].qs[j];
+                        out[ib*QK_NVFP4 + 2*j + 0] = (float) kvalues_nvfp4[packed & 0x0F];
+                        out[ib*QK_NVFP4 + 2*j + 1] = (float) kvalues_nvfp4[packed >> 4];
+                    }
+                }
+            };
+
+            dequantize_row_nvfp4_no_scale(w_row.data(), w_no_scale.data(), ne10);
+            dequantize_row_nvfp4_no_scale(x_q.data(), x_no_scale.data(), ne10);
 
             double ref = 0.0;
             for (int64_t k = 0; k < ne10; ++k) {
                 ref += (double) w_deq[(size_t) k] * (double) x_roundtrip[(size_t) k];
             }
             ref *= (double) matmul_alpha;
+
+            double ref_no_a_scale = 0.0;
+            double ref_no_b_scale = 0.0;
+            double ref_no_ab_scale = 0.0;
+            for (int64_t k = 0; k < ne10; ++k) {
+                ref_no_a_scale  += (double) w_no_scale[(size_t) k] * (double) x_roundtrip[(size_t) k];
+                ref_no_b_scale  += (double) w_deq[(size_t) k]      * (double) x_roundtrip_no_scale[(size_t) k];
+                ref_no_ab_scale += (double) w_no_scale[(size_t) k] * (double) x_no_scale[(size_t) k];
+            }
+            ref_no_a_scale  *= (double) matmul_alpha;
+            ref_no_b_scale  *= (double) matmul_alpha;
+            ref_no_ab_scale *= (double) matmul_alpha;
 
             float native_v = 0.0f;
             const char * out_ptr = (const char *) dst_data + 0 * ne01 * (int64_t) sizeof(float);
@@ -798,9 +888,15 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
             const double abs_err = fabs((double) native_v - ref);
             const double rel_err = abs_err / (fabs(ref) + 1e-9);
+            const double abs_err_no_a_scale = fabs((double) native_v - ref_no_a_scale);
+            const double rel_err_no_a_scale = abs_err_no_a_scale / (fabs(ref_no_a_scale) + 1e-9);
+            const double abs_err_no_b_scale = fabs((double) native_v - ref_no_b_scale);
+            const double rel_err_no_b_scale = abs_err_no_b_scale / (fabs(ref_no_b_scale) + 1e-9);
+            const double abs_err_no_ab_scale = fabs((double) native_v - ref_no_ab_scale);
+            const double rel_err_no_ab_scale = abs_err_no_ab_scale / (fabs(ref_no_ab_scale) + 1e-9);
             GGML_LOG_WARN(
                     "%s: native validate %s out[0,0]: native=%g ref=%g abs=%g rel=%g "
-                    "(global_scale=%g out_scale=%g alpha=%g alpha_mode=%s scale_layout=%s)\n",
+                    "(global_scale=%g out_scale=%g alpha=%g alpha_mode=out_scale scale_layout=%s)\n",
                     __func__,
                     ggml_get_name(dst),
                     (double) native_v,
@@ -810,8 +906,17 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                     (double) global_scale,
                     (double) out_scale,
                     (double) matmul_alpha,
-                    alpha_div_input_scale ? "out_scale/global_scale" : "out_scale",
                     linear_scale_layout ? "linear" : "tiled-128x4");
+            GGML_LOG_WARN(
+                    "%s: native validate %s alt-ref out[0,0]: "
+                    "no_a_scale=%g abs=%g rel=%g | "
+                    "no_b_scale=%g abs=%g rel=%g | "
+                    "no_ab_scale=%g abs=%g rel=%g\n",
+                    __func__,
+                    ggml_get_name(dst),
+                    ref_no_a_scale, abs_err_no_a_scale, rel_err_no_a_scale,
+                    ref_no_b_scale, abs_err_no_b_scale, rel_err_no_b_scale,
+                    ref_no_ab_scale, abs_err_no_ab_scale, rel_err_no_ab_scale);
         }
     }
 
