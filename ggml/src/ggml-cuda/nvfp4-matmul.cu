@@ -52,7 +52,7 @@ static bool ggml_cuda_fetch_input_scale_f32(const ggml_tensor * scale, float & o
     }
 }
 
-static float ggml_cuda_nvfp4_global_scale(const ggml_tensor * dst) {
+static float ggml_cuda_nvfp4_input_global_scale(const ggml_tensor * dst) {
     const ggml_tensor * scale = ggml_mul_mat_get_nvfp4_input_scale(dst);
     if (scale == nullptr) {
         return 1.0f;
@@ -258,7 +258,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4(ctx.pool(), (size_t) (ne10 / QK_NVFP4) * (size_t) ne11);
     ggml_cuda_pool_alloc<block_nvfp4> src1_repacked(ctx.pool(), (size_t) (ne10 / QK_NVFP4) * (size_t) ne11);
 
-    const float global_scale = ggml_cuda_nvfp4_global_scale(dst);
+    const float global_scale = ggml_cuda_nvfp4_input_global_scale(dst);
     quantize_row_nvfp4_cuda(
             (const float *) src1->data, src1_q_nvfp4.get(),
             ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
@@ -280,6 +280,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     cublasLtMatrixLayout_t b_desc = nullptr;
     cublasLtMatrixLayout_t c_desc = nullptr;
 
+    const char * stage = "matmul_desc_create";
     cublasStatus_t st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
     if (st != CUBLAS_STATUS_SUCCESS) {
         return false;
@@ -287,18 +288,23 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
     const cublasOperation_t op_t = CUBLAS_OP_T;
     const cublasOperation_t op_n = CUBLAS_OP_N;
+    stage = "matmul_desc_set_transa";
     st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_t, sizeof(op_t));
     if (st == CUBLAS_STATUS_SUCCESS) {
+        stage = "matmul_desc_set_transb";
         st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n));
     }
 
     if (st == CUBLAS_STATUS_SUCCESS) {
+        stage = "layout_create_a";
         st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne01, (int64_t) ne10);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
+        stage = "layout_create_b";
         st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne11, (int64_t) ne10);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
+        stage = "layout_create_c";
         st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) ne01, (uint64_t) ne11, (int64_t) ne01);
     }
 
@@ -311,6 +317,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     }
 
     if (st == CUBLAS_STATUS_SUCCESS) {
+        stage = "matmul";
         const float alpha = out_scale;
         const float beta  = 0.0f;
         st = cublasLtMatmul(
@@ -341,10 +348,34 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     }
 
     if (st != CUBLAS_STATUS_SUCCESS) {
+        const cudaError_t cuda_err = cudaPeekAtLastError();
         static std::atomic<bool> logged(false);
         if (!logged.exchange(true)) {
-            GGML_LOG_DEBUG("%s: cublasLt NVFP4 matmul unavailable for %s (status=%d), fallback to mmq/mmvq\n",
-                    __func__, ggml_get_name(dst), (int) st);
+            GGML_LOG_DEBUG(
+                "%s: cublasLt NVFP4 matmul failed for %s stage=%s status=%d (%s) cuda_err=%d (%s) "
+                "A=[k=%lld,n=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
+                "B=[k=%lld,m=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
+                "C/D=[n=%lld,m=%lld,ld=%lld,type=CUDA_R_32F] alpha=%g beta=0 "
+                "global_scale=%g src0_type=%s src1_type=%s dst_type=%s "
+                "src0_nb=[%zu,%zu,%zu,%zu] src1_nb=[%zu,%zu,%zu,%zu] dst_nb=[%zu,%zu,%zu,%zu]\n",
+                __func__,
+                ggml_get_name(dst),
+                stage,
+                (int) st,
+                cublasGetStatusString(st),
+                (int) cuda_err,
+                cudaGetErrorString(cuda_err),
+                (long long) ne10, (long long) ne01, (long long) ne10,
+                (long long) ne10, (long long) ne11, (long long) ne10,
+                (long long) ne01, (long long) ne11, (long long) ne01,
+                (double) out_scale,
+                (double) global_scale,
+                ggml_type_name(src0->type),
+                ggml_type_name(src1->type),
+                ggml_type_name(dst->type),
+                src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
+                src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3],
+                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
         }
         return false;
     }
