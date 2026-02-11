@@ -76,7 +76,7 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
 
 static bool ggml_cuda_should_log_qcur(const ggml_tensor * dst) {
     const char * name = dst ? ggml_get_name(dst) : nullptr;
-    return name && (strstr(name, "Qcur-scaled-0") != nullptr || strstr(name, "Qcur-mm-0") != nullptr);
+    return name && (strstr(name, "Qcur-scaled-0") != nullptr);
 }
 
 static bool ggml_cuda_can_log(cudaStream_t stream) {

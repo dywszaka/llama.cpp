@@ -3072,6 +3072,30 @@ const struct ggml_tensor * ggml_mul_mat_get_nvfp4_input_scale(
     return (const struct ggml_tensor *) scale_ptr;
 }
 
+void ggml_mul_mat_set_nvfp4_weight_scale(
+        struct ggml_tensor       * mul_mat,
+        const struct ggml_tensor * scale) {
+    GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
+
+    const uintptr_t scale_ptr = (uintptr_t) scale;
+    const uint64_t  scale_u64 = (uint64_t) scale_ptr;
+
+    ggml_set_op_params_i32(mul_mat, 4, (int32_t) (scale_u64 & 0xFFFFFFFFu));
+    ggml_set_op_params_i32(mul_mat, 5, (int32_t) (scale_u64 >> 32));
+}
+
+const struct ggml_tensor * ggml_mul_mat_get_nvfp4_weight_scale(
+        const struct ggml_tensor * mul_mat) {
+    GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
+
+    const uint64_t lo = (uint32_t) mul_mat->op_params[4];
+    const uint64_t hi = (uint32_t) mul_mat->op_params[5];
+    const uint64_t scale_u64 = lo | (hi << 32);
+    const uintptr_t scale_ptr = (uintptr_t) scale_u64;
+
+    return (const struct ggml_tensor *) scale_ptr;
+}
+
 // ggml_mul_mat_id
 
 /*

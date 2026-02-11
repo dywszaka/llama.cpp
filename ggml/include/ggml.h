@@ -1309,6 +1309,15 @@ extern "C" {
     GGML_API const struct ggml_tensor * ggml_mul_mat_get_nvfp4_input_scale(
             const struct ggml_tensor * mul_mat);
 
+    // bind an optional NVFP4 weight scale tensor to a GGML_OP_MUL_MAT node (applied to output)
+    GGML_API void ggml_mul_mat_set_nvfp4_weight_scale(
+            struct ggml_tensor       * mul_mat,
+            const struct ggml_tensor * scale);
+
+    // fetch the optional NVFP4 weight scale tensor bound via ggml_mul_mat_set_nvfp4_weight_scale()
+    GGML_API const struct ggml_tensor * ggml_mul_mat_get_nvfp4_weight_scale(
+            const struct ggml_tensor * mul_mat);
+
     // indirect matrix multiplication
     GGML_API struct ggml_tensor * ggml_mul_mat_id(
             struct ggml_context * ctx,

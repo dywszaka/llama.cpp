@@ -225,7 +225,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         const ggml_tensor * src0,
         const ggml_tensor * src1,
         ggml_tensor * dst) {
-#if GGML_CUDA_HAS_CUBLASLT && GGML_CUDA_HAS_FP4 && defined(CUDA_R_4F_E2M1) && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+#if GGML_CUDA_HAS_CUBLASLT && GGML_CUDA_HAS_FP4 && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     GGML_ASSERT(src0 != nullptr);
     GGML_ASSERT(src1 != nullptr);
     GGML_ASSERT(dst  != nullptr);
@@ -302,8 +302,16 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) ne01, (uint64_t) ne11, (int64_t) ne01);
     }
 
+    float out_scale = 1.0f;
+    if (const ggml_tensor * scale = ggml_mul_mat_get_nvfp4_weight_scale(dst)) {
+        float scale_val = 0.0f;
+        if (ggml_cuda_fetch_input_scale_f32(scale, scale_val) && std::isfinite(scale_val)) {
+            out_scale = scale_val;
+        }
+    }
+
     if (st == CUBLAS_STATUS_SUCCESS) {
-        const float alpha = 1.0f;
+        const float alpha = out_scale;
         const float beta  = 0.0f;
         st = cublasLtMatmul(
                 ctx.cublaslt_handle(),
