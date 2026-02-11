@@ -291,11 +291,13 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     }
 
     // cuBLASLt native FP4 matmul is restrictive on GEMM dimensions.
-    // In practice, non-16-aligned M/N/K (especially small N like 1/9 in decode) often fails with INVALID_VALUE.
-    if ((ne01 % 16) != 0 || (ne11 % 16) != 0 || (ne10 % 16) != 0) {
-        log_skip("native FP4 requires M/N/K to be multiples of 16");
+    // Keep static matrix dimensions (M/K) aligned and pad dynamic token dimension (N) when needed.
+    if ((ne01 % 16) != 0 || (ne10 % 16) != 0) {
+        log_skip("native FP4 requires M/K to be multiples of 16");
         return false;
     }
+    const int64_t ne11_padded = (ne11 + 15) & ~15LL;
+    const bool pad_n = ne11_padded != ne11;
 
     if (ne10 % QK_NVFP4 != 0) {
         log_skip("K dimension is not divisible by QK_NVFP4");
@@ -303,8 +305,9 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     }
 
     cudaStream_t stream = ctx.stream();
-    ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4(ctx.pool(), (size_t) (ne10 / QK_NVFP4) * (size_t) ne11);
-    ggml_cuda_pool_alloc<block_nvfp4> src1_repacked(ctx.pool(), (size_t) (ne10 / QK_NVFP4) * (size_t) ne11);
+    const size_t nblk_src1 = (size_t) (ne10 / QK_NVFP4);
+    ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4(ctx.pool(), nblk_src1 * (size_t) ne11);
+    ggml_cuda_pool_alloc<block_nvfp4> src1_repacked(ctx.pool(), nblk_src1 * (size_t) ne11_padded);
 
     const float global_scale = ggml_cuda_nvfp4_input_global_scale(dst);
     quantize_row_nvfp4_cuda(
@@ -313,9 +316,15 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             global_scale, stream);
     CUDA_CHECK(cudaGetLastError());
 
+    if (pad_n) {
+        CUDA_CHECK(cudaMemsetAsync(
+                src1_repacked.get(), 0,
+                nblk_src1 * (size_t) ne11_padded * sizeof(block_nvfp4),
+                stream));
+    }
     CUDA_CHECK(cudaMemcpyAsync(
             src1_repacked.get(), src1_q_nvfp4.get(),
-            (size_t) (ne10 / QK_NVFP4) * (size_t) ne11 * sizeof(block_nvfp4),
+            nblk_src1 * (size_t) ne11 * sizeof(block_nvfp4),
             cudaMemcpyDeviceToDevice, stream));
 
     const void * src0_repacked = ggml_cuda_nvfp4_get_repacked_src0(ctx, src0, stream);
@@ -331,6 +340,8 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     cublasLtMatrixLayout_t a_desc = nullptr;
     cublasLtMatrixLayout_t b_desc = nullptr;
     cublasLtMatrixLayout_t c_desc = nullptr;
+    ggml_cuda_pool_alloc<float> dst_padded(ctx.pool(), pad_n ? (size_t) ne01 * (size_t) ne11_padded : 1);
+    void * dst_data = pad_n ? (void *) dst_padded.get() : dst->data;
 
     const char * stage = "matmul_desc_create";
     cublasStatus_t st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
@@ -350,11 +361,11 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_b";
-        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne11, (int64_t) ne10);
+        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne11_padded, (int64_t) ne10);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_c";
-        st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) ne01, (uint64_t) ne11, (int64_t) ne01);
+        st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) ne01, (uint64_t) ne11_padded, (int64_t) ne01);
     }
 
     float out_scale = 1.0f;
@@ -376,11 +387,18 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 src0_repacked, a_desc,
                 src1_repacked.get(), b_desc,
                 &beta,
-                dst->data, c_desc,
-                dst->data, c_desc,
+                dst_data, c_desc,
+                dst_data, c_desc,
                 nullptr,
                 nullptr, 0,
                 stream);
+    }
+
+    if (st == CUBLAS_STATUS_SUCCESS && pad_n) {
+        CUDA_CHECK(cudaMemcpyAsync(
+                dst->data, dst_padded.get(),
+                (size_t) ne01 * (size_t) ne11 * sizeof(float),
+                cudaMemcpyDeviceToDevice, stream));
     }
 
     if (c_desc != nullptr) {
@@ -417,11 +435,11 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 "%s: cublasLt NVFP4 matmul failed for %s stage=%s status=%d (%s) cuda_err=%d (%s) "
                 "device=%d cc=%d runtime=%d driver=%d stream=%p "
                 "A=[k=%lld,n=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
-                "B=[k=%lld,m=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
-                "C/D=[n=%lld,m=%lld,ld=%lld,type=CUDA_R_32F] alpha=%g beta=0 "
+                "B=[k=%lld,m=%lld(padded=%lld),ld=%lld,type=CUDA_R_4F_E2M1] "
+                "C/D=[n=%lld,m=%lld(padded=%lld),ld=%lld,type=CUDA_R_32F] alpha=%g beta=0 "
                 "global_scale=%g src0_type=%s src1_type=%s dst_type=%s "
                 "in_scale_tensor=%p in_scale_type=%s out_scale_tensor=%p out_scale_type=%s "
-                "ptr=[src0=%p src1=%p dst=%p] align16=[src0=%zu src1=%zu dst=%zu] "
+                "ptr=[src0=%p src1=%p dst=%p dst_data=%p] align16=[src0=%zu src1=%zu dst=%zu] "
                 "src0_nb=[%zu,%zu,%zu,%zu] src1_nb=[%zu,%zu,%zu,%zu] dst_nb=[%zu,%zu,%zu,%zu]\n",
                 __func__,
                 ggml_get_name(dst),
@@ -436,8 +454,8 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 driver_version,
                 (void *) stream,
                 (long long) ne10, (long long) ne01, (long long) ne10,
-                (long long) ne10, (long long) ne11, (long long) ne10,
-                (long long) ne01, (long long) ne11, (long long) ne01,
+                (long long) ne10, (long long) ne11, (long long) ne11_padded, (long long) ne10,
+                (long long) ne01, (long long) ne11, (long long) ne11_padded, (long long) ne01,
                 (double) out_scale,
                 (double) global_scale,
                 ggml_type_name(src0->type),
@@ -450,6 +468,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 src0_repacked,
                 (const void *) src1_repacked.get(),
                 (const void *) dst->data,
+                (const void *) dst_data,
                 src0_align16,
                 src1_align16,
                 dst_align16,
@@ -465,11 +484,12 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             }
             if (st == CUBLAS_STATUS_INVALID_VALUE) {
                 GGML_LOG_WARN(
-                        "%s: hint: CUBLAS_STATUS_INVALID_VALUE is commonly caused by unsupported FP4 dimension constraints. "
-                        "Check M=%lld N=%lld K=%lld (recommended multiples of 16).\n",
+                        "%s: hint: CUBLAS_STATUS_INVALID_VALUE is commonly caused by unsupported FP4 dimension constraints "
+                        "or layout limits. Check M=%lld N=%lld (padded=%lld) K=%lld.\n",
                         __func__,
                         (long long) ne01,
                         (long long) ne11,
+                        (long long) ne11_padded,
                         (long long) ne10);
             }
         }
