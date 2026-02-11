@@ -327,9 +327,6 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
     const char * stage = "matmul_desc_create";
     cublasStatus_t st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
-    if (st != CUBLAS_STATUS_SUCCESS) {
-        goto matmul_cleanup;
-    }
 
     const cublasOperation_t op_t = CUBLAS_OP_T;
     const cublasOperation_t op_n = CUBLAS_OP_N;
@@ -379,7 +376,6 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 stream);
     }
 
-matmul_cleanup:
     if (c_desc != nullptr) {
         cublasLtMatrixLayoutDestroy(c_desc);
     }
