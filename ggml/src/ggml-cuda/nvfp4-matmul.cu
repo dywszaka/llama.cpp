@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -52,6 +53,15 @@ static bool ggml_cuda_fetch_input_scale_f32(const ggml_tensor * scale, float & o
     }
 }
 
+static bool ggml_cuda_nvfp4_native_debug_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_DEBUG");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
 static float ggml_cuda_nvfp4_input_global_scale(const ggml_tensor * dst) {
     const ggml_tensor * scale = ggml_mul_mat_get_nvfp4_input_scale(dst);
     if (scale == nullptr) {
@@ -61,8 +71,8 @@ static float ggml_cuda_nvfp4_input_global_scale(const ggml_tensor * dst) {
     float input_scale = 0.0f;
     if (!ggml_cuda_fetch_input_scale_f32(scale, input_scale) || input_scale == 0.0f || !std::isfinite(input_scale)) {
         static std::atomic<bool> logged(false);
-        if (!logged.exchange(true)) {
-            GGML_LOG_DEBUG("%s: invalid NVFP4 input scale for %s, fallback global_scale=1.0\n",
+        if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
+            GGML_LOG_WARN("%s: invalid NVFP4 input scale for %s, fallback global_scale=1.0\n",
                     __func__, ggml_get_name(dst));
         }
         return 1.0f;
@@ -195,11 +205,21 @@ static const void * ggml_cuda_nvfp4_get_repacked_src0(
     const size_t nbytes = ggml_nbytes(src0);
     cudaError_t err = cudaMalloc(&repacked, nbytes);
     if (err != cudaSuccess) {
+        static std::atomic<bool> logged(false);
+        if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
+            GGML_LOG_WARN("%s: cudaMalloc failed for repacked src0 (%zu bytes): %s\n",
+                    __func__, nbytes, cudaGetErrorString(err));
+        }
         return nullptr;
     }
 
     err = cudaMemcpyAsync(repacked, src0->data, nbytes, cudaMemcpyDeviceToDevice, stream);
     if (err != cudaSuccess) {
+        static std::atomic<bool> logged(false);
+        if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
+            GGML_LOG_WARN("%s: cudaMemcpyAsync failed for repacked src0 (%zu bytes): %s\n",
+                    __func__, nbytes, cudaGetErrorString(err));
+        }
         cudaFree(repacked);
         return nullptr;
     }
@@ -230,16 +250,35 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     GGML_ASSERT(src1 != nullptr);
     GGML_ASSERT(dst  != nullptr);
 
+    const bool debug_enabled = ggml_cuda_nvfp4_native_debug_enabled();
+    auto log_skip = [&](const char * reason) {
+        if (debug_enabled) {
+            GGML_LOG_INFO(
+                    "%s: skip native NVFP4 path: %s | src0=%s src1=%s dst=%s "
+                    "src0_type=%s src1_type=%s dst_type=%s "
+                    "src0_ne=[%lld,%lld,%lld,%lld] src1_ne=[%lld,%lld,%lld,%lld] dst_ne=[%lld,%lld,%lld,%lld]\n",
+                    __func__, reason,
+                    ggml_get_name(src0), ggml_get_name(src1), ggml_get_name(dst),
+                    ggml_type_name(src0->type), ggml_type_name(src1->type), ggml_type_name(dst->type),
+                    (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2], (long long) src0->ne[3],
+                    (long long) src1->ne[0], (long long) src1->ne[1], (long long) src1->ne[2], (long long) src1->ne[3],
+                    (long long) dst->ne[0], (long long) dst->ne[1], (long long) dst->ne[2], (long long) dst->ne[3]);
+        }
+    };
+
     if (src0->type != GGML_TYPE_NVFP4 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        log_skip("unsupported tensor types");
         return false;
     }
 
     // This pass intentionally handles only dense, non-batched MUL_MAT.
     if (src0->ne[2] != 1 || src0->ne[3] != 1 || src1->ne[2] != 1 || src1->ne[3] != 1 || dst->ne[2] != 1 || dst->ne[3] != 1) {
+        log_skip("batched tensor shape not supported");
         return false;
     }
 
     if (ggml_is_transposed(src0) || ggml_is_transposed(src1) || !ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+        log_skip("requires contiguous non-transposed tensors");
         return false;
     }
 
@@ -247,10 +286,12 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     const int64_t ne11 = src1->ne[1];
     const int64_t ne01 = src0->ne[1];
     if (src0->ne[0] != ne10 || dst->ne[0] != ne01 || dst->ne[1] != ne11) {
+        log_skip("incompatible matrix dimensions");
         return false;
     }
 
     if (ne10 % QK_NVFP4 != 0) {
+        log_skip("K dimension is not divisible by QK_NVFP4");
         return false;
     }
 
@@ -272,6 +313,10 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
     const void * src0_repacked = ggml_cuda_nvfp4_get_repacked_src0(ctx, src0, stream);
     if (src0_repacked == nullptr) {
+        static std::atomic<bool> logged(false);
+        if (debug_enabled || !logged.exchange(true)) {
+            GGML_LOG_WARN("%s: failed to prepare repacked src0 for %s\n", __func__, ggml_get_name(dst));
+        }
         return false;
     }
 
@@ -283,7 +328,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     const char * stage = "matmul_desc_create";
     cublasStatus_t st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
     if (st != CUBLAS_STATUS_SUCCESS) {
-        return false;
+        goto matmul_cleanup;
     }
 
     const cublasOperation_t op_t = CUBLAS_OP_T;
@@ -334,6 +379,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 stream);
     }
 
+matmul_cleanup:
     if (c_desc != nullptr) {
         cublasLtMatrixLayoutDestroy(c_desc);
     }
@@ -349,22 +395,43 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         const cudaError_t cuda_err = cudaPeekAtLastError();
+        const int cc = ggml_cuda_info().devices[ctx.device].cc;
+        int runtime_version = 0;
+        int driver_version = 0;
+        (void) cudaRuntimeGetVersion(&runtime_version);
+        (void) cudaDriverGetVersion(&driver_version);
+
+        const ggml_tensor * in_scale_tensor = ggml_mul_mat_get_nvfp4_input_scale(dst);
+        const ggml_tensor * out_scale_tensor = ggml_mul_mat_get_nvfp4_weight_scale(dst);
+
+        const size_t src0_align16 = ((uintptr_t) src0_repacked) & 0xF;
+        const size_t src1_align16 = ((uintptr_t) src1_repacked.get()) & 0xF;
+        const size_t dst_align16  = ((uintptr_t) dst->data) & 0xF;
+
         static std::atomic<bool> logged(false);
-        if (!logged.exchange(true)) {
-            GGML_LOG_DEBUG(
+        if (debug_enabled || !logged.exchange(true)) {
+            GGML_LOG_WARN(
                 "%s: cublasLt NVFP4 matmul failed for %s stage=%s status=%d (%s) cuda_err=%d (%s) "
+                "device=%d cc=%d runtime=%d driver=%d stream=%p "
                 "A=[k=%lld,n=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
                 "B=[k=%lld,m=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
                 "C/D=[n=%lld,m=%lld,ld=%lld,type=CUDA_R_32F] alpha=%g beta=0 "
                 "global_scale=%g src0_type=%s src1_type=%s dst_type=%s "
+                "in_scale_tensor=%p in_scale_type=%s out_scale_tensor=%p out_scale_type=%s "
+                "ptr=[src0=%p src1=%p dst=%p] align16=[src0=%zu src1=%zu dst=%zu] "
                 "src0_nb=[%zu,%zu,%zu,%zu] src1_nb=[%zu,%zu,%zu,%zu] dst_nb=[%zu,%zu,%zu,%zu]\n",
                 __func__,
                 ggml_get_name(dst),
                 stage,
                 (int) st,
-                cublasGetStatusString(st),
+                cublas_get_error_str(st),
                 (int) cuda_err,
                 cudaGetErrorString(cuda_err),
+                ctx.device,
+                cc,
+                runtime_version,
+                driver_version,
+                (void *) stream,
                 (long long) ne10, (long long) ne01, (long long) ne10,
                 (long long) ne10, (long long) ne11, (long long) ne10,
                 (long long) ne01, (long long) ne11, (long long) ne01,
@@ -373,9 +440,26 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 ggml_type_name(src0->type),
                 ggml_type_name(src1->type),
                 ggml_type_name(dst->type),
+                (const void *) in_scale_tensor,
+                in_scale_tensor ? ggml_type_name(in_scale_tensor->type) : "(null)",
+                (const void *) out_scale_tensor,
+                out_scale_tensor ? ggml_type_name(out_scale_tensor->type) : "(null)",
+                src0_repacked,
+                (const void *) src1_repacked.get(),
+                (const void *) dst->data,
+                src0_align16,
+                src1_align16,
+                dst_align16,
                 src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
                 src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3],
                 dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
+
+            if (st == CUBLAS_STATUS_NOT_SUPPORTED) {
+                GGML_LOG_WARN(
+                        "%s: hint: CUBLAS_STATUS_NOT_SUPPORTED usually means this GPU/toolkit/shape does not support "
+                        "the requested FP4 Lt matmul path; fallback kernels will be used.\n",
+                        __func__);
+            }
         }
         return false;
     }
