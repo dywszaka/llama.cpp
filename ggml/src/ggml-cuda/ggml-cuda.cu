@@ -2030,7 +2030,16 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
             return;
         }
         if (ggml_cuda_nvfp4_native_no_fallback()) {
-            GGML_ABORT("%s: native NVFP4 path failed and GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK=1", __func__);
+            GGML_ABORT(
+                    "%s: native NVFP4 path failed for dst=%s and GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK=1 | "
+                    "src0_type=%s src1_type=%s dst_type=%s "
+                    "src0_ne=[%lld,%lld,%lld,%lld] src1_ne=[%lld,%lld,%lld,%lld] dst_ne=[%lld,%lld,%lld,%lld]",
+                    __func__,
+                    ggml_get_name(dst),
+                    ggml_type_name(src0->type), ggml_type_name(src1->type), ggml_type_name(dst->type),
+                    (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2], (long long) src0->ne[3],
+                    (long long) src1->ne[0], (long long) src1->ne[1], (long long) src1->ne[2], (long long) src1->ne[3],
+                    (long long) dst->ne[0], (long long) dst->ne[1], (long long) dst->ne[2], (long long) dst->ne[3]);
         }
     }
 

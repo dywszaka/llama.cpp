@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -60,6 +61,49 @@ static bool ggml_cuda_nvfp4_native_debug_enabled() {
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
     }
     return cached != 0;
+}
+
+static bool ggml_cuda_nvfp4_native_no_fallback_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static const char * ggml_cuda_nvfp4_scale_channel_attr_diag() {
+#if defined(CUBLASLT_MATMUL_DESC_A_SCALE_MODE) && defined(CUBLASLT_MATMUL_DESC_B_SCALE_MODE) && \
+    defined(CUBLASLT_MATMUL_DESC_A_SCALE_POINTER) && defined(CUBLASLT_MATMUL_DESC_B_SCALE_POINTER) && \
+    defined(CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3)
+    return "all required cublasLt FP4 scale-channel attributes are available";
+#else
+    return "missing macros:"
+#ifndef CUBLASLT_MATMUL_DESC_A_SCALE_MODE
+        " CUBLASLT_MATMUL_DESC_A_SCALE_MODE"
+#endif
+#ifndef CUBLASLT_MATMUL_DESC_B_SCALE_MODE
+        " CUBLASLT_MATMUL_DESC_B_SCALE_MODE"
+#endif
+#ifndef CUBLASLT_MATMUL_DESC_A_SCALE_POINTER
+        " CUBLASLT_MATMUL_DESC_A_SCALE_POINTER"
+#endif
+#ifndef CUBLASLT_MATMUL_DESC_B_SCALE_POINTER
+        " CUBLASLT_MATMUL_DESC_B_SCALE_POINTER"
+#endif
+#ifndef CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3
+        " CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3"
+#endif
+        ;
+#endif
+}
+
+static int ggml_cuda_nvfp4_build_cudart_version() {
+#ifdef CUDART_VERSION
+    return CUDART_VERSION;
+#else
+    return -1;
+#endif
 }
 
 static float ggml_cuda_nvfp4_input_global_scale(const ggml_tensor * dst) {
@@ -404,9 +448,11 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     GGML_ASSERT(dst  != nullptr);
 
     const bool debug_enabled = ggml_cuda_nvfp4_native_debug_enabled();
+    const bool no_fallback = ggml_cuda_nvfp4_native_no_fallback_enabled();
+    const bool verbose_skip = debug_enabled || no_fallback;
     auto log_skip = [&](const char * reason) {
-        if (debug_enabled) {
-            GGML_LOG_INFO(
+        if (verbose_skip) {
+            GGML_LOG_WARN(
                     "%s: skip native NVFP4 path: %s | src0=%s src1=%s dst=%s "
                     "src0_type=%s src1_type=%s dst_type=%s "
                     "src0_ne=[%lld,%lld,%lld,%lld] src1_ne=[%lld,%lld,%lld,%lld] dst_ne=[%lld,%lld,%lld,%lld]\n",
@@ -570,6 +616,22 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr));
     }
 #else
+    static std::atomic<bool> logged(false);
+    if (verbose_skip || !logged.exchange(true)) {
+        int runtime_version = 0;
+        int driver_version = 0;
+        (void) cudaRuntimeGetVersion(&runtime_version);
+        (void) cudaDriverGetVersion(&driver_version);
+        GGML_LOG_WARN(
+                "%s: native FP4 scale-channel attrs unavailable at compile-time for %s: %s "
+                "(build_cudart=%d runtime=%d driver=%d)\n",
+                __func__,
+                ggml_get_name(dst),
+                ggml_cuda_nvfp4_scale_channel_attr_diag(),
+                ggml_cuda_nvfp4_build_cudart_version(),
+                runtime_version,
+                driver_version);
+    }
     log_skip("toolkit lacks cublasLt FP4 scale-channel attributes");
     if (op_desc != nullptr) {
         cublasLtMatmulDescDestroy(op_desc);
