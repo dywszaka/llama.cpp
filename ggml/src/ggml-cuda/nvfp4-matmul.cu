@@ -1,11 +1,13 @@
 #include "nvfp4-matmul.cuh"
 
 #include "ggml-backend.h"
+#include "../ggml-quants.h"
 
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace {
 
@@ -74,6 +76,24 @@ static bool ggml_cuda_nvfp4_native_no_fallback_enabled() {
     static int cached = -1;
     if (cached < 0) {
         const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static bool ggml_cuda_nvfp4_scale_linear_layout_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_SCALE_LINEAR_LAYOUT");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static bool ggml_cuda_nvfp4_native_validate_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_VALIDATE");
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
     }
     return cached != 0;
@@ -277,7 +297,8 @@ static __global__ void ggml_cuda_nvfp4_split_blocks_kernel(
         int64_t nblk_k,
         int64_t n_outer_valid,
         int64_t row_data_bytes,
-        int64_t n_inner_padded) {
+        int64_t n_inner_padded,
+        int32_t linear_scale_layout) {
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = nblk_k * n_outer_valid;
     if (idx >= total) {
@@ -294,7 +315,9 @@ static __global__ void ggml_cuda_nvfp4_split_blocks_kernel(
         data_dst[i] = v.qs[i];
     }
 
-    const int64_t scale_idx = ggml_cuda_nvfp4_scale_tiled_index(outer, inner, n_inner_padded);
+    const int64_t scale_idx = linear_scale_layout ?
+            (outer * n_inner_padded + inner) :
+            ggml_cuda_nvfp4_scale_tiled_index(outer, inner, n_inner_padded);
     out_scale[scale_idx] = v.e;
 }
 
@@ -309,6 +332,7 @@ static void ggml_cuda_nvfp4_split_blocks_cuda(
         int64_t * scale_outer_padded,
         size_t * data_nbytes,
         size_t * scale_nbytes,
+        bool linear_scale_layout,
         cudaStream_t stream) {
     GGML_ASSERT(ne_k % QK_NVFP4 == 0);
     GGML_ASSERT(n_outer_valid >= 0 && n_outer_alloc >= n_outer_valid);
@@ -342,7 +366,8 @@ static void ggml_cuda_nvfp4_split_blocks_cuda(
         const int block_size = 256;
         const int grid_size = (int) ((total + block_size - 1) / block_size);
         ggml_cuda_nvfp4_split_blocks_kernel<<<grid_size, block_size, 0, stream>>>(
-                in, out_data, out_scale, nblk_k, n_outer_valid, row_data_bytes, inner_padded);
+                in, out_data, out_scale, nblk_k, n_outer_valid, row_data_bytes, inner_padded,
+                linear_scale_layout ? 1 : 0);
         CUDA_CHECK(cudaGetLastError());
     }
 }
@@ -367,6 +392,7 @@ static bool ggml_cuda_nvfp4_cache_key_match(
 static bool ggml_cuda_nvfp4_get_repacked_src0(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,
+        bool linear_scale_layout,
         cudaStream_t stream,
         ggml_cuda_nvfp4_split_matrix & out) {
     auto & cache = ctx.nvfp4_repack_cache[ctx.device];
@@ -432,6 +458,7 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
             &scale_outer_padded,
             &data_nbytes_built,
             &scale_nbytes_built,
+            linear_scale_layout,
             stream);
 
     ggml_cuda_nvfp4_cache_entry entry = {};
@@ -472,6 +499,8 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
     const bool debug_enabled = ggml_cuda_nvfp4_native_debug_enabled();
     const bool no_fallback = ggml_cuda_nvfp4_native_no_fallback_enabled();
+    const bool linear_scale_layout = ggml_cuda_nvfp4_scale_linear_layout_enabled();
+    const bool validate_enabled = ggml_cuda_nvfp4_native_validate_enabled();
     const bool verbose_skip = debug_enabled || no_fallback;
     auto log_skip = [&](const char * reason) {
         if (verbose_skip) {
@@ -569,10 +598,11 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             nullptr,
             nullptr,
             nullptr,
+            linear_scale_layout,
             stream);
 
     ggml_cuda_nvfp4_split_matrix src0_repacked = {};
-    if (!ggml_cuda_nvfp4_get_repacked_src0(ctx, src0, stream, src0_repacked)) {
+    if (!ggml_cuda_nvfp4_get_repacked_src0(ctx, src0, linear_scale_layout, stream, src0_repacked)) {
         static std::atomic<bool> logged(false);
         if (debug_enabled || !logged.exchange(true)) {
             GGML_LOG_WARN("%s: failed to prepare repacked src0 channels for %s\n", __func__, ggml_get_name(dst));
@@ -594,6 +624,8 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 (size_t) scale_outer_padded_b * (size_t) scale_inner_padded,
                 (long long) scale_outer_padded_b,
                 (long long) scale_inner_padded);
+        GGML_LOG_INFO("%s: scale layout mode for %s: %s\n",
+                __func__, ggml_get_name(dst), linear_scale_layout ? "linear" : "tiled-128x4");
     }
 
     cublasLtMatmulDesc_t op_desc = nullptr;
@@ -715,6 +747,54 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 dst->data, dst_padded.get(),
                 (size_t) ne01 * (size_t) ne11 * sizeof(float),
                 cudaMemcpyDeviceToDevice, stream));
+    }
+
+    if (st == CUBLAS_STATUS_SUCCESS && validate_enabled && ne10 % QK_NVFP4 == 0 && ne01 > 0 && ne11 > 0) {
+        static std::atomic<bool> logged(false);
+        if (debug_enabled || !logged.exchange(true)) {
+            const int64_t nblk = ne10 / QK_NVFP4;
+            std::vector<block_nvfp4> w_row((size_t) nblk);
+            std::vector<float> x_row((size_t) ne10);
+            std::vector<block_nvfp4> x_q((size_t) nblk);
+            std::vector<float> x_roundtrip((size_t) ne10);
+            std::vector<float> w_deq((size_t) ne10);
+
+            const char * w_row_ptr = (const char *) src0->data + 0 * src0->nb[1];
+            const char * x_row_ptr = (const char *) src1->data + 0 * src1->nb[1];
+            CUDA_CHECK(cudaMemcpyAsync(w_row.data(), w_row_ptr, (size_t) nblk * sizeof(block_nvfp4), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaMemcpyAsync(x_row.data(), x_row_ptr, (size_t) ne10 * sizeof(float), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+
+            quantize_row_nvfp4_ref(x_row.data(), x_q.data(), ne10, global_scale);
+            dequantize_row_nvfp4(x_q.data(), x_roundtrip.data(), ne10, global_scale);
+            dequantize_row_nvfp4(w_row.data(), w_deq.data(), ne10, 1.0f);
+
+            double ref = 0.0;
+            for (int64_t k = 0; k < ne10; ++k) {
+                ref += (double) w_deq[(size_t) k] * (double) x_roundtrip[(size_t) k];
+            }
+            ref *= (double) out_scale;
+
+            float native_v = 0.0f;
+            const char * out_ptr = (const char *) dst_data + 0 * ne01 * (int64_t) sizeof(float);
+            CUDA_CHECK(cudaMemcpyAsync(&native_v, out_ptr, sizeof(native_v), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+
+            const double abs_err = fabs((double) native_v - ref);
+            const double rel_err = abs_err / (fabs(ref) + 1e-9);
+            GGML_LOG_WARN(
+                    "%s: native validate %s out[0,0]: native=%g ref=%g abs=%g rel=%g "
+                    "(global_scale=%g out_scale=%g scale_layout=%s)\n",
+                    __func__,
+                    ggml_get_name(dst),
+                    (double) native_v,
+                    ref,
+                    abs_err,
+                    rel_err,
+                    (double) global_scale,
+                    (double) out_scale,
+                    linear_scale_layout ? "linear" : "tiled-128x4");
+        }
     }
 
     if (c_desc != nullptr) {
