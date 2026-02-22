@@ -210,6 +210,25 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-rope.cpp)
 endif()
 
+if (GGML_CUDA)
+    enable_language(CUDA)
+    if (NOT TARGET CUDA::cudart)
+        find_package(CUDAToolkit REQUIRED)
+    endif()
+
+    get_target_property(LLAMA_TEST_CUDA_ARCH ggml-cuda CUDA_ARCHITECTURES)
+
+    set(LLAMA_TEST_NAME test-nvfp4-matmul)
+    llama_build(test-nvfp4-matmul.cu)
+    if (LLAMA_TEST_CUDA_ARCH AND NOT LLAMA_TEST_CUDA_ARCH STREQUAL "LLAMA_TEST_CUDA_ARCH-NOTFOUND")
+        set_property(TARGET ${LLAMA_TEST_NAME} PROPERTY CUDA_ARCHITECTURES "${LLAMA_TEST_CUDA_ARCH}")
+    endif()
+    llama_test(test-nvfp4-matmul LABEL "cuda")
+    target_link_libraries(${LLAMA_TEST_NAME} PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
+    unset(LLAMA_TEST_NAME)
+    unset(LLAMA_TEST_CUDA_ARCH)
+endif()
+
 # libmtmd
 set(LLAMA_TEST_NAME test-mtmd-c-api)
 llama_build_and_test(test-mtmd-c-api.c)

@@ -238,10 +238,12 @@ static __global__ void quantize_row_nvfp4_kernel(
 
     const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
     const uint8_t q = ggml_cuda_best_index_nvfp4(xi * inv_scale);
+    // Warp shuffles require all lanes in the mask to execute the intrinsic.
+    // Compute neighbor nibble unconditionally, then only even active lanes store.
+    const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
 
     if (lane_active && (lane & 1) == 0) {
-        const uint8_t q_hi = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
-        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].qs[lane/2] = q | (q_hi << 4);
+        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].qs[lane/2] = q | (q_peer << 4);
     }
 }
 
@@ -626,7 +628,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 (long long) scale_inner_padded);
         GGML_LOG_INFO("%s: scale layout mode for %s: %s\n",
                 __func__, ggml_get_name(dst), linear_scale_layout ? "linear" : "tiled-128x4");
-        GGML_LOG_INFO("%s: alpha mode for %s: out_scale\n",
+        GGML_LOG_INFO("%s: alpha mode for %s: out_scale/global_scale\n",
                 __func__, ggml_get_name(dst));
 
         // Compare first-row source scale bytes against repacked channel bytes.
@@ -957,7 +959,10 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             out_scale = scale_val;
         }
     }
-    const float matmul_alpha = out_scale;
+    // cuBLASLt FP4 path applies the channel scale directly to packed FP4 values.
+    // Our activation quantization uses x ~= q * (scale / global_scale), so account
+    // for the missing 1/global_scale factor in alpha.
+    const float matmul_alpha = (global_scale != 0.0f) ? (out_scale / global_scale) : out_scale;
 
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "matmul";
@@ -991,6 +996,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             std::vector<block_nvfp4> w_row((size_t) nblk);
             std::vector<float> x_row((size_t) ne10);
             std::vector<block_nvfp4> x_q((size_t) nblk);
+            std::vector<block_nvfp4> x_q_gpu((size_t) nblk);
             std::vector<float> x_roundtrip((size_t) ne10);
             std::vector<float> w_deq((size_t) ne10);
             std::vector<float> x_roundtrip_no_scale((size_t) ne10);
@@ -1001,11 +1007,36 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             const char * x_row_ptr = (const char *) src1->data + 0 * src1->nb[1];
             CUDA_CHECK(cudaMemcpyAsync(w_row.data(), w_row_ptr, (size_t) nblk * sizeof(block_nvfp4), cudaMemcpyDeviceToHost, stream));
             CUDA_CHECK(cudaMemcpyAsync(x_row.data(), x_row_ptr, (size_t) ne10 * sizeof(float), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaMemcpyAsync(x_q_gpu.data(), src1_q_nvfp4.get(), (size_t) nblk * sizeof(block_nvfp4), cudaMemcpyDeviceToHost, stream));
             CUDA_CHECK(cudaStreamSynchronize(stream));
 
             quantize_row_nvfp4_ref(x_row.data(), x_q.data(), ne10, global_scale);
             dequantize_row_nvfp4(x_q.data(), x_roundtrip.data(), ne10, global_scale);
             dequantize_row_nvfp4(w_row.data(), w_deq.data(), ne10, 1.0f);
+
+            int q_mismatch = 0;
+            for (int64_t ib = 0; ib < nblk; ++ib) {
+                if (x_q[(size_t) ib].e != x_q_gpu[(size_t) ib].e ||
+                    memcmp(x_q[(size_t) ib].qs, x_q_gpu[(size_t) ib].qs, QK_NVFP4/2) != 0) {
+                    q_mismatch += 1;
+                }
+            }
+            if (q_mismatch > 0) {
+                GGML_LOG_WARN(
+                        "%s: src1 quant mismatch for %s row0 blocks: mismatches=%d/%lld "
+                        "cpu_block0[e=%u qs0=%u qs7=%u] gpu_block0[e=%u qs0=%u qs7=%u]\n",
+                        __func__,
+                        ggml_get_name(dst),
+                        q_mismatch,
+                        (long long) nblk,
+                        (unsigned) x_q[0].e,
+                        (unsigned) x_q[0].qs[0],
+                        (unsigned) x_q[0].qs[QK_NVFP4/2 - 1],
+                        (unsigned) x_q_gpu[0].e,
+                        (unsigned) x_q_gpu[0].qs[0],
+                        (unsigned) x_q_gpu[0].qs[QK_NVFP4/2 - 1]);
+            }
+
             quantize_row_nvfp4_ref(x_row.data(), x_q.data(), ne10, 1.0f);
             dequantize_row_nvfp4(x_q.data(), x_roundtrip_no_scale.data(), ne10, 1.0f);
 
@@ -1024,11 +1055,12 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             dequantize_row_nvfp4_no_scale(w_row.data(), w_no_scale.data(), ne10);
             dequantize_row_nvfp4_no_scale(x_q.data(), x_no_scale.data(), ne10);
 
+
             double ref = 0.0;
             for (int64_t k = 0; k < ne10; ++k) {
                 ref += (double) w_deq[(size_t) k] * (double) x_roundtrip[(size_t) k];
             }
-            ref *= (double) matmul_alpha;
+            ref *= (double) out_scale;
 
             double ref_no_a_scale = 0.0;
             double ref_no_b_scale = 0.0;
@@ -1038,9 +1070,9 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 ref_no_b_scale  += (double) w_deq[(size_t) k]      * (double) x_roundtrip_no_scale[(size_t) k];
                 ref_no_ab_scale += (double) w_no_scale[(size_t) k] * (double) x_no_scale[(size_t) k];
             }
-            ref_no_a_scale  *= (double) matmul_alpha;
-            ref_no_b_scale  *= (double) matmul_alpha;
-            ref_no_ab_scale *= (double) matmul_alpha;
+            ref_no_a_scale  *= (double) out_scale;
+            ref_no_b_scale  *= (double) out_scale;
+            ref_no_ab_scale *= (double) out_scale;
 
             float native_v = 0.0f;
             const char * out_ptr = (const char *) dst_data + 0 * ne01 * (int64_t) sizeof(float);
@@ -1057,7 +1089,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             const double rel_err_no_ab_scale = abs_err_no_ab_scale / (fabs(ref_no_ab_scale) + 1e-9);
             GGML_LOG_WARN(
                     "%s: native validate %s out[0,0]: native=%g ref=%g abs=%g rel=%g "
-                    "(global_scale=%g out_scale=%g alpha=%g alpha_mode=out_scale scale_layout=%s)\n",
+                    "(global_scale=%g out_scale=%g alpha=%g alpha_mode=out_scale/global_scale scale_layout=%s)\n",
                     __func__,
                     ggml_get_name(dst),
                     (double) native_v,
