@@ -5285,6 +5285,8 @@ static void ggml_compute_forward_get_rows_f32(
                 (float *) ((char *) src0->data + i01*nb01 + i11*nb02 + i12*nb03));
     }
 
+    // Verbose tensor preview is only useful in debug builds.
+#ifndef NDEBUG
     if (params->ith == 0) {
         const int64_t n = ggml_nelements(dst);
         const int64_t nread = n < 4 ? n : 4;
@@ -5298,6 +5300,7 @@ static void ggml_compute_forward_get_rows_f32(
             GGML_LOG_INFO("%s: dst=%s first%lld=%s\n", __func__, ggml_get_name(dst), (long long) nread, values);
         }
     }
+#endif
 }
 
 void ggml_compute_forward_get_rows(

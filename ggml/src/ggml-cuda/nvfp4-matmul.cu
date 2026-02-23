@@ -543,6 +543,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         return false;
     }
 
+#ifndef NDEBUG
     {
         // NVFP4 in ggml stores one extra E4M3 scale byte per 16 values.
         // CUDA_R_4F_E2M1 describes plain packed FP4 (2 values per byte) without in-band scale bytes.
@@ -558,6 +559,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                     (long long) ne10, sizeof(block_nvfp4));
         }
     }
+#endif
 
     // cuBLASLt native FP4 matmul is restrictive on GEMM dimensions.
     // Keep static matrix dimensions (M/K) aligned and pad dynamic token dimension (N) when needed.

@@ -2348,11 +2348,14 @@ struct server_context {
         const bool is_eog = llama_vocab_is_eog(vocab, result.tok);
         slot.sampled = result.tok;
 
+        // Token-level trace is useful for debug sessions, but too noisy for release.
+#ifndef NDEBUG
         if (slot.n_decoded <= 5 || token_str.empty()) {
             const std::string token_dbg = escape_token_piece(token_str, 64);
             SLT_INF(slot, "sampled token: tok=%d, piece_len=%zu, is_eog=%d, piece='%s'\n",
                     result.tok, token_str.size(), is_eog ? 1 : 0, token_dbg.c_str());
         }
+#endif
 
         slot.generated_text += token_str;
         if (slot.params.return_tokens) {
@@ -3559,11 +3562,15 @@ struct server_context {
                 batch.logits   + i,
             };
 
+#ifndef NDEBUG
             const int64_t t_decode_start_us = ggml_time_us();
             SRV_INF("llama_decode begin, n_tokens = %d, n_batch = %d, i = %d\n", n_tokens, n_batch, i);
+#endif
             const int ret = llama_decode(ctx, batch_view);
+#ifndef NDEBUG
             SRV_INF("llama_decode end, n_tokens = %d, n_batch = %d, i = %d, ret = %d, dt = %.3f ms\n",
                     n_tokens, n_batch, i, ret, (ggml_time_us() - t_decode_start_us) / 1000.0);
+#endif
 
             metrics.on_decoded(slots);
 
