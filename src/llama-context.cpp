@@ -769,7 +769,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     if (gf) {
-        LLAMA_LOG_DEBUG("%s: graph ready, n_nodes = %d\n", __func__, ggml_graph_n_nodes(gf));
+        // LLAMA_LOG_DEBUG("%s: graph ready, n_nodes = %d\n", __func__, ggml_graph_n_nodes(gf));
     }
 
     // set the input data for the input tensors
@@ -781,11 +781,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
-    const int64_t t_compute_start_us = ggml_time_us();
-    LLAMA_LOG_DEBUG("%s: graph_compute begin\n", __func__);
+    // const int64_t t_compute_start_us = ggml_time_us();
+    // LLAMA_LOG_DEBUG("%s: graph_compute begin\n", __func__);
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
-    LLAMA_LOG_DEBUG("%s: graph_compute end, status = %d, dt = %.3f ms\n",
-            __func__, status, (ggml_time_us() - t_compute_start_us) / 1000.0);
+    // LLAMA_LOG_DEBUG("%s: graph_compute end, status = %d, dt = %.3f ms\n",
+            // __func__, status, (ggml_time_us() - t_compute_start_us) / 1000.0);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
