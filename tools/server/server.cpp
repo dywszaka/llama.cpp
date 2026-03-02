@@ -156,6 +156,7 @@ struct slot_params {
     std::vector<std::string> response_fields;
     bool timings_per_token = false;
     bool post_sampling_probs = false;
+    bool return_logits = false;
 
     struct common_params_sampling sampling;
     struct common_params_speculative speculative;
@@ -236,6 +237,7 @@ struct slot_params {
             {"speculative.p_min",         speculative.p_min},
             {"timings_per_token",         timings_per_token},
             {"post_sampling_probs",       post_sampling_probs},
+            {"return_logits",             return_logits},
             {"lora",                      lora},
         };
     }
@@ -327,6 +329,7 @@ struct server_task {
         params.sampling.n_probs            = json_value(data, "n_probs",            defaults.sampling.n_probs);
         params.sampling.min_keep           = json_value(data, "min_keep",           defaults.sampling.min_keep);
         params.post_sampling_probs         = json_value(data, "post_sampling_probs", defaults.post_sampling_probs);
+        params.return_logits               = json_value(data, "return_logits",       defaults.return_logits);
 
         params.speculative.n_min = json_value(data, "speculative.n_min", defaults.speculative.n_min);
         params.speculative.n_max = json_value(data, "speculative.n_max", defaults.speculative.n_max);
@@ -659,20 +662,24 @@ inline std::string stop_type_to_str(stop_type type) {
 struct completion_token_output {
     llama_token tok;
     float prob;
+    float logit = 0.0f;
+    bool has_logit = false;
     std::string text_to_send;
     struct prob_info {
         llama_token tok;
         std::string txt;
         float prob;
+        float logit = 0.0f;
+        bool has_logit = false;
     };
     std::vector<prob_info> probs;
 
-    json to_json(bool post_sampling_probs) const {
+    json to_json(bool post_sampling_probs, bool include_logits) const {
         json probs_for_token = json::array();
         for (const auto & p : probs) {
             std::string txt(p.txt);
             txt.resize(validate_utf8(txt));
-            probs_for_token.push_back(json {
+            json prob_item = json {
                 {"id",      p.tok},
                 {"token",   txt},
                 {"bytes",   str_to_bytes(p.txt)},
@@ -680,17 +687,21 @@ struct completion_token_output {
                     post_sampling_probs ? "prob" : "logprob",
                     post_sampling_probs ? p.prob : logarithm(p.prob)
                 },
-            });
+            };
+            if (include_logits && p.has_logit) {
+                prob_item["logit"] = p.logit;
+            }
+            probs_for_token.push_back(std::move(prob_item));
         }
         return probs_for_token;
     }
 
-    static json probs_vector_to_json(const std::vector<completion_token_output> & probs, bool post_sampling_probs) {
+    static json probs_vector_to_json(const std::vector<completion_token_output> & probs, bool post_sampling_probs, bool include_logits) {
         json out = json::array();
         for (const auto & p : probs) {
             std::string txt(p.text_to_send);
             txt.resize(validate_utf8(txt));
-            out.push_back(json {
+            json token_item = json {
                 {"id",           p.tok},
                 {"token",        txt},
                 {"bytes",        str_to_bytes(p.text_to_send)},
@@ -700,9 +711,13 @@ struct completion_token_output {
                 },
                 {
                     post_sampling_probs ? "top_probs" : "top_logprobs",
-                    p.to_json(post_sampling_probs)
+                    p.to_json(post_sampling_probs, include_logits)
                 },
-            });
+            };
+            if (include_logits && p.has_logit) {
+                token_item["logit"] = p.logit;
+            }
+            out.push_back(std::move(token_item));
         }
         return out;
     }
@@ -747,6 +762,7 @@ struct server_task_result_cmpl_final : server_task_result {
     stop_type stop = STOP_TYPE_NONE;
 
     bool post_sampling_probs;
+    bool return_logits = false;
     std::vector<completion_token_output> probs_output;
     std::vector<std::string>  response_fields;
 
@@ -801,7 +817,7 @@ struct server_task_result_cmpl_final : server_task_result {
             {"timings",             timings.to_json()},
         };
         if (!stream && !probs_output.empty()) {
-            res["completion_probabilities"] = completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs);
+            res["completion_probabilities"] = completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs, return_logits);
         }
         return response_fields.empty() ? res : json_get_nested_values(response_fields, res);
     }
@@ -811,7 +827,7 @@ struct server_task_result_cmpl_final : server_task_result {
         json logprobs = json(nullptr); // OAI default to null
         if (!stream && probs_output.size() > 0) {
             logprobs = json{
-                {"content", completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs)},
+                {"content", completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs, return_logits)},
             };
         }
         json finish_reason = "length";
@@ -871,7 +887,7 @@ struct server_task_result_cmpl_final : server_task_result {
 
         if (!stream && probs_output.size() > 0) {
             choice["logprobs"] = json{
-                {"content", completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs)},
+                {"content", completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs, return_logits)},
             };
         }
 
@@ -970,6 +986,7 @@ struct server_task_result_cmpl_partial : server_task_result {
     int32_t n_prompt_tokens;
 
     bool post_sampling_probs;
+    bool return_logits = false;
     completion_token_output prob_output;
     result_timings timings;
 
@@ -1017,7 +1034,7 @@ struct server_task_result_cmpl_partial : server_task_result {
             res.push_back({"timings", timings.to_json()});
         }
         if (!prob_output.probs.empty()) {
-            res["completion_probabilities"] = completion_token_output::probs_vector_to_json({prob_output}, post_sampling_probs);
+            res["completion_probabilities"] = completion_token_output::probs_vector_to_json({prob_output}, post_sampling_probs, return_logits);
         }
         return res;
     }
@@ -1027,7 +1044,7 @@ struct server_task_result_cmpl_partial : server_task_result {
         json logprobs = json(nullptr); // OAI default to null
         if (prob_output.probs.size() > 0) {
             logprobs = json{
-                {"content", completion_token_output::probs_vector_to_json({prob_output}, post_sampling_probs)},
+                {"content", completion_token_output::probs_vector_to_json({prob_output}, post_sampling_probs, return_logits)},
             };
         }
         json res = json {
@@ -1096,7 +1113,7 @@ struct server_task_result_cmpl_partial : server_task_result {
 
             if (prob_output.probs.size() > 0) {
                 deltas[deltas.size() - 1].at("choices").at(0)["logprobs"] = json {
-                    {"content", completion_token_output::probs_vector_to_json({prob_output}, post_sampling_probs)},
+                    {"content", completion_token_output::probs_vector_to_json({prob_output}, post_sampling_probs, return_logits)},
                 };
             }
 
@@ -2522,6 +2539,8 @@ struct server_context {
             for (size_t i = 0; i < max_probs; i++) {
                 if (cur_p->data[i].id == result.tok) {
                     result.prob = cur_p->data[i].p;
+                    result.logit = cur_p->data[i].logit;
+                    result.has_logit = true;
                     break;
                 }
             }
@@ -2532,7 +2551,9 @@ struct server_context {
                 result.probs.push_back({
                     cur_p->data[i].id,
                     common_token_to_piece(ctx, cur_p->data[i].id, special),
-                    cur_p->data[i].p
+                    cur_p->data[i].p,
+                    cur_p->data[i].logit,
+                    true
                 });
             }
         } else {
@@ -2544,6 +2565,8 @@ struct server_context {
                 // set probability for sampled token
                 if (cur[i].id == result.tok) {
                     result.prob = cur[i].p;
+                    result.logit = cur[i].logit;
+                    result.has_logit = true;
                     break;
                 }
             }
@@ -2554,7 +2577,9 @@ struct server_context {
                 result.probs.push_back({
                     cur[i].id,
                     common_token_to_piece(ctx, cur[i].id, special),
-                    cur[i].p
+                    cur[i].p,
+                    cur[i].logit,
+                    true
                 });
             }
         }
@@ -2599,6 +2624,7 @@ struct server_context {
         res->n_decoded           = slot.n_decoded;
         res->n_prompt_tokens     = slot.n_prompt_tokens;
         res->post_sampling_probs = slot.params.post_sampling_probs;
+        res->return_logits       = slot.params.return_logits;
 
         res->verbose               = slot.params.verbose;
         res->oaicompat             = slot.params.oaicompat;
@@ -2646,6 +2672,7 @@ struct server_context {
         res->stopping_word       = slot.stopping_word;
         res->stop                = slot.stop;
         res->post_sampling_probs = slot.params.post_sampling_probs;
+        res->return_logits       = slot.params.return_logits;
 
         res->verbose               = slot.params.verbose;
         res->stream                = slot.params.stream;
@@ -4752,6 +4779,98 @@ int main(int argc, char ** argv) {
         res_ok(res, data);
     };
 
+    const auto handle_debug_tokenize_ids = [&ctx_server, &res_error, &res_ok](const httplib::Request & req, httplib::Response & res) {
+        try {
+            const json body = req.body.empty() ? json::object() : json::parse(req.body);
+
+            json input = nullptr;
+            if (body.contains("content")) {
+                input = body.at("content");
+            } else if (body.contains("prompt")) {
+                input = body.at("prompt");
+            } else {
+                throw std::runtime_error("\"content\" or \"prompt\" is required");
+            }
+
+            const bool add_special = json_value(body, "add_special", false);
+            const bool parse_special = json_value(body, "parse_special", true);
+
+            auto prompts = tokenize_input_prompts(ctx_server.vocab, input, add_special, parse_special);
+            if (prompts.size() != 1) {
+                throw std::runtime_error("Only single input is supported by /debug/tokenize-ids");
+            }
+
+            json pieces = json::array();
+            for (const auto token : prompts[0]) {
+                std::string piece = common_token_to_piece(ctx_server.ctx, token);
+                if (is_valid_utf8(piece)) {
+                    pieces.push_back(piece);
+                } else {
+                    json bytes = json::array();
+                    for (unsigned char c : piece) {
+                        bytes.push_back(static_cast<int>(c));
+                    }
+                    pieces.push_back(bytes);
+                }
+            }
+
+            res_ok(res, json {
+                {"tokens", prompts[0]},
+                {"n_tokens", prompts[0].size()},
+                {"pieces", std::move(pieces)},
+            });
+        } catch (const std::exception & e) {
+            res_error(res, format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+        }
+    };
+
+    const auto handle_debug_logits = [&handle_completions_impl, &res_error](const httplib::Request & req, httplib::Response & res) {
+        try {
+            json data = req.body.empty() ? json::object() : json::parse(req.body);
+            if (!data.contains("prompt")) {
+                if (data.contains("content")) {
+                    data["prompt"] = data.at("content");
+                } else {
+                    throw std::runtime_error("\"prompt\" or \"content\" is required");
+                }
+            }
+
+            data["stream"] = false;
+            data["return_logits"] = true;
+            data["cache_prompt"] = json_value(data, "cache_prompt", false);
+
+            if (!data.contains("max_tokens") && !data.contains("n_predict")) {
+                data["max_tokens"] = 1;
+            }
+            if (!data.contains("logprobs") && !data.contains("n_probs")) {
+                data["logprobs"] = 20;
+            }
+            if (!data.contains("temperature")) {
+                data["temperature"] = 0.0;
+            }
+            if (!data.contains("top_p")) {
+                data["top_p"] = 1.0;
+            }
+            if (!data.contains("top_k")) {
+                data["top_k"] = 1;
+            }
+            if (!data.contains("min_p")) {
+                data["min_p"] = 0.0;
+            }
+
+            std::vector<raw_buffer> files; // dummy
+            handle_completions_impl(
+                SERVER_TASK_TYPE_COMPLETION,
+                data,
+                files,
+                req.is_connection_closed,
+                res,
+                OAICOMPAT_TYPE_NONE);
+        } catch (const std::exception & e) {
+            res_error(res, format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+        }
+    };
+
     const auto handle_detokenize = [&ctx_server, &res_ok](const httplib::Request & req, httplib::Response & res) {
         const json body = json::parse(req.body);
 
@@ -5064,7 +5183,9 @@ int main(int argc, char ** argv) {
     svr->Post(params.api_prefix + "/v1/rerank",           handle_rerank);
     svr->Post(params.api_prefix + "/v1/reranking",        handle_rerank);
     svr->Post(params.api_prefix + "/tokenize",            handle_tokenize);
+    svr->Post(params.api_prefix + "/debug/tokenize-ids",  handle_debug_tokenize_ids);
     svr->Post(params.api_prefix + "/detokenize",          handle_detokenize);
+    svr->Post(params.api_prefix + "/debug/logits",        handle_debug_logits);
     svr->Post(params.api_prefix + "/apply-template",      handle_apply_template);
     // LoRA adapters hotswap
     svr->Get (params.api_prefix + "/lora-adapters",       handle_lora_adapters_list);
