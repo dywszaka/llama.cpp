@@ -38,6 +38,7 @@ void log_tensor_preview(const ggml_tensor * tensor, const void * data_ptr, size_
 void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf);
 void debug_nvfp4_norm_weights(const struct llama_model & model);
 void nvfp4_pin_tensor_if_match(struct ggml_tensor * tensor);
+void nvfp4_pin_tensor_if_match(struct ggml_tensor * tensor, const char * base_name, int il, int n_layer);
 void nvfp4_log_logits_if_enabled(int idx, int64_t j, int n_vocab, const float * logits);
 
 } // namespace llama_log

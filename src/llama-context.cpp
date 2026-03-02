@@ -1491,7 +1491,7 @@ llm_graph_cb llama_context::graph_get_cb() const {
             ggml_set_name(cur, name);
         }
 
-        llama_log::nvfp4_pin_tensor_if_match(cur);
+        llama_log::nvfp4_pin_tensor_if_match(cur, name, il, model.hparams.n_layer);
 
         if (!cparams.offload_kqv) {
             if (strcmp(name, "kqv_merged_cont") == 0) {
