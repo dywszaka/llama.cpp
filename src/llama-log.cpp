@@ -839,6 +839,44 @@ static void log_tensor_with_sources(const char * tag, const ggml_tensor * tensor
                     ggml_type_name(src->type));
             log_tensor_src_samples_if_supported(tag, tensor, si, src);
         }
+
+        // For the first FFN residual add, one more level helps distinguish
+        // "attention output already drifted" from "residual add changed it".
+        if (si == 0 && starts_with(ggml_get_name(tensor), "ffn_inp-") &&
+                (src->op == GGML_OP_MUL_MAT || src->op == GGML_OP_MUL)) {
+            for (int ssi = 0; ssi < GGML_MAX_SRC; ++ssi) {
+                const ggml_tensor * ssrc = src->src[ssi];
+                if (!ssrc) {
+                    continue;
+                }
+                llama_tensor_stats ssrc_stats;
+                if (compute_tensor_stats(ssrc, ssrc_stats)) {
+                    LLAMA_LOG_WARN("%s: tensor=%s src%d=%s src%d=%s op=%s type=%s ne=[%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 "]\n",
+                            tag,
+                            ggml_get_name(tensor),
+                            si,
+                            ggml_get_name(src),
+                            ssi,
+                            ggml_get_name(ssrc),
+                            ggml_op_name(ssrc->op),
+                            ggml_type_name(ssrc->type),
+                            ssrc->ne[0], ssrc->ne[1], ssrc->ne[2], ssrc->ne[3]);
+                    log_tensor_first4_f32(ssrc);
+                    log_tensor_stats(ssrc, ssrc_stats);
+                } else {
+                    LLAMA_LOG_WARN("%s: tensor=%s src%d=%s src%d=%s op=%s type=%s stats=unsupported\n",
+                            tag,
+                            ggml_get_name(tensor),
+                            si,
+                            ggml_get_name(src),
+                            ssi,
+                            ggml_get_name(ssrc),
+                            ggml_op_name(ssrc->op),
+                            ggml_type_name(ssrc->type));
+                    log_tensor_src_samples_if_supported(tag, src, ssi, ssrc);
+                }
+            }
+        }
     }
 }
 
@@ -1026,6 +1064,8 @@ void debug_nvfp4_graph_tensors(ggml_backend_sched_t sched, ggml_cgraph * gf) {
 
     key_slot key_slots[] = {
         {"attn_norm-",   nullptr, nullptr},
+        {"attn_out-",    nullptr, nullptr},
+        {"attn_out_norm-", nullptr, nullptr},
         {"Qcur-scaled-", nullptr, nullptr},
         {"Kcur-scaled-", nullptr, nullptr},
         {"Vcur-scaled-", nullptr, nullptr},
@@ -1145,6 +1185,20 @@ void nvfp4_pin_tensor_if_match(struct ggml_tensor * tensor, const char * base_na
         return;
     }
 
+    auto pin_with_sources = [&](ggml_tensor * t) {
+        ggml_set_output(t);
+        for (int si = 0; si < GGML_MAX_SRC; ++si) {
+            if (t->src[si]) {
+                ggml_set_output(t->src[si]);
+                for (int ssi = 0; ssi < GGML_MAX_SRC; ++ssi) {
+                    if (t->src[si]->src[ssi]) {
+                        ggml_set_output(t->src[si]->src[ssi]);
+                    }
+                }
+            }
+        }
+    };
+
     static const char * key_names[] = {
         "attn_norm",
         "Qcur-scaled",
@@ -1168,7 +1222,7 @@ void nvfp4_pin_tensor_if_match(struct ggml_tensor * tensor, const char * base_na
     if (il >= 0 && (is_first || is_last)) {
         for (const char * key_name : key_names) {
             if (std::strcmp(base_name, key_name) == 0) {
-                ggml_set_output(tensor);
+                pin_with_sources(tensor);
                 return;
             }
         }
@@ -1178,7 +1232,7 @@ void nvfp4_pin_tensor_if_match(struct ggml_tensor * tensor, const char * base_na
         if (std::strcmp(base_name, "result_norm") == 0 ||
             std::strcmp(base_name, "result_output_no_bias") == 0 ||
             std::strcmp(base_name, "result_output") == 0) {
-            ggml_set_output(tensor);
+            pin_with_sources(tensor);
         }
     }
 }
