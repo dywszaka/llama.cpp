@@ -472,44 +472,29 @@ static inline float ggml_e8m0_to_fp32_half(uint8_t x) {
 #define GGML_E8M0_TO_FP32_HALF(x) ggml_e8m0_to_fp32_half(x)
 
 static inline float ggml_e4m3_to_fp32(uint8_t x) {
-    uint32_t sign     = (uint32_t)(x & 0x80) << 24; // bit7 -> float sign
-    uint32_t exponent = (x >> 3) & 0x0F;           // bits 6..3
-    uint32_t mantissa = x & 0x07;                   // bits 2..0
-
-    uint32_t bits;
+    const int sign = (x & 0x80) ? -1 : 1;
+    const int exponent = (x >> 3) & 0x0F;
+    const int mantissa = x & 0x07;
 
     if (exponent == 0) {
-        // subnormal or zero
+        // subnormal or zero: sign * (mantissa / 8) * 2^-6 = sign * mantissa * 2^-9
         if (mantissa == 0) {
-            bits = sign; // ±0
-        } else {
-            // subnormal:
-            // value = (-1)^S * 2^(-6) * (mantissa / 8)
-            // normalize mantissa
-            int shift = __builtin_clz(mantissa) - 29; // position to normalize
-            mantissa <<= shift;
-            uint32_t exp = 127 - 6 - shift;
-            bits = sign | (exp << 23) | ((mantissa & 0x7) << 20);
+            return sign > 0 ? 0.0f : -0.0f;
         }
-    } else if (exponent == 0x0F) {
-        // float8_e4m3fn: no Inf. exp=0x0F, mantissa<=6 -> max finite (±448), mantissa=7 -> NaN.
-        if (mantissa == 0x7) {
-            uint32_t man = 1u << 22; // quiet NaN
-            bits = sign | 0x7F800000 | man;
-        } else {
-            bits = sign | 0x43E00000; // 448.0f
-        }
-    } else {
-        // normal number
-        // float exponent = exponent - bias + 127
-        uint32_t exp = (exponent - 7 + 127) << 23;
-        uint32_t man = mantissa << (23 - 3);
-        bits = sign | exp | man;
+        return sign * ldexpf((float) mantissa, -9);
     }
 
-    float result;
-    memcpy(&result, &bits, sizeof(result));
-    return result;
+    if (exponent == 0x0F) {
+        // float8_e4m3fn: no Inf encoding, mantissa==7 is NaN, 0..6 are finite.
+        if (mantissa == 0x7) {
+            return sign > 0 ? NAN : -NAN;
+        }
+        // sign * (1 + mantissa/8) * 2^(15-7)
+        return sign * ldexpf((float) (8 + mantissa), 5);
+    }
+
+    // normal: sign * (1 + mantissa/8) * 2^(exponent-7)
+    return sign * ldexpf((float) (8 + mantissa), exponent - 10);
 }
 
 static inline float ggml_e4m3_to_fp32_half(uint8_t x) {
