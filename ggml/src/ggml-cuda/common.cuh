@@ -557,25 +557,41 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
 }
 
 static __host__ __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32(uint8_t x) {
-    const int sign = (x & 0x80) ? -1 : 1;
-    const int exponent = (x >> 3) & 0x0F;
-    const int mantissa = x & 0x07;
+    const uint32_t sign     = (uint32_t)(x & 0x80) << 24;
+    const uint32_t exponent = (x >> 3) & 0x0F;
+    const uint32_t mantissa = x & 0x07;
+
+    uint32_t bits;
 
     if (exponent == 0) {
         if (mantissa == 0) {
-            return sign > 0 ? 0.0f : -0.0f;
+            bits = sign;
+        } else {
+#if defined(__CUDA_ARCH__)
+            const int leading = __clz(mantissa);
+#else
+            const int leading = __builtin_clz(mantissa);
+#endif
+            const int shift = leading - 29;
+            const uint32_t man = mantissa << shift;
+            const uint32_t exp = 127 - 6 - shift;
+            bits = sign | (exp << 23) | (man & 0x7) << 20;
         }
-        return sign * ldexpf((float) mantissa, -9);
-    }
-
-    if (exponent == 0x0F) {
+    } else if (exponent == 0x0F) {
         if (mantissa == 0x7) {
-            return sign > 0 ? NAN : -NAN;
+            bits = sign | 0x7F800000 | (1u << 22); // NaN
+        } else {
+            bits = sign | 0x43E00000; // max finite 448.0f
         }
-        return sign * ldexpf((float) (8 + mantissa), 5);
+    } else {
+        const uint32_t exp = (exponent - 7 + 127) << 23;
+        const uint32_t man = mantissa << (23 - 3);
+        bits = sign | exp | man;
     }
 
-    return sign * ldexpf((float) (8 + mantissa), exponent - 10);
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
 }
 
 static __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32_half(uint8_t x) {
