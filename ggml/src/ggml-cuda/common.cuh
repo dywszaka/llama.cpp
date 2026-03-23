@@ -5,6 +5,7 @@
 #include "ggml-cuda.h"
 
 #include <cstdint>
+#include <string.h>
 #include <memory>
 
 #if defined(GGML_USE_HIP)
@@ -332,6 +333,15 @@ static bool cp_async_available(const int cc) {
 static bool blackwell_mma_available(const int cc) {
     return GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_BLACKWELL &&
            ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_RUBIN;
+}
+
+static bool blackwell_nvfp4_available(const int cc) {
+#if CUDART_VERSION >= 12080
+    return blackwell_mma_available(cc);
+#else
+    GGML_UNUSED(cc);
+    return false;
+#endif // CUDART_VERSION >= 12080
 }
 
 static constexpr __device__ int ggml_cuda_get_physical_warp_size() {
@@ -819,6 +829,59 @@ __device__ __forceinline__ uint8_t ggml_cuda_float_to_fp4_e2m1(float x, float e)
     }
 
     return static_cast<uint8_t>(best_i | sign_bit);
+}
+
+__device__ __forceinline__ float ggml_cuda_ue4m3_to_fp32(uint8_t x) {
+    if (x == 0 || x == 0x7F) {
+        return 0.0f;
+    }
+    int   exp = (x >> 3) & 0xF;
+    int   man = x & 0x7;
+    float raw;
+    if (exp == 0) {
+        raw = ldexpf((float) man, -9);
+    } else {
+        raw = ldexpf(1.0f + (float) man / 8.0f, exp - 7);
+    }
+    return raw * 0.5f;
+}
+
+__device__ __forceinline__ uint8_t ggml_cuda_float_to_ue4m3(float x) {
+    if (!(x > 0.0f)) {
+        return 0;
+    }
+    if (x > 448.0f) {
+        x = 448.0f;
+    }
+    uint32_t bits;
+    memcpy(&bits, &x, 4);
+    int fp32_exp  = ((bits >> 23) & 0xFF) - 127;
+    int fp32_man  = (bits >> 20) & 0x7;
+    int ue4m3_exp = fp32_exp + 7;
+    if (ue4m3_exp <= 0) {
+        // subnormal: value = man * 2^-9, man = round(x * 2^9)
+        int man = (int) (x * 512.0f + 0.5f);
+        if (man > 7) {
+            man = 7;
+        }
+        if (man < 1) {
+            return 0;
+        }
+        return (uint8_t) man;
+    }
+    if (ue4m3_exp >= 15) {
+        return 0x7E;
+    }
+    int round_bit = (bits >> 19) & 1;
+    int ue4m3_man = fp32_man + round_bit;
+    if (ue4m3_man > 7) {
+        ue4m3_man = 0;
+        ue4m3_exp++;
+        if (ue4m3_exp >= 15) {
+            return 0x7E;
+        }
+    }
+    return (uint8_t) ((ue4m3_exp << 3) | ue4m3_man);
 }
 
 // See https://gmplib.org/~tege/divcnst-pldi94.pdf figure 4.1.
@@ -1316,6 +1379,9 @@ struct ggml_cuda_stream_context {
     }
 };
 
+struct ggml_cuda_nvfp4_weight_cache;
+struct ggml_cuda_nvfp4_plan;
+
 struct ggml_backend_cuda_context {
     int device;
     std::string name;
@@ -1323,6 +1389,10 @@ struct ggml_backend_cuda_context {
 
     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
+    cublasLtHandle_t cublaslt_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
+
+    std::unordered_map<const ggml_tensor *, ggml_cuda_nvfp4_weight_cache *> nvfp4_weight_cache[GGML_CUDA_MAX_DEVICES];
+    std::unordered_map<uint64_t, ggml_cuda_nvfp4_plan *> nvfp4_plan_cache[GGML_CUDA_MAX_DEVICES];
 
     int curr_stream_no = 0;
 
@@ -1394,6 +1464,18 @@ struct ggml_backend_cuda_context {
 
     cublasHandle_t cublas_handle() {
         return cublas_handle(device);
+    }
+
+    cublasLtHandle_t cublaslt_handle(int device) {
+        if (cublaslt_handles[device] == nullptr) {
+            ggml_cuda_set_device(device);
+            CUBLAS_CHECK(cublasLtCreate(&cublaslt_handles[device]));
+        }
+        return cublaslt_handles[device];
+    }
+
+    cublasLtHandle_t cublaslt_handle() {
+        return cublaslt_handle(device);
     }
 
     // pool
