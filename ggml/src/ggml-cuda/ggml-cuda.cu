@@ -39,6 +39,9 @@
 #include "ggml-cuda/scale.cuh"
 #include "ggml-cuda/softcap.cuh"
 #include "ggml-cuda/softmax.cuh"
+
+// FP32->BF16 round-to-nearest-even helper
+#include "../fp32_to_bf16.c"
 #include "ggml-cuda/ssm-conv.cuh"
 #include "ggml-cuda/ssm-scan.cuh"
 #include "ggml-cuda/sum.cuh"
@@ -71,6 +74,109 @@
 #include <stdlib.h>
 #include <string>
 #include <vector>
+
+// device-side BF16 round helper
+static __device__ __forceinline__ uint16_t ggml_cuda_fp32_to_bf16_round_device(float v) {
+    union {
+        float    f;
+        uint32_t u;
+    } tmp = { v };
+    uint32_t fp32_bits = tmp.u;
+    
+    // 1. 提取 FP32 的组成部分
+    uint32_t sign = (fp32_bits >> 31) & 0x1;
+    uint32_t exp = (fp32_bits >> 23) & 0xFF;
+    uint32_t mant = fp32_bits & 0x007FFFFF;
+    
+    // 2. 处理特殊值
+    if (exp == 0xFF) {  // NaN 或 Inf
+        if (mant != 0) {  // NaN
+            // 保留部分 NaN 信息
+            uint16_t bf16_bits = (sign << 15) | 0x7F80U | ((mant >> 16) & 0x3FU);
+            // 确保尾数不为0（NaN的标志）
+            if ((bf16_bits & 0x7F) == 0) {
+                bf16_bits |= 0x0040U;
+            }
+            return bf16_bits;
+        } else {  // Inf
+            return (uint16_t)((sign << 15) | 0x7F80U);
+        }
+    }
+    
+    // 3. 处理零
+    if (exp == 0 && mant == 0) {
+        return (uint16_t)(sign << 15);
+    }
+    
+    // 4. 处理反规格化数（可能上溢为规格化数）
+    if (exp == 0) {
+        // 反规格化数：隐含位为0，需要规格化
+        // 找到第一个非零位
+        uint32_t shift = 0;
+        while ((mant & (1U << 22)) == 0 && shift < 22) {
+            mant <<= 1;
+            shift++;
+        }
+        exp = 1 - shift;  // 调整指数
+        // 移除隐含位（对于反规格化数，隐含位为0）
+        mant &= 0x007FFFFFU;
+    } else {
+        // 规格化数：添加隐含位
+        mant |= 0x00800000U;  // 添加隐含的1（第23位）
+    }
+    
+    // 5. 尾数舍入（最近偶数舍入）
+    // 保护位(G)、舍入位(R)、粘滞位(S)
+    // mant位：23-0（23是隐含位，22-0是尾数）
+    // 保留位：22-16（7位）
+    // G: 位15, R: 位14, S: 位13-0的或
+    
+    // 提取舍入位信息
+    uint32_t guard_bit = (mant >> 15) & 0x1;      // 位15
+    uint32_t round_bit = (mant >> 14) & 0x1;      // 位14
+    uint32_t sticky_bits = mant & 0x3FFFU;        // 位13-0
+    
+    // 计算粘滞位（如果低位有任何1，则粘滞位为1）
+    uint32_t sticky = (sticky_bits != 0) ? 1 : 0;
+    
+    // 获取要保留的尾数部分（不包括隐含位）
+    uint32_t bf16_mant = (mant >> 16) & 0x7F;     // 位22-16
+    
+    // 最近偶数舍入
+    if (guard_bit == 1) {
+        if (round_bit == 1 || sticky == 1) {
+            // 情况1: G=1且(R=1或S=1)，进一
+            bf16_mant += 1;
+        } else {
+            // 情况2: G=1, R=0, S=0，向偶数舍入
+            if ((bf16_mant & 0x1) == 1) {  // 尾数最低位为1
+                bf16_mant += 1;
+            }
+        }
+    }
+    
+    // 6. 处理尾数溢出（进位导致指数增加）
+    if (bf16_mant > 0x7F) {
+        bf16_mant = 0;
+        exp += 1;
+        
+        // 指数溢出检查
+        if (exp > 0xFE) {  // 最大指数为254（0xFE）
+            // 变为无穷大
+            return (uint16_t)((sign << 15) | 0x7F80U);
+        }
+    }
+    
+    // 7. 处理指数下溢
+    if (exp < 1) {
+        // BF16不支持反规格化数，直接变为0
+        return (uint16_t)(sign << 15);
+    }
+    
+    // 8. 组合 BF16
+    uint16_t bf16_bits = (sign << 15) | ((exp & 0xFF) << 7) | (bf16_mant & 0x7F);
+    return bf16_bits;
+}
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
@@ -2262,6 +2368,110 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         nb1, nb2, nb3, stream);
 }
 
+static __global__ void ggml_cuda_trunc_f32_kernel(float * data, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const uint32_t bf16 = (uint32_t) ggml_cuda_fp32_to_bf16_round_device(data[i]);
+        union {
+            uint32_t u;
+            float    f;
+        } out = { bf16 << 16 };
+        data[i] = out.f;
+    }
+}
+
+static __global__ void ggml_cuda_trunc_f32_strided_kernel(
+        char * data,
+        size_t nb0, size_t nb1, size_t nb2, size_t nb3,
+        int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t total = (size_t) ne0 * ne1 * ne2 * ne3;
+    if (idx >= total) {
+        return;
+    }
+
+    int64_t i0 = idx % ne0;
+    idx /= ne0;
+    int64_t i1 = idx % ne1;
+    idx /= ne1;
+    int64_t i2 = idx % ne2;
+    idx /= ne2;
+    int64_t i3 = idx;
+
+    float * p = (float *) (data + i0*nb0 + i1*nb1 + i2*nb2 + i3*nb3);
+    const uint32_t bf16 = (uint32_t) ggml_cuda_fp32_to_bf16_round_device(*p);
+    ((uint32_t *)p)[0] = bf16 << 16;
+}
+
+static bool ggml_cuda_trunc_log_enabled() {
+    static bool enabled = []() {
+        const char * env = getenv("GGML_CUDA_TRUNC_LOG");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool ggml_cuda_trunc_enabled() {
+    static bool enabled = []() {
+        const char * env = getenv("GGML_CUDA_TRUNC_ENABLE");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
+
+static void ggml_cuda_truncate_tensor_f32(ggml_backend_cuda_context & ctx, struct ggml_tensor * tensor) {
+    if (!ggml_cuda_trunc_enabled() || tensor->type != GGML_TYPE_F32 || tensor->data == nullptr || ggml_is_empty(tensor)) {
+        return;
+    }
+
+    static std::atomic<bool> logged_enable(false);
+    if (!logged_enable.exchange(true)) {
+        GGML_LOG_INFO("%s: GGML_CUDA_TRUNC_ENABLE=1 -> CUDA rounding-to-bf16 active (device %d)\n", __func__, ctx.device);
+    }
+
+    float sample_before = 0.0f;
+    float sample_after  = 0.0f;
+
+    bool do_log = ggml_cuda_trunc_log_enabled();
+    if (do_log) {
+        cudaStreamCaptureStatus cap_status;
+        unsigned long long cap_id;
+        CUDA_CHECK(cudaStreamGetCaptureInfo(ctx.stream(), &cap_status, &cap_id));
+        GGML_UNUSED(cap_id);
+        if (cap_status == cudaStreamCaptureStatusNone) {
+            CUDA_CHECK(cudaMemcpyAsync(&sample_before, tensor->data, sizeof(float), cudaMemcpyDeviceToHost, ctx.stream()));
+        } else {
+            do_log = false; // avoid interfering with CUDA graph capture
+        }
+    }
+
+    const int64_t ne0 = tensor->ne[0];
+    const int64_t ne1 = tensor->ne[1];
+    const int64_t ne2 = tensor->ne[2];
+    const int64_t ne3 = tensor->ne[3];
+
+    const size_t total = (size_t) ne0 * ne1 * ne2 * ne3;
+    const int block_size = 256;
+    const int grid_size  = (int) ((total + block_size - 1) / block_size);
+
+    if (ggml_is_contiguous(tensor)) {
+        ggml_cuda_trunc_f32_kernel<<<grid_size, block_size, 0, ctx.stream()>>>((float *) tensor->data, total);
+    } else {
+        ggml_cuda_trunc_f32_strided_kernel<<<grid_size, block_size, 0, ctx.stream()>>>(
+            (char *) tensor->data,
+            tensor->nb[0], tensor->nb[1], tensor->nb[2], tensor->nb[3],
+            ne0, ne1, ne2, ne3);
+    }
+
+    if (do_log) {
+        CUDA_CHECK(cudaMemcpyAsync(&sample_after, tensor->data, sizeof(float), cudaMemcpyDeviceToHost, ctx.stream()));
+        CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
+        const char * name = tensor->name ? tensor->name : "?";
+        GGML_LOG_INFO("%s: tensor=%s op=%s sample before=%#.8f after=%#.8f\n",
+                      __func__, name, ggml_op_desc(tensor), sample_before, sample_after);
+    }
+}
+
 static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
     // why is this here instead of mul_mat?
     if (dst->src[0] != nullptr && ggml_backend_buft_is_cuda_split(dst->src[0]->buffer->buft)) {
@@ -2542,6 +2752,10 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         default:
             return false;
+    }
+
+    if (dst->type == GGML_TYPE_F32) {
+        ggml_cuda_truncate_tensor_f32(ctx, dst);
     }
 
     cudaError_t err = cudaGetLastError();
@@ -2924,6 +3138,9 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                 if (!disable_fusion) {
                     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {})) {
                         ggml_cuda_op_rms_norm_fused(*cuda_ctx, node, cgraph->nodes[i+1]);
+                        if (ggml_cuda_trunc_enabled()) {
+                            ggml_cuda_truncate_tensor_f32(*cuda_ctx, cgraph->nodes[i+1]);
+                        }
                         i++;
                         continue;
                     }
@@ -2931,6 +3148,9 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_SCALE }, { GGML_UNARY_OP_TANH })) {
                         i += 2;
                         ggml_cuda_op_softcap(*cuda_ctx, cgraph->nodes[i], node);
+                        if (ggml_cuda_trunc_enabled()) {
+                            ggml_cuda_truncate_tensor_f32(*cuda_ctx, cgraph->nodes[i]);
+                        }
                         continue;
                     }
                 }

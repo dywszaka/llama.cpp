@@ -15,6 +15,8 @@
 #include "ops.h"
 #include "ggml.h"
 
+#include "../fp32_to_bf16.c" // FP32->BF16 round-to-nearest-even helper
+
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
 #elif !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
@@ -1707,6 +1709,85 @@ static void ggml_compute_forward_mul_mat_id(
 
 /////////////////////////////////
 
+// Round-to-nearest-even to BF16 using shared helper, then widen back to F32 high bits.
+static inline float ggml_cpu_trunc_f32_low16(float v) {
+    const uint32_t bf16 = (uint32_t) fp32_to_bf16_round(v);
+    union {
+        uint32_t u;
+        float    f;
+    } out = { bf16 << 16 };
+    return out.f;
+}
+
+static bool ggml_cpu_trunc_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char * env = getenv("GGML_CPU_TRUNC_ENABLE");
+        enabled = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+static bool ggml_cpu_trunc_log_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char * env = getenv("GGML_CPU_TRUNC_LOG");
+        enabled = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+    return enabled != 0;
+}
+
+static void ggml_cpu_truncate_tensor_f32(struct ggml_tensor * tensor) {
+    if (!ggml_cpu_trunc_enabled() || tensor->type != GGML_TYPE_F32 || tensor->data == NULL) {
+        return;
+    }
+
+    static atomic_bool logged_enable = false;
+    if (!atomic_exchange_explicit(&logged_enable, true, memory_order_relaxed)) {
+        GGML_LOG_INFO("%s: GGML_CPU_TRUNC_ENABLE=1 -> CPU rounding-to-bf16 active\n", __func__);
+    }
+
+    float sample_before = 0.0f;
+    float sample_after  = 0.0f;
+    const bool do_log = ggml_cpu_trunc_log_enabled();
+
+    if (do_log) {
+        sample_before = *(float *)tensor->data;
+    }
+
+    if (ggml_is_contiguous(tensor)) {
+        float * data = (float *) tensor->data;
+        const size_t n = ggml_nelements(tensor);
+
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = ggml_cpu_trunc_f32_low16(data[i]);
+        }
+    } else {
+        GGML_TENSOR_LOCALS(int64_t, ne, tensor, ne);
+        GGML_TENSOR_LOCALS(size_t,  nb, tensor, nb);
+
+        char * base = (char *) tensor->data;
+
+        for (int64_t i3 = 0; i3 < ne3; ++i3) {
+            for (int64_t i2 = 0; i2 < ne2; ++i2) {
+                for (int64_t i1 = 0; i1 < ne1; ++i1) {
+                    for (int64_t i0 = 0; i0 < ne0; ++i0) {
+                        float * p = (float *) (base + i0*nb0 + i1*nb1 + i2*nb2 + i3*nb3);
+                        *p = ggml_cpu_trunc_f32_low16(*p);
+                    }
+                }
+            }
+        }
+    }
+
+    if (do_log) {
+        sample_after = *(float *)tensor->data;
+        const char * name = tensor->name ? tensor->name : "?";
+        GGML_LOG_INFO("%s: tensor=%s op=%s sample before=%#.8f after=%#.8f\n",
+                      __func__, name, ggml_op_desc(tensor), sample_before, sample_after);
+    }
+}
+
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
     GGML_ASSERT(params);
 
@@ -2922,8 +3003,18 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
             tp->ec    = GGML_STATUS_ABORTED;
         }
 
+        const bool trunc_enabled = ggml_cpu_trunc_enabled();
+
+        if (trunc_enabled) {
+            ggml_barrier(state->threadpool); // ensure compute finished
+
+            if (state->ith == 0) {
+                ggml_cpu_truncate_tensor_f32(node);
+            }
+        }
+
         if (node_n + 1 < cgraph->n_nodes) {
-            ggml_barrier(state->threadpool);
+            ggml_barrier(state->threadpool); // sync before next node (and after trunc if enabled)
         }
     }
 
