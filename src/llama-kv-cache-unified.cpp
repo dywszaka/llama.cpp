@@ -31,6 +31,8 @@ llama_kv_cache_unified::llama_kv_cache_unified(
            llama_swa_type    swa_type) :
     model(model), hparams(model.hparams), v_trans(v_trans),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type) {
+    const bool use_nvfp4_k = type_k == GGML_TYPE_NVFP4;
+    const bool use_nvfp4_v = type_v == GGML_TYPE_NVFP4;
 
     GGML_ASSERT(kv_size % n_pad == 0);
 
@@ -127,6 +129,8 @@ llama_kv_cache_unified::llama_kv_cache_unified(
 
         ggml_tensor * k;
         ggml_tensor * v;
+        ggml_tensor * k_scale = use_nvfp4_k ? model.layers[il].wk_k_scale : nullptr;
+        ggml_tensor * v_scale = use_nvfp4_v ? model.layers[il].wv_v_scale : nullptr;
 
         k = ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream);
         v = ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream);
@@ -144,7 +148,7 @@ llama_kv_cache_unified::llama_kv_cache_unified(
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_stream, v_stream, });
+        layers.push_back({ il, k, v, k_scale, v_scale, k_stream, v_stream, });
     }
 
     // TODO: this is temporary until we support passing reuse layer filters [KV_REUSE]
@@ -206,6 +210,10 @@ llama_kv_cache_unified::llama_kv_cache_unified(
 
     if (!supports_set_rows) {
         LLAMA_LOG_WARN("%s: LLAMA_SET_ROWS=0, using old ggml_cpy() method for backwards compatibility\n", __func__);
+    }
+
+    if ((use_nvfp4_k || use_nvfp4_v) && !supports_set_rows) {
+        throw std::runtime_error("NVFP4 KV cache requires ggml_set_rows support");
     }
 }
 
@@ -1105,10 +1113,21 @@ ggml_tensor * llama_kv_cache_unified::get_v(ggml_context * ctx, int32_t il, uint
             ggml_row_size(v->type, kv_size*n_embd_v_gqa)*sinfo.s0);
 }
 
+ggml_tensor * llama_kv_cache_unified::get_k_scale(int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    return layers[ikv].k_scale;
+}
+
+ggml_tensor * llama_kv_cache_unified::get_v_scale(int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    return layers[ikv].v_scale;
+}
+
 ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
     const int32_t ikv = map_layer_ids.at(il);
 
     auto * k = layers[ikv].k;
+    auto * k_scale = layers[ikv].k_scale;
 
     const int64_t n_embd_k_gqa = k->ne[0];
     const int64_t n_tokens = k_cur->ne[2];
@@ -1120,7 +1139,11 @@ ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_
             k = ggml_reshape_2d(ctx, k, k->ne[0], k->ne[1]*k->ne[2]);
         }
 
-        return ggml_set_rows(ctx, k, k_cur, k_idxs);
+        ggml_tensor * res = ggml_set_rows(ctx, k, k_cur, k_idxs);
+        if (k->type == GGML_TYPE_NVFP4) {
+            ggml_set_rows_set_nvfp4_scale(res, k_scale);
+        }
+        return res;
     }
 
     // TODO: fallback to old ggml_cpy() method for backwards compatibility
@@ -1139,6 +1162,7 @@ ggml_tensor * llama_kv_cache_unified::cpy_v(ggml_context * ctx, ggml_tensor * v_
     const int32_t ikv = map_layer_ids.at(il);
 
     auto * v = layers[ikv].v;
+    auto * v_scale = layers[ikv].v_scale;
 
     const int64_t n_embd_v_gqa = v_cur->ne[0]*v_cur->ne[1];
     const int64_t n_tokens     = v_cur->ne[2];
@@ -1151,7 +1175,11 @@ ggml_tensor * llama_kv_cache_unified::cpy_v(ggml_context * ctx, ggml_tensor * v_
                 v = ggml_reshape_2d(ctx, v, v->ne[0], v->ne[1]*v->ne[2]);
             }
 
-            return ggml_set_rows(ctx, v, v_cur, v_idxs);
+            ggml_tensor * res = ggml_set_rows(ctx, v, v_cur, v_idxs);
+            if (v->type == GGML_TYPE_NVFP4) {
+                ggml_set_rows_set_nvfp4_scale(res, v_scale);
+            }
+            return res;
         }
 
         // [TAG_V_CACHE_VARIABLE]
@@ -1164,7 +1192,11 @@ ggml_tensor * llama_kv_cache_unified::cpy_v(ggml_context * ctx, ggml_tensor * v_
 
         v_cur = ggml_reshape_2d(ctx, v_cur, 1, v_cur->ne[0]*v_cur->ne[1]);
 
-        return ggml_set_rows(ctx, v_view, v_cur, v_idxs);
+        ggml_tensor * res = ggml_set_rows(ctx, v_view, v_cur, v_idxs);
+        if (v->type == GGML_TYPE_NVFP4) {
+            ggml_set_rows_set_nvfp4_scale(res, v_scale);
+        }
+        return res;
     }
 
     // TODO: fallback to old ggml_cpy() method for backwards compatibility
@@ -1417,6 +1449,7 @@ ggml_tensor * llama_kv_cache_unified::build_rope_shift(
         const llama_cparams & cparams,
                ggml_context * ctx,
                 ggml_tensor * cur,
+                ggml_tensor * scale,
                 ggml_tensor * shift,
                 ggml_tensor * factors,
                       float   freq_base,
@@ -1447,12 +1480,19 @@ ggml_tensor * llama_kv_cache_unified::build_rope_shift(
     if (ggml_is_quantized(cur->type)) {
         // dequantize to f32 -> RoPE -> quantize back
         tmp = ggml_cast(ctx, cur, GGML_TYPE_F32);
+        if (cur->type == GGML_TYPE_NVFP4) {
+            ggml_cpy_set_nvfp4_scale(tmp, scale);
+        }
 
         tmp = ggml_rope_ext(ctx, tmp,
                 shift, factors, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                 yarn_ext_factor, yarn_attn_factor, yarn_beta_fast, yarn_beta_slow);
 
-        tmp = ggml_cpy(ctx, tmp, cur);
+        ggml_tensor * q_tmp = ggml_cpy(ctx, tmp, cur);
+        if (cur->type == GGML_TYPE_NVFP4) {
+            ggml_cpy_set_nvfp4_scale(q_tmp, scale);
+        }
+        tmp = q_tmp;
     } else {
         // we rotate only the first n_rot dimensions
         tmp = ggml_rope_ext_inplace(ctx, cur,
@@ -1515,7 +1555,7 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_shift(llm_graph_result * res, 
                 ggml_row_size(layer.k->type, n_embd_k_gqa),
                 0);
 
-        ggml_tensor * cur = build_rope_shift(cparams, ctx, k, inp->k_shift, rope_factors, freq_base_l, freq_scale_l);
+        ggml_tensor * cur = build_rope_shift(cparams, ctx, k, layer.k_scale, inp->k_shift, rope_factors, freq_base_l, freq_scale_l);
 
         ggml_build_forward_expand(gf, cur);
     }
@@ -2366,6 +2406,14 @@ ggml_tensor * llama_kv_cache_unified_context::get_k(ggml_context * ctx, int32_t 
 
 ggml_tensor * llama_kv_cache_unified_context::get_v(ggml_context * ctx, int32_t il) const {
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_unified_context::get_k_scale(int32_t il) const {
+    return kv->get_k_scale(il);
+}
+
+ggml_tensor * llama_kv_cache_unified_context::get_v_scale(int32_t il) const {
+    return kv->get_v_scale(il);
 }
 
 ggml_tensor * llama_kv_cache_unified_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {

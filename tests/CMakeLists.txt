@@ -226,6 +226,13 @@ if (GGML_CUDA)
     llama_test(test-nvfp4-matmul LABEL "cuda")
     target_link_libraries(${LLAMA_TEST_NAME} PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
     unset(LLAMA_TEST_NAME)
+
+    set(LLAMA_TEST_NAME test-nvfp4-kv-cache)
+    llama_build(test-nvfp4-kv-cache.cpp)
+    llama_test(test-nvfp4-kv-cache LABEL "cuda")
+    target_link_libraries(${LLAMA_TEST_NAME} PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
+    unset(LLAMA_TEST_NAME)
+
     unset(LLAMA_TEST_CUDA_ARCH)
 endif()
 

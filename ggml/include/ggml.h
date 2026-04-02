@@ -1318,6 +1318,15 @@ extern "C" {
     GGML_API const struct ggml_tensor * ggml_mul_mat_get_nvfp4_weight_scale(
             const struct ggml_tensor * mul_mat);
 
+    // bind an optional NVFP4 global scale tensor to a GGML_OP_CPY node
+    GGML_API void ggml_cpy_set_nvfp4_scale(
+            struct ggml_tensor       * cpy,
+            const struct ggml_tensor * scale);
+
+    // fetch the optional NVFP4 scale tensor bound via ggml_cpy_set_nvfp4_scale()
+    GGML_API const struct ggml_tensor * ggml_cpy_get_nvfp4_scale(
+            const struct ggml_tensor * cpy);
+
     // indirect matrix multiplication
     GGML_API struct ggml_tensor * ggml_mul_mat_id(
             struct ggml_context * ctx,
@@ -1567,6 +1576,15 @@ extern "C" {
             struct ggml_tensor  * a,  // destination
             struct ggml_tensor  * b,  // source
             struct ggml_tensor  * c); // row indices
+
+    // bind an optional NVFP4 global scale tensor to a GGML_OP_SET_ROWS node
+    GGML_API void ggml_set_rows_set_nvfp4_scale(
+            struct ggml_tensor       * set_rows,
+            const struct ggml_tensor * scale);
+
+    // fetch the optional NVFP4 scale tensor bound via ggml_set_rows_set_nvfp4_scale()
+    GGML_API const struct ggml_tensor * ggml_set_rows_get_nvfp4_scale(
+            const struct ggml_tensor * set_rows);
 
     GGML_API struct ggml_tensor * ggml_diag(
         struct ggml_context     * ctx,

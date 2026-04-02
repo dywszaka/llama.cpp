@@ -3047,53 +3047,66 @@ void ggml_mul_mat_set_prec(
     ggml_set_op_params_i32(a, 0, prec_i32);
 }
 
+static void ggml_op_set_tensor_ptr(
+        struct ggml_tensor       * op,
+        int                        offset_i32,
+        const struct ggml_tensor * tensor) {
+    const uintptr_t tensor_ptr = (uintptr_t) tensor;
+    const uint64_t  tensor_u64 = (uint64_t) tensor_ptr;
+
+    ggml_set_op_params_i32(op, offset_i32 + 0, (int32_t) (tensor_u64 & 0xFFFFFFFFu));
+    ggml_set_op_params_i32(op, offset_i32 + 1, (int32_t) (tensor_u64 >> 32));
+}
+
+static const struct ggml_tensor * ggml_op_get_tensor_ptr(
+        const struct ggml_tensor * op,
+        int                        offset_i32) {
+    const uint64_t lo = (uint32_t) op->op_params[offset_i32 + 0];
+    const uint64_t hi = (uint32_t) op->op_params[offset_i32 + 1];
+    const uint64_t tensor_u64 = lo | (hi << 32);
+    const uintptr_t tensor_ptr = (uintptr_t) tensor_u64;
+
+    return (const struct ggml_tensor *) tensor_ptr;
+}
+
 void ggml_mul_mat_set_nvfp4_input_scale(
         struct ggml_tensor       * mul_mat,
         const struct ggml_tensor * scale) {
     GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
-
-    const uintptr_t scale_ptr = (uintptr_t) scale;
-    const uint64_t  scale_u64 = (uint64_t) scale_ptr;
-
-    ggml_set_op_params_i32(mul_mat, 1, (int32_t) (scale_u64 & 0xFFFFFFFFu));
-    ggml_set_op_params_i32(mul_mat, 2, (int32_t) (scale_u64 >> 32));
+    ggml_op_set_tensor_ptr(mul_mat, 1, scale);
     ggml_set_op_params_i32(mul_mat, 3, 0); // reserved flags
 }
 
 const struct ggml_tensor * ggml_mul_mat_get_nvfp4_input_scale(
         const struct ggml_tensor * mul_mat) {
     GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
-
-    const uint64_t lo = (uint32_t) mul_mat->op_params[1];
-    const uint64_t hi = (uint32_t) mul_mat->op_params[2];
-    const uint64_t scale_u64 = lo | (hi << 32);
-    const uintptr_t scale_ptr = (uintptr_t) scale_u64;
-
-    return (const struct ggml_tensor *) scale_ptr;
+    return ggml_op_get_tensor_ptr(mul_mat, 1);
 }
 
 void ggml_mul_mat_set_nvfp4_weight_scale(
         struct ggml_tensor       * mul_mat,
         const struct ggml_tensor * scale) {
     GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
-
-    const uintptr_t scale_ptr = (uintptr_t) scale;
-    const uint64_t  scale_u64 = (uint64_t) scale_ptr;
-
-    ggml_set_op_params_i32(mul_mat, 4, (int32_t) (scale_u64 & 0xFFFFFFFFu));
-    ggml_set_op_params_i32(mul_mat, 5, (int32_t) (scale_u64 >> 32));
+    ggml_op_set_tensor_ptr(mul_mat, 4, scale);
 }
 
 const struct ggml_tensor * ggml_mul_mat_get_nvfp4_weight_scale(
         const struct ggml_tensor * mul_mat) {
     GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
+    return ggml_op_get_tensor_ptr(mul_mat, 4);
+}
 
-    const uint64_t lo = (uint32_t) mul_mat->op_params[4];
-    const uint64_t hi = (uint32_t) mul_mat->op_params[5];
-    const uint64_t scale_u64 = lo | (hi << 32);
-    const uintptr_t scale_ptr = (uintptr_t) scale_u64;
+void ggml_cpy_set_nvfp4_scale(
+        struct ggml_tensor       * cpy,
+        const struct ggml_tensor * scale) {
+    GGML_ASSERT(cpy->op == GGML_OP_CPY);
+    ggml_op_set_tensor_ptr(cpy, 0, scale);
+}
 
-    return (const struct ggml_tensor *) scale_ptr;
+const struct ggml_tensor * ggml_cpy_get_nvfp4_scale(
+        const struct ggml_tensor * cpy) {
+    GGML_ASSERT(cpy->op == GGML_OP_CPY);
+    return ggml_op_get_tensor_ptr(cpy, 0);
 }
 
 // ggml_mul_mat_id
@@ -3741,6 +3754,19 @@ struct ggml_tensor * ggml_set_rows(
     result->src[1] = c;
 
     return result;
+}
+
+void ggml_set_rows_set_nvfp4_scale(
+        struct ggml_tensor       * set_rows,
+        const struct ggml_tensor * scale) {
+    GGML_ASSERT(set_rows->op == GGML_OP_SET_ROWS);
+    ggml_op_set_tensor_ptr(set_rows, 0, scale);
+}
+
+const struct ggml_tensor * ggml_set_rows_get_nvfp4_scale(
+        const struct ggml_tensor * set_rows) {
+    GGML_ASSERT(set_rows->op == GGML_OP_SET_ROWS);
+    return ggml_op_get_tensor_ptr(set_rows, 0);
 }
 
 // ggml_diag

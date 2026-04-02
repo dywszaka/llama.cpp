@@ -2303,6 +2303,16 @@ llama_context_params llama_context_default_params() {
     return result;
 }
 
+static bool llama_backend_dev_is_cuda(ggml_backend_dev_t dev) {
+    if (dev == nullptr) {
+        return false;
+    }
+
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    const char * reg_name = reg ? ggml_backend_reg_name(reg) : nullptr;
+    return reg_name != nullptr && strcmp(reg_name, "CUDA") == 0;
+}
+
 llama_context * llama_init_from_model(
                  llama_model * model,
         llama_context_params   params) {
@@ -2326,7 +2336,42 @@ llama_context * llama_init_from_model(
         params.flash_attn = false;
     }
 
-    if (ggml_is_quantized(params.type_v) && !params.flash_attn) {
+    const bool use_nvfp4_k = params.type_k == GGML_TYPE_NVFP4;
+    const bool use_nvfp4_v = params.type_v == GGML_TYPE_NVFP4;
+    const bool use_nvfp4_kv = use_nvfp4_k || use_nvfp4_v;
+
+    if (use_nvfp4_kv) {
+        if (params.flash_attn) {
+            LLAMA_LOG_ERROR("%s: NVFP4 KV cache does not support flash_attn\n", __func__);
+            return nullptr;
+        }
+
+        if (!params.offload_kqv) {
+            LLAMA_LOG_ERROR("%s: NVFP4 KV cache requires offload_kqv\n", __func__);
+            return nullptr;
+        }
+
+        for (size_t il = 0; il < model->layers.size(); ++il) {
+            const auto & layer = model->layers[il];
+
+            if ((layer.wk != nullptr || layer.wv != nullptr) && !llama_backend_dev_is_cuda(model->dev_layer(il))) {
+                LLAMA_LOG_ERROR("%s: NVFP4 KV cache requires CUDA offload for all attention layers (layer %zu is not on CUDA)\n", __func__, il);
+                return nullptr;
+            }
+
+            if (use_nvfp4_k && layer.wk != nullptr && layer.wk_k_scale == nullptr) {
+                LLAMA_LOG_ERROR("%s: NVFP4 K cache requires wk_k_scale for layer %zu\n", __func__, il);
+                return nullptr;
+            }
+
+            if (use_nvfp4_v && layer.wv != nullptr && layer.wv_v_scale == nullptr) {
+                LLAMA_LOG_ERROR("%s: NVFP4 V cache requires wv_v_scale for layer %zu\n", __func__, il);
+                return nullptr;
+            }
+        }
+    }
+
+    if (ggml_is_quantized(params.type_v) && params.type_v != GGML_TYPE_NVFP4 && !params.flash_attn) {
         LLAMA_LOG_ERROR("%s: V cache quantization requires flash_attn\n", __func__);
         return nullptr;
     }

@@ -149,6 +149,7 @@ static void ggml_cuda_nvfp4_build_cublas_triplet(int * major, int * minor, int *
     }
 }
 
+// input_global_scale = 1.0 / input_scale, where input_scale is the quantization scale applied to the input activations before multiplication.
 static float ggml_cuda_nvfp4_input_global_scale(const ggml_tensor * dst) {
     const ggml_tensor * scale = ggml_mul_mat_get_nvfp4_input_scale(dst);
     if (scale == nullptr) {
@@ -584,7 +585,9 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     ggml_cuda_pool_alloc<uint8_t> src1_repacked_data(ctx.pool(), (size_t) ne11_padded * (size_t) ne10 / 2);
     ggml_cuda_pool_alloc<uint8_t> src1_repacked_scale(ctx.pool(), (size_t) scale_outer_padded_b * (size_t) scale_inner_padded);
 
+    // tensor-wise scale for activation quantization, global_scale = 1 / input_scale
     const float global_scale = ggml_cuda_nvfp4_input_global_scale(dst);
+    // src1 是激活值，这个方法将激活值量化成 NVFP4 格式
     quantize_row_nvfp4_cuda(
             (const float *) src1->data, src1_q_nvfp4.get(),
             ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
@@ -954,6 +957,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) ne01, (uint64_t) ne11_padded, (int64_t) ne01);
     }
 
+    // weight_scale_2, tensor-wise scale for weights
     float out_scale = 1.0f;
     if (const ggml_tensor * scale = ggml_mul_mat_get_nvfp4_weight_scale(dst)) {
         float scale_val = 0.0f;

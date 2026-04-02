@@ -2504,7 +2504,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_dup(ctx, dst);
             break;
         case GGML_OP_CPY:
-            ggml_cuda_cpy(ctx, dst->src[0], dst->src[1]);
+            ggml_cuda_cpy(ctx, dst, dst->src[0], dst->src[1]);
             break;
         case GGML_OP_CONT:
             ggml_cuda_dup(ctx, dst);
@@ -2924,7 +2924,7 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             cuda_ctx->cuda_graph->cpy_dest_ptrs.push_back((char *) node->src[1]->data);
 
             // store a pointer to each copy op CUDA kernel to identify it later
-            void * ptr = ggml_cuda_cpy_fn(node->src[0], node->src[1]);
+            void * ptr = ggml_cuda_cpy_fn(node, node->src[0], node->src[1]);
             if (!ptr) {
                 use_cuda_graph = false;
 #ifndef NDEBUG
@@ -3608,6 +3608,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             } break;
         case GGML_OP_SET_ROWS:
             {
+                if (op->type == GGML_TYPE_NVFP4) {
+                    return op->src[0]->type == GGML_TYPE_F32 &&
+                           op->src[1]->type == GGML_TYPE_I64 &&
+                           ggml_set_rows_get_nvfp4_scale(op) != nullptr;
+                }
+
                 return (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
                        op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
                        op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL) &&
@@ -3618,6 +3624,18 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             {
                 ggml_type src0_type = op->src[0]->type;
                 ggml_type src1_type = op->src[1]->type;
+                const bool has_nvfp4_scale = ggml_cpy_get_nvfp4_scale(op) != nullptr;
+
+                if (has_nvfp4_scale) {
+                    if (src0_type == GGML_TYPE_NVFP4 &&
+                        (src1_type == GGML_TYPE_F32 || src1_type == GGML_TYPE_F16 || src1_type == GGML_TYPE_BF16)) {
+                        return true;
+                    }
+                    if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_NVFP4) {
+                        return true;
+                    }
+                }
+
                 if ((src0_type == GGML_TYPE_F32 || src0_type == GGML_TYPE_BF16 || src0_type == GGML_TYPE_F16) &&
                     (src1_type == GGML_TYPE_F32 || src1_type == GGML_TYPE_BF16 || src1_type == GGML_TYPE_F16)
                 ) {

@@ -18190,6 +18190,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             cparams.n_seq_max);
                 } else if (llm_arch_is_hybrid(arch)) {
                     const auto padding = llama_kv_cache_unified::get_padding(cparams);
+                    const bool attn_v_trans = params.type_v == GGML_TYPE_NVFP4 ? false : !cparams.flash_attn;
 
                     cparams.n_ctx = GGML_PAD(cparams.n_ctx, padding);
 
@@ -18197,7 +18198,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         /* model             */ *this,
                         /* attn_type_k       */ params.type_k,
                         /* attn_type_v       */ params.type_v,
-                        /* attn_v_trans      */ !cparams.flash_attn,
+                        /* attn_v_trans      */ attn_v_trans,
                         /* attn_kv_size      */ cparams.n_ctx,
                         /* attn_n_pad        */ padding,
                         /* attn_n_swa        */ hparams.n_swa,
@@ -18228,6 +18229,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
                     LLAMA_LOG_DEBUG("%s: n_ctx = %u (padded)\n", __func__, cparams.n_ctx);
 
+                    const bool kv_v_trans = params.type_v == GGML_TYPE_NVFP4 ? false : !cparams.flash_attn;
+
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         GGML_ASSERT(hparams.is_swa_any());
 
@@ -18235,7 +18238,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 *this,
                                 params.type_k,
                                 params.type_v,
-                                !cparams.flash_attn,
+                                kv_v_trans,
                                 cparams.offload_kqv,
                                 params.swa_full,
                                 cparams.kv_unified,
@@ -18251,7 +18254,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 nullptr,
                                 params.type_k,
                                 params.type_v,
-                                !cparams.flash_attn,
+                                kv_v_trans,
                                 cparams.offload_kqv,
                                 cparams.kv_unified,
                                 n_ctx_per_stream,

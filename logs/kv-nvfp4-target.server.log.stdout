@@ -1,0 +1,599 @@
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+register_backend: registered backend CUDA (1 devices)
+register_device: registered device CUDA0 (NVIDIA GeForce RTX 5090)
+register_backend: registered backend CPU (1 devices)
+register_device: registered device CPU (Intel(R) Xeon(R) Gold 6242 CPU @ 2.80GHz)
+load_backend: failed to find ggml_backend_init in /home/allen/host_workspace/develop/llama.cpp/build_cuda/bin/libggml-cuda.so
+load_backend: failed to find ggml_backend_init in /home/allen/host_workspace/develop/llama.cpp/build_cuda/bin/libggml-cpu.so
+build: 6213 (b158b31f7) with cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0 for x86_64-linux-gnu (debug)
+system info: n_threads = 32, n_threads_batch = 32, total_threads = 64
+
+system_info: n_threads = 32 (n_threads_batch = 32) / 64 | CUDA : ARCHS = 1200 | USE_GRAPHS = 1 | PEER_MAX_BATCH_SIZE = 128 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VNNI = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: binding port with default address family
+main: HTTP server is listening, hostname: 127.0.0.1, port: 8083, http threads: 63
+main: loading model
+srv    load_model: loading model '/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf'
+llama_model_load_from_file_impl: using device CUDA0 (NVIDIA GeForce RTX 5090) - 31601 MiB free
+llama_model_loader: loaded meta data with 32 key-value pairs and 975 tensors from /home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = qwen3
+llama_model_loader: - kv   1:                               general.type str              = model
+llama_model_loader: - kv   2:                               general.name str              = Ccd10A893Cbca613259517C3Efe08E151Ddf2B8E
+llama_model_loader: - kv   3:                         general.size_label str              = 8.2B
+llama_model_loader: - kv   4:                            general.license str              = apache-2.0
+llama_model_loader: - kv   5:                   general.base_model.count u32              = 1
+llama_model_loader: - kv   6:                  general.base_model.0.name str              = Qwen3 8B
+llama_model_loader: - kv   7:          general.base_model.0.organization str              = Qwen
+llama_model_loader: - kv   8:              general.base_model.0.repo_url str              = https://huggingface.co/Qwen/Qwen3-8B
+llama_model_loader: - kv   9:                               general.tags arr[str,7]       = ["nvidia", "ModelOpt", "Qwen3", "quan...
+llama_model_loader: - kv  10:                          qwen3.block_count u32              = 36
+llama_model_loader: - kv  11:                       qwen3.context_length u32              = 40960
+llama_model_loader: - kv  12:                     qwen3.embedding_length u32              = 4096
+llama_model_loader: - kv  13:                  qwen3.feed_forward_length u32              = 12288
+llama_model_loader: - kv  14:                 qwen3.attention.head_count u32              = 32
+llama_model_loader: - kv  15:              qwen3.attention.head_count_kv u32              = 8
+llama_model_loader: - kv  16:                       qwen3.rope.freq_base f32              = 1000000.000000
+llama_model_loader: - kv  17:     qwen3.attention.layer_norm_rms_epsilon f32              = 0.000001
+llama_model_loader: - kv  18:                 qwen3.attention.key_length u32              = 128
+llama_model_loader: - kv  19:               qwen3.attention.value_length u32              = 128
+llama_model_loader: - kv  20:                          general.file_type u32              = 1
+llama_model_loader: - kv  21:               general.quantization_version u32              = 2
+llama_model_loader: - kv  22:                       tokenizer.ggml.model str              = gpt2
+llama_model_loader: - kv  23:                         tokenizer.ggml.pre str              = qwen2
+llama_model_loader: - kv  24:                      tokenizer.ggml.tokens arr[str,151936]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+llama_model_loader: - kv  25:                  tokenizer.ggml.token_type arr[i32,151936]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+llama_model_loader: - kv  26:                      tokenizer.ggml.merges arr[str,151387]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
+llama_model_loader: - kv  27:                tokenizer.ggml.eos_token_id u32              = 151643
+llama_model_loader: - kv  28:            tokenizer.ggml.padding_token_id u32              = 151643
+llama_model_loader: - kv  29:                tokenizer.ggml.bos_token_id u32              = 151643
+llama_model_loader: - kv  30:               tokenizer.ggml.add_bos_token bool             = false
+llama_model_loader: - kv  31:                    tokenizer.chat_template str              = {%- if tools %}\n    {{- '<|im_start|>...
+llama_model_loader: - type  f32:  723 tensors
+llama_model_loader: - type nvfp4:  252 tensors
+print_info: file format = GGUF V3 (latest)
+print_info: file type   = F16
+print_info: file size   = 8.28 GiB (8.68 BPW) 
+srv  log_server_r: request: GET /health 127.0.0.1 503
+load: printing all EOG tokens:
+load:   - 151643 ('<|endoftext|>')
+load:   - 151645 ('<|im_end|>')
+load:   - 151662 ('<|fim_pad|>')
+load:   - 151663 ('<|repo_name|>')
+load:   - 151664 ('<|file_sep|>')
+load: special tokens cache size = 26
+load: token to piece cache size = 0.9311 MB
+print_info: arch             = qwen3
+print_info: vocab_only       = 0
+print_info: n_ctx_train      = 40960
+print_info: n_embd           = 4096
+print_info: n_layer          = 36
+print_info: n_head           = 32
+print_info: n_head_kv        = 8
+print_info: n_rot            = 128
+print_info: n_swa            = 0
+print_info: is_swa_any       = 0
+print_info: n_embd_head_k    = 128
+print_info: n_embd_head_v    = 128
+print_info: n_gqa            = 4
+print_info: n_embd_k_gqa     = 1024
+print_info: n_embd_v_gqa     = 1024
+print_info: f_norm_eps       = 0.0e+00
+print_info: f_norm_rms_eps   = 1.0e-06
+print_info: f_clamp_kqv      = 0.0e+00
+print_info: f_max_alibi_bias = 0.0e+00
+print_info: f_logit_scale    = 0.0e+00
+print_info: f_attn_scale     = 0.0e+00
+print_info: n_ff             = 12288
+print_info: n_expert         = 0
+print_info: n_expert_used    = 0
+print_info: causal attn      = 1
+print_info: pooling type     = -1
+print_info: rope type        = 2
+print_info: rope scaling     = linear
+print_info: freq_base_train  = 1000000.0
+print_info: freq_scale_train = 1
+print_info: n_ctx_orig_yarn  = 40960
+print_info: rope_finetuned   = unknown
+print_info: model type       = 8B
+print_info: model params     = 8.19 B
+print_info: general.name     = Ccd10A893Cbca613259517C3Efe08E151Ddf2B8E
+print_info: vocab type       = BPE
+print_info: n_vocab          = 151936
+print_info: n_merges         = 151387
+print_info: BOS token        = 151643 '<|endoftext|>'
+print_info: EOS token        = 151643 '<|endoftext|>'
+print_info: EOT token        = 151645 '<|im_end|>'
+print_info: PAD token        = 151643 '<|endoftext|>'
+print_info: LF token         = 198 'Ċ'
+print_info: FIM PRE token    = 151659 '<|fim_prefix|>'
+print_info: FIM SUF token    = 151661 '<|fim_suffix|>'
+print_info: FIM MID token    = 151660 '<|fim_middle|>'
+print_info: FIM PAD token    = 151662 '<|fim_pad|>'
+print_info: FIM REP token    = 151663 '<|repo_name|>'
+print_info: FIM SEP token    = 151664 '<|file_sep|>'
+print_info: EOG token        = 151643 '<|endoftext|>'
+print_info: EOG token        = 151645 '<|im_end|>'
+print_info: EOG token        = 151662 '<|fim_pad|>'
+print_info: EOG token        = 151663 '<|repo_name|>'
+print_info: EOG token        = 151664 '<|file_sep|>'
+print_info: max token length = 256
+load_tensors: loading model tensors, this can take a while... (mmap = true)
+srv  log_server_r: request: GET /health 127.0.0.1 503
+load_tensors: offloading 36 repeating layers to GPU
+load_tensors: offloading output layer to GPU
+load_tensors: offloaded 37/37 layers to GPU
+load_tensors:        CUDA0 model buffer size =  6101.25 MiB
+load_tensors:   CPU_Mapped model buffer size =  2374.00 MiB
+....................srv  log_server_r: request: GET /health 127.0.0.1 503
+.........................
+llama_context: constructing llama_context
+llama_context: n_seq_max     = 1
+llama_context: n_ctx         = 2048
+llama_context: n_ctx_per_seq = 2048
+llama_context: n_batch       = 2048
+llama_context: n_ubatch      = 512
+llama_context: causal_attn   = 1
+llama_context: flash_attn    = 0
+llama_context: kv_unified    = false
+llama_context: freq_base     = 1000000.0
+llama_context: freq_scale    = 1
+llama_context: n_ctx_per_seq (2048) < n_ctx_train (40960) -- the full capacity of the model will not be utilized
+llama_context:  CUDA_Host  output buffer size =     0.58 MiB
+llama_kv_cache_unified:      CUDA0 KV buffer size =    81.00 MiB
+llama_kv_cache_unified: size =   81.00 MiB (  2048 cells,  36 layers,  1/1 seqs), K (nvfp4):   40.50 MiB, V (nvfp4):   40.50 MiB
+llama_context:      CUDA0 compute buffer size =   304.75 MiB
+llama_context:  CUDA_Host compute buffer size =    12.01 MiB
+llama_context: graph nodes  = 1482
+llama_context: graph splits = 2
+common_init_from_params: added <|endoftext|> logit bias = -inf
+common_init_from_params: added <|im_end|> logit bias = -inf
+common_init_from_params: added <|fim_pad|> logit bias = -inf
+common_init_from_params: added <|repo_name|> logit bias = -inf
+common_init_from_params: added <|file_sep|> logit bias = -inf
+common_init_from_params: setting dry_penalty_last_n to ctx_size = 2048
+srv  log_server_r: request: GET /health 127.0.0.1 503
+srv          init: initializing slots, n_slots = 1
+slot         init: id  0 | task -1 | new slot n_ctx_slot = 2048
+main: model loaded
+main: chat template, chat_template: {%- if tools %}
+    {{- '<|im_start|>system\n' }}
+    {%- if messages[0].role == 'system' %}
+        {{- messages[0].content + '\n\n' }}
+    {%- endif %}
+    {{- "# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" }}
+    {%- for tool in tools %}
+        {{- "\n" }}
+        {{- tool | tojson }}
+    {%- endfor %}
+    {{- "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n" }}
+{%- else %}
+    {%- if messages[0].role == 'system' %}
+        {{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' }}
+    {%- endif %}
+{%- endif %}
+{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}
+{%- for message in messages[::-1] %}
+    {%- set index = (messages|length - 1) - loop.index0 %}
+    {%- if ns.multi_step_tool and message.role == "user" and message.content is string and not(message.content.startswith('<tool_response>') and message.content.endswith('</tool_response>')) %}
+        {%- set ns.multi_step_tool = false %}
+        {%- set ns.last_query_index = index %}
+    {%- endif %}
+{%- endfor %}
+{%- for message in messages %}
+    {%- if message.content is string %}
+        {%- set content = message.content %}
+    {%- else %}
+        {%- set content = '' %}
+    {%- endif %}
+    {%- if (message.role == "user") or (message.role == "system" and not loop.first) %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>' + '\n' }}
+    {%- elif message.role == "assistant" %}
+        {%- set reasoning_content = '' %}
+        {%- if message.reasoning_content is string %}
+            {%- set reasoning_content = message.reasoning_content %}
+        {%- else %}
+            {%- if '</think>' in content %}
+                {%- set reasoning_content = content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}
+                {%- set content = content.split('</think>')[-1].lstrip('\n') %}
+            {%- endif %}
+        {%- endif %}
+        {%- if loop.index0 > ns.last_query_index %}
+            {%- if loop.last or (not loop.last and reasoning_content) %}
+                {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content.strip('\n') + '\n</think>\n\n' + content.lstrip('\n') }}
+            {%- else %}
+                {{- '<|im_start|>' + message.role + '\n' + content }}
+            {%- endif %}
+        {%- else %}
+            {{- '<|im_start|>' + message.role + '\n' + content }}
+        {%- endif %}
+        {%- if message.tool_calls %}
+            {%- for tool_call in message.tool_calls %}
+                {%- if (loop.first and content) or (not loop.first) %}
+                    {{- '\n' }}
+                {%- endif %}
+                {%- if tool_call.function %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- '<tool_call>\n{"name": "' }}
+                {{- tool_call.name }}
+                {{- '", "arguments": ' }}
+                {%- if tool_call.arguments is string %}
+                    {{- tool_call.arguments }}
+                {%- else %}
+                    {{- tool_call.arguments | tojson }}
+                {%- endif %}
+                {{- '}\n</tool_call>' }}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|im_end|>\n' }}
+    {%- elif message.role == "tool" %}
+        {%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
+            {{- '<|im_start|>user' }}
+        {%- endif %}
+        {{- '\n<tool_response>\n' }}
+        {{- content }}
+        {{- '\n</tool_response>' }}
+        {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}
+            {{- '<|im_end|>\n' }}
+        {%- endif %}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+    {%- if enable_thinking is defined and enable_thinking is false %}
+        {{- '<think>\n\n</think>\n\n' }}
+    {%- endif %}
+{%- endif %}, example_format: '<|im_start|>system
+You are a helpful assistant<|im_end|>
+<|im_start|>user
+Hello<|im_end|>
+<|im_start|>assistant
+Hi there<|im_end|>
+<|im_start|>user
+How are you?<|im_end|>
+<|im_start|>assistant
+'
+main: server is listening on http://127.0.0.1:8083 - starting the main loop
+srv  update_slots: all slots are idle
+srv  log_server_r: request: GET /health 127.0.0.1 200
+srv  params_from_: Chat format: Content-only
+slot launch_slot_: id  0 | task 0 | processing task
+slot launch_slot_: id  0 | task 0 | params: stream=0, n_predict=32, n_ctx=2048, top_k=40, top_p=0.950, temp=0.000
+slot update_slots: id  0 | task 0 | new prompt, n_ctx_slot = 2048, n_keep = 0, n_prompt_tokens = 16
+slot update_slots: id  0 | task 0 | kv cache rm [0, end)
+slot update_slots: id  0 | task 0 | prompt processing progress, n_past = 16, n_tokens = 16, progress = 1.000000
+slot update_slots: id  0 | task 0 | prompt done, n_past = 16, n_tokens = 16
+srv  update_slots: llama_decode begin, n_tokens = 16, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0102539062 0.009765625 -0.0134887695 -0.00759887695
+ggml_cuda_mul_mat_nvfp4_native: NVFP4 layout diagnostic for Qcur-scaled-0: row_bytes(nvfp4_block)=2304 vs row_bytes(CUDA_R_4F_E2M1)=2048 (k=4096, block_size=9). Splitting into separate data/scale channels for cuBLASLt.
+mul_mat_q nvfp4 x block0: e_u8=51 vals:
+NVFP4 load_tiles first: kbx0=0 i=0 kbx=0 kqsx=0 k0=0 e=51 vals:NVFP4 mmq tile_xy first: offset_x=0 kb0=0 mmq_x=16 mmq_y=128 stride_row_x=64 ncols_y=16 stride_col_dst=32 tile_x_max_i=31 tile_y_max_j=15 kb0_start=0 kb0_stop=8 14 2 14 2 2 4 2 4 | tile_x_ints=9728 tile_y_ints=576 14 5 14 5 tile_x_qs8: 5 1 5 1 -8 10 11 10 11 2 14 11 14 11 2 3 3 3 3 4 6 7 6 7 -8
+ 6 | aux_q4=0x155e422e aux_q4_nibbles=14 2 2 4 14 5 5 1 v8=-8 2 2 4 -8 6 6 1 d=0.34375
+mul_mat_q y block0: d4=0.0323542356 0.0401184596 0.028047204 0.0366158113
+ 6mul_mat_q y block0 qs[0..31]: 1 63 -2 20 -3 70 -8 -42 -3 66 3 -40 3 -3 8 10 12 -27 | tile_y_d4: 0.0323542356 0.0401184596 0.028047204 0.0366158113 33 | tile_y_qs8[0..31]: 127 63 -38 20 64 70 -84 -42 -57 66 49 -40 -38 -3 -14 10 86 -27 -73 33 2 127 -92 -38 -32 64 56 -84 34 -57 12 49 3 -38 -87 -14 15 86 -50 -73 -1 2 62 -92
+ -32mul_mat_q y block0 qs[32..63]: 56 87 34 -36 12 -38 3 -2 -87 0 15 29 -50 15 -1 8 62 16 | tile_y_block_k=0 blocks_per_kb0=4 ncols_y=16 tile_y_block_base=0 -75 | tile_x_scale_row0: -1 0.34375 -19 0.25 13 0.34375 -10 2.75 59 0.375 -2 0.1875 15 0.3125 3 0.34375 -47 0.234375 0 0.25 -3 0.5 28 4.5 127 0.21875 99 0.28125 -37 0.28125 35 0.25 -43
+ 21 42 5 101 -72
+mul_mat_q y block0 qs[64..95]: 13 54 -127 3 79 50 -24 121 77 15 -62 -37 7 -73 -123 -2 -8 36 58 30 -20 4 25 -43 -11 4 17 17 -16 50 -7 -16
+mul_mat_q y block0 qs[96..127]: 48 -1 30 16 -54 -15 27 72 -65 43 68 63 57 61 -28 -28 -127 33 36 -37 -96 26 45 2 43 20 14 -32 104 -118 45 -2
+mul_mat_q nvfp4 x block0: e_u8=50 vals: 13 0 13 0 1 12 9 0 0 0 0 3 14 0 7 9
+mul_mat_q y block0: d4=0.0256948806 0.0353993401 0.026471559 0.0540829934
+mul_mat_q y block0 qs[0..31]: -57 -35 -127 -5 0 -32 -54 -59 -2 45 48 17 -87 -32 122 25 17 -25 -34 -22 -56 -110 -113 5 -2 -30 84 26 -46 16 52 -11
+mul_mat_q y block0 qs[32..63]: -46 127 -2 -35 -124 23 27 -18 -11 35 56 4 4 42 -10 -57 -42 31 -8 -26 -26 2 77 -3 -5 15 39 0 43 16 20 -48
+mul_mat_q y block0 qs[64..95]: -15 22 79 42 -30 58 -61 117 -38 106 -31 61 8 112 53 68 -41 -25 -127 -3 -61 -19 35 10 -72 -29 15 -115 22 -16 -28 -115
+mul_mat_q y block0 qs[96..127]: -17 -24 3 -9 7 -30 6 17 13 0 -29 22 19 -21 -16 -17 29 20 127 1 17 -16 8 -5 -19 -7 -21 14 -15 -62 34 -17
+mul_mat_q nvfp4 x block0: e_u8=38 vals: 15 13 7 5 0 13 9 9 14 13 5 0 5 13 14 1
+mul_mat_q y block0: d4=0.020251872 0.0490342155 0.0230887812 0.0247803349
+mul_mat_q y block0 qs[0..31]: 0 43 26 29 26 -29 -36 -1 -127 -5 -25 -85 32 -27 -102 35 70 -96 113 -1 3 -67 86 -63 53 32 -78 -104 94 -69 65 46
+mul_mat_q y block0 qs[32..63]: 48 4 99 -24 29 -63 12 6 -25 -6 -115 14 -15 -36 -9 3 0 17 -25 8 20 -14 22 13 49 -48 127 -17 -15 -4 4 1
+mul_mat_q y block0 qs[64..95]: 63 -5 -24 -28 108 -32 -21 -15 47 -19 28 56 -9 44 -87 83 29 -52 4 -86 59 6 38 -67 -127 -26 60 69 26 68 -102 27
+mul_mat_q y block0 qs[96..127]: -35 -118 -25 12 59 77 -27 60 -26 -38 6 1 -1 -3 3 29 -104 127 75 26 -17 -52 -4 24 43 -31 88 27 -21 56 -17 121
+mul_mat_q nvfp4 x block0: e_u8=43 vals: 12 0 12 0 3 10 0 0 7 11 10 4 9 14 6 15
+mul_mat_q y block0: d4=0.0213222969 0.0238123443 0.0491196439 0.0499889925
+mul_mat_q y block0 qs[0..31]: -19 13 -48 -2 -15 -2 2 -3 -29 -39 -54 8 -33 -38 -53 -26 -35 -77 3 127 -63 0 -8 45 -79 27 -21 -51 -34 34 55 121
+mul_mat_q y block0 qs[32..63]: -8 10 -1 78 49 -3 36 16 38 42 -44 44 -79 -94 18 61 70 31 86 25 -77 -18 -70 -29 82 28 60 -74 47 8 -127 -34
+mul_mat_q y block0 qs[64..95]: -26 21 20 1 26 38 24 51 32 34 22 2 -38 43 -4 -20 41 -9 127 -27 63 -2 -19 -7 -54 46 -30 44 59 3 -19 -8
+mul_mat_q y block0 qs[96..127]: 20 -33 -56 -9 -9 27 2 -39 127 -9 -26 -38 -38 -2 1 99 2 -4 -37 -17 -55 2 23 -10 34 -29 -12 -30 -8 3 -22 -38
+mul_mat_q nvfp4 x block0: e_u8=43 vals: 3 11 9 10 10 3 2 13 3 10 4 14 12 0 1 15
+mul_mat_q y block0: d4=0.0203400534 0.0374447443 0.0252219886 0.0487459861
+mul_mat_q y block0 qs[0..31]: -86 -37 51 6 36 2 17 70 111 53 -18 -42 -55 22 72 -87 9 -29 -113 40 121 -56 -61 36 127 51 21 -14 2 82 -46 1
+mul_mat_q y block0 qs[32..63]: 41 -7 31 -25 -9 22 18 -7 -1 10 51 -22 51 -28 29 -59 -94 -3 4 28 -61 11 1 10 7 -127 27 -30 -33 12 80 -14
+mul_mat_q y block0 qs[64..95]: 5 1 8 44 21 14 -7 67 7 -44 -78 1 -49 81 -62 -25 -39 73 75 21 -106 -7 55 0 -27 104 -16 -90 127 -26 -47 0
+mul_mat_q y block0 qs[96..127]: -7 0 -5 -48 -4 -19 13 -15 -43 9 9 4 -20 40 -41 4 1 55 36 -15 11 4 -7 -127 21 58 1 -61 93 15 26 20
+mul_mat_q nvfp4 x block0: e_u8=32 vals: 3 13 9 12 3 6 12 12 0 0 9 5 3 10 4 15
+mul_mat_q y block0: d4=0.00989294983 0.0530762449 0.0179067943 0.0552209988
+mul_mat_q y block0 qs[0..31]: -38 -31 -1 98 -127 -28 -33 48 88 73 33 21 -17 -50 0 -6 -39 -8 -15 -19 70 -81 31 54 30 26 -48 7 -84 12 -60 62
+mul_mat_q y block0 qs[32..63]: 9 11 -6 0 -9 -11 -7 -10 -22 6 4 8 12 15 -9 12 0 -16 40 58 27 127 17 10 17 18 -13 44 -17 0 -22 -69
+mul_mat_q y block0 qs[64..95]: -67 36 4 55 2 3 -18 33 -18 0 17 5 16 7 5 1 55 -12 -9 17 -15 30 26 8 -127 -85 58 47 -2 -18 -4 21
+mul_mat_q y block0 qs[96..127]: 37 4 4 -127 -10 8 -1 13 -15 -15 7 12 2 -3 103 -16 -7 -6 12 -21 -42 3 24 -26 -49 -4 59 18 10 86 10 41
+mul_mat_q nvfp4 x block0: e_u8=48 vals: 4 13 6 5 13 1 6 0 6 11 7 14 6 0 5 11
+mul_mat_q y block0: d4=0.0172510073 0.0177844502 0.0238371212 0.0447090678
+mul_mat_q y block0 qs[0..31]: 1 11 23 -56 19 60 51 6 107 -73 78 -31 73 28 39 106 -22 7 -6 -79 12 -4 -82 -8 58 48 -10 68 -33 80 53 127
+mul_mat_q y block0 qs[32..63]: -86 -17 127 -28 1 10 0 81 14 -22 24 11 25 -9 38 -103 -87 13 57 -12 -5 27 24 81 110 44 17 107 70 64 -8 -89
+mul_mat_q y block0 qs[64..95]: 3 -31 -52 -49 -37 -22 -10 -76 14 -8 -38 13 64 83 -1 27 -50 -69 61 6 43 33 46 50 -56 -28 54 -39 -127 -5 -31 54
+mul_mat_q y block0 qs[96..127]: -12 -85 -31 -46 -34 -43 -93 -3 -55 23 49 13 -15 28 -8 7 -13 127 11 9 -43 -18 28 5 33 -22 15 27 -32 29 -17 -29
+mul_mat_q nvfp4 x block0: e_u8=16 vals: 9 7 11 10 1 0 3 6 14 10 12 11 4 5 15 11
+mul_mat_q y block0: d4=0.0385198556 0.057017345 0.0174391977 0.0550649315
+mul_mat_q y block0 qs[0..31]: -20 20 -11 -13 47 -7 5 4 19 -33 46 3 50 37 -13 -27 2 8 5 21 -37 87 -19 0 62 -27 49 -93 -42 6 127 -7
+mul_mat_q y block0 qs[32..63]: 14 -1 50 11 -39 -2 11 -12 13 -76 -12 -15 6 -32 -47 -15 -5 3 7 -23 0 16 4 -6 41 29 27 -127 22 -1 55 -6
+mul_mat_q y block0 qs[64..95]: -53 -75 28 -56 -111 58 -16 -29 -19 19 127 -42 0 8 28 -106 -112 -35 -31 28 -54 -127 -10 61 3 91 -32 -29 19 -27 -61 -74
+mul_mat_q y block0 qs[96..127]: -17 7 -12 38 -7 -30 27 8 -16 25 2 4 -8 -5 19 -7 36 -8 -32 11 2 11 3 21 -19 -5 -46 -127 26 -7 -51 -3
+mul_mat_q nvfp4 x block0: e_u8=17 vals: 1 12 0 4 0 7 13 1 9 0 3 12 3 9 1 1
+mul_mat_q y block0: d4=0.0169115458 0.0146848848 0.0136090536 0.0697271898
+mul_mat_q y block0 qs[0..31]: -67 -3 8 9 19 -93 -16 -26 7 -9 -65 -11 10 67 -4 -32 -6 61 -45 94 -9 29 -38 -46 -56 -78 -123 37 -127 76 -32 -56
+mul_mat_q y block0 qs[32..63]: 26 -104 16 47 43 -17 -27 41 67 -16 -87 -3 23 -40 -15 -36 -30 -18 70 18 49 1 41 -55 -1 19 79 65 123 -42 0 127
+mul_mat_q y block0 qs[64..95]: 37 -70 10 -2 -33 17 18 70 -47 25 -59 102 -7 -54 -97 -19 127 88 77 15 -83 -93 38 78 -29 2 -65 21 -46 -109 -30 9
+mul_mat_q y block0 qs[96..127]: 17 15 3 4 6 15 -74 1 12 7 1 -9 15 25 -16 -35 -7 4 -3 -4 1 127 1 -11 -4 -1 -72 -68 1 -23 -16 12
+mul_mat_q nvfp4 x block0: e_u8=11 vals: 12 1 0 6 2 12 7 14 6 14 0 6 13 9 6 1
+mul_mat_q y block0: d4=0.0132087357 0.136604294 0.0129236616 0.016398482
+mul_mat_q y block0 qs[0..31]: 32 12 -8 -102 -34 -73 25 59 39 27 2 -8 -55 20 -2 64 33 -6 -8 -5 90 88 -51 127 -6 68 2 -6 105 -48 -47 -24
+mul_mat_q y block0 qs[32..63]: -2 -3 -8 1 3 0 -1 0 0 -3 3 4 2 55 4 -4 -9 6 -5 1 -4 127 -5 3 -6 1 -11 -2 -3 16 -1 -5
+mul_mat_q y block0 qs[64..95]: -5 3 -39 -48 -2 10 -8 -5 -4 19 43 -47 -9 70 -24 -78 46 -23 -53 42 -1 27 -9 58 38 -6 34 51 -127 -3 -25 25
+mul_mat_q y block0 qs[96..127]: -1 -72 -37 3 26 -30 48 49 23 52 38 -19 13 -16 -4 17 37 67 5 -21 -6 127 -53 -13 18 10 124 56 -66 90 -108 8
+mul_mat_q nvfp4 x block0: e_u8=5 vals: 11 4 3 10 0 2 3 3 12 13 13 13 5 3 11 7
+mul_mat_q y block0: d4=0.0409087241 0.0125146434 0.0454532169 0.0961662307
+mul_mat_q y block0 qs[0..31]: 37 -8 -6 -1 31 -2 13 25 17 19 6 32 19 39 -13 -6 9 -55 -1 29 13 -8 127 27 4 8 -5 9 -23 -1 -2 -23
+mul_mat_q y block0 qs[32..63]: -11 -20 -25 -71 -20 19 34 -26 12 -35 -16 2 -2 -95 -14 -23 25 18 12 -72 71 -4 21 16 17 -57 -25 127 -48 -15 -33 41
+mul_mat_q y block0 qs[64..95]: 29 -2 -13 -17 12 29 2 6 1 -2 -4 13 14 -11 9 -7 8 -13 21 -38 22 -12 9 6 -7 11 -6 -127 31 8 -8 3
+mul_mat_q y block0 qs[96..127]: 54 3 4 -7 2 4 -2 6 -5 3 127 3 -1 -2 8 7 -1 1 -122 0 0 -13 -21 -14 -4 -3 13 0 77 0 0 -6
+mul_mat_q nvfp4 x block0: e_u8=4 vals: 7 12 0 10 6 13 2 15 12 12 1 11 7 0 14 4
+mul_mat_q y block0: d4=0.0126598207 0.0519510359 0.01512984 0.0619685985
+mul_mat_q y block0 qs[0..31]: 36 1 42 -40 -16 -17 -53 15 23 -24 -11 9 29 16 -85 -121 -21 -2 32 6 2 -16 -127 -28 78 -39 60 -2 -56 18 -81 8
+mul_mat_q y block0 qs[32..63]: 16 -9 -4 -22 9 -15 11 6 -17 -30 4 -19 -3 -4 -27 12 11 -5 8 0 1 2 -16 -10 69 4 28 127 -15 -24 101 -83
+mul_mat_q y block0 qs[64..95]: 18 -69 3 -26 18 -24 -21 -35 19 -67 32 -19 -40 30 33 52 61 20 12 14 -20 0 30 24 -21 -41 -37 -127 -39 -55 -100 2
+mul_mat_q y block0 qs[96..127]: 10 -4 -6 -35 -1 -11 4 10 -2 1 -9 9 13 47 8 19 -7 -1 32 13 5 -115 -11 10 14 -57 17 11 127 46 -8 -27
+mul_mat_q nvfp4 x block0: e_u8=3 vals: 7 7 0 11 0 0 9 5 14 10 14 7 7 14 6 0
+mul_mat_q y block0: d4=0.032977879 0.0756515339 0.0277289711 0.0904291868
+mul_mat_q y block0 qs[0..31]: -103 -66 54 38 9 6 13 10 -54 -1 38 -24 -30 -3 -44 -44 15 -30 34 -36 0 96 22 -30 15 127 17 42 -1 -1 23 22
+mul_mat_q y block0 qs[32..63]: 0 -5 -89 5 -9 -14 -16 -9 6 20 0 1 -1 -6 -2 3 1 3 -1 4 4 1 4 127 0 5 3 6 -6 -12 -41 2
+mul_mat_q y block0 qs[64..95]: -9 13 2 -73 -96 52 0 -43 30 -30 5 -127 -115 60 -57 32 32 42 -19 -5 69 -28 0 -18 6 -43 10 23 6 37 -7 -2
+mul_mat_q y block0 qs[96..127]: -3 4 3 -7 4 -6 2 1 9 -5 8 -1 8 3 15 -127 -5 3 0 1 1 2 -1 5 -2 1 -3 -8 -7 6 -3 2
+mul_mat_q nvfp4 x block0: e_u8=9 vals: 7 9 9 9 0 0 9 0 4 14 3 0 12 9 13 0
+mul_mat_q y block0: d4=0.0160740744 0.0591399074 0.00971595664 0.0256642103
+mul_mat_q y block0 qs[0..31]: -39 105 -122 127 -40 0 -87 18 69 -16 -51 -63 -35 54 -32 17 -75 63 -59 -10 -48 16 -55 -33 -102 109 -35 -11 78 65 -49 -30
+mul_mat_q y block0 qs[32..63]: -21 19 21 2 0 19 -12 -1 20 -36 25 11 -86 21 -8 4 -2 -13 -8 -12 -13 10 1 -16 -5 -1 25 -127 8 -3 -12 -22
+mul_mat_q y block0 qs[64..95]: -22 -12 -52 10 127 -20 -10 -5 122 48 -70 74 -33 33 -33 -119 -35 -96 93 -99 -56 53 50 -16 60 -54 97 57 12 -21 98 -4
+mul_mat_q y block0 qs[96..127]: 12 48 16 -28 18 -111 38 -19 4 -12 40 4 55 54 -6 -21 -7 40 37 -2 -31 -17 46 1 27 -19 17 127 6 118 -82 -5
+mul_mat_q nvfp4 x block0: e_u8=9 vals: 13 6 7 0 2 10 0 6 0 4 2 4 11 1 5 12
+mul_mat_q y block0: d4=0.0268525425 0.0657561421 0.0160846449 0.0677554086
+mul_mat_q y block0 qs[0..31]: -18 -46 53 -45 -12 57 56 -7 -48 23 7 -2 18 38 -1 27 11 -19 41 36 4 77 127 33 -11 27 -24 -19 -36 -24 4 28
+mul_mat_q y block0 qs[32..63]: 7 7 3 15 7 0 1 -8 -1 -22 127 -11 -23 -8 -23 -1 0 -2 -12 4 -11 4 8 11 8 1 -4 -39 -73 -11 -27 16
+mul_mat_q y block0 qs[64..95]: 38 12 -75 1 84 -7 3 28 -14 0 -23 76 54 62 12 55 -20 80 -127 26 62 -29 -17 -46 28 -84 54 20 -89 16 71 56
+mul_mat_q y block0 qs[96..127]: -5 3 110 -9 -5 9 4 -6 3 13 1 -18 6 -26 -6 -4 -127 10 -5 -6 20 29 -13 8 -2 33 8 14 57 -17 9 13
+mul_mat_q nvfp4 x block0: e_u8=19 vals: 10 15 0 0 0 11 1 12 10 11 1 4 9 2 1 12
+mul_mat_q y block0: d4=0.0295497756 0.038932804 0.0195046142 0.0196493976
+mul_mat_q y block0 qs[0..31]: 28 16 127 -16 -2 27 5 5 -21 -10 -15 -15 -37 -36 10 32 42 21 36 42 -39 47 32 -26 16 -49 -32 -42 -29 -22 20 -36
+mul_mat_q y block0 qs[32..63]: 6 8 40 3 21 17 -5 26 9 -28 -12 27 6 -7 18 5 -53 9 -13 -4 -127 -94 -47 -45 10 3 1 -27 -26 15 8 -20
+mul_mat_q y block0 qs[64..95]: 2 -2 9 10 -7 -31 -20 -14 -29 32 11 17 11 0 -113 -31 44 42 -70 26 -46 -4 127 -59 25 54 35 -71 50 -10 -51 -3
+mul_mat_q y block0 qs[96..127]: -25 -17 15 -1 13 -19 -44 -16 49 -7 -5 127 -8 -52 49 51 -50 -12 18 -15 -10 -35 -24 12 -36 55 28 32 52 24 21 89
+mul_mat_q nvfp4 x block0: e_u8=23 vals: 1 10 9 2 9 2 2 0 0 4 15 0 9 0 12 1
+mul_mat_q y block0: d4=0.02499214 0.0365432091 0.0176421572 0.0311884861
+mul_mat_q y block0 qs[0..31]: 52 -9 -25 -6 -20 1 -4 -34 -14 -79 -10 -14 44 68 34 -2 23 7 -18 24 8 3 -82 34 66 33 -103 -19 -71 -43 -21 -127
+mul_mat_q y block0 qs[32..63]: -6 -57 -41 10 -8 4 -36 10 20 61 12 38 -55 25 14 -17 -11 20 36 2 -13 99 12 -10 2 13 -100 -38 -18 127 -67 113
+mul_mat_q y block0 qs[64..95]: -74 3 2 -5 -35 29 55 -16 -10 3 21 -20 -63 67 -39 -20 42 -87 -39 -44 -22 -39 43 99 127 -50 41 37 -122 -43 3 88
+mul_mat_q y block0 qs[96..127]: -4 13 -40 -88 -20 32 53 57 -7 -39 -5 -14 7 101 -31 13 -121 -65 33 13 15 -51 48 89 -2 -46 -51 -30 11 112 28 -127
+mul_mat_q nvfp4 x block0: e_u8=4 vals: 2 11 1 7 13 0 9 10 0 4 15 9 6 15 3 2
+mul_mat_q y block0: d4=0.029315358 0.0462539904 0.0257615224 0.0434583463
+mul_mat_q y block0 qs[0..31]: 80 8 -2 127 -68 5 -80 42 22 71 18 26 -3 3 -4 -4 37 7 -6 0 8 4 14 -7 0 45 -44 -49 59 -76 43 24
+mul_mat_q y block0 qs[32..63]: -20 25 17 -36 -14 37 28 -62 -36 51 21 35 -78 33 -18 82 -127 -50 34 30 -22 -11 17 -25 17 7 69 -71 -3 8 -34 63
+mul_mat_q y block0 qs[64..95]: 127 -1 0 8 0 -12 41 13 -1 -23 24 -39 -55 -53 57 26 36 24 -35 -38 21 -16 -33 22 -121 -16 -55 -51 -37 6 -59 53
+mul_mat_q y block0 qs[96..127]: 26 53 77 -13 -4 25 -20 -64 -12 -31 -58 -69 -26 45 -127 -114 -42 -65 -11 -13 -23 8 26 -11 19 -49 -96 -20 -73 -64 7 -76
+mul_mat_q nvfp4 x block0: e_u8=20 vals: 2 12 4 1 3 0 12 1 5 0 14 9 15 12 2 10
+mul_mat_q y block0: d4=0.0214443263 0.043636959 0.0204737727 0.137711793
+mul_mat_q y block0 qs[0..31]: -43 69 12 -11 3 61 -50 64 -64 -111 25 44 40 -57 -20 126 85 -26 127 -2 -10 -12 -1 77 26 -15 20 65 72 -28 -117 -13
+mul_mat_q y block0 qs[32..63]: -51 -16 -10 -7 43 53 -8 22 -127 -12 13 2 -24 -46 17 0 15 13 14 -102 -62 -54 32 47 -16 12 10 15 0 15 -6 -4
+mul_mat_q y block0 qs[64..95]: -70 40 69 3 80 28 -45 0 -7 28 -2 35 -81 -35 -127 -10 -57 -40 34 20 77 70 -32 -65 45 38 -89 -30 35 -111 -55 32
+mul_mat_q y block0 qs[96..127]: -14 -4 9 0 2 -1 14 -16 3 -5 -5 -5 4 1 -2 1 5 -127 10 16 4 -11 8 -7 9 -1 4 2 8 10 -4 -4
+mul_mat_q nvfp4 x block0: e_u8=9 vals: 3 10 7 0 0 9 10 0 12 0 6 6 7 10 6 4
+mul_mat_q y block0: d4=0.0136670563 0.0246001445 0.0137383174 0.0620183498
+mul_mat_q y block0 qs[0..31]: -21 0 -1 -39 -34 -34 0 15 -40 40 55 -37 65 -55 8 -5 14 10 -31 -82 77 -93 -27 40 -18 70 61 -34 -127 -22 -9 -60
+mul_mat_q y block0 qs[32..63]: -67 127 -3 37 -43 -47 0 -31 -115 44 -18 -49 3 15 5 42 13 -93 -12 18 4 -17 -26 17 5 -10 -11 -17 -98 17 6 9
+mul_mat_q y block0 qs[64..95]: 8 30 5 7 -16 -22 -13 1 -24 -24 -36 3 47 -9 1 -21 34 48 62 -95 53 18 56 -44 -107 -44 -90 127 -48 13 14 -3
+mul_mat_q y block0 qs[96..127]: 13 15 -12 9 -21 40 10 10 6 -23 7 -19 12 9 15 -127 10 13 8 29 6 -5 13 -3 18 -15 -10 -19 -78 -32 7 -17
+mul_mat_q nvfp4 x block0: e_u8=11 vals: 9 13 7 3 0 9 13 6 0 9 7 11 6 4 10 11
+mul_mat_q y block0: d4=0.0261368006 0.0652527884 0.0134217553 0.0731495842
+mul_mat_q y block0 qs[0..31]: 4 -5 1 -10 -11 18 -14 4 -2 35 -44 30 109 34 17 -52 0 19 0 59 -11 63 13 2 -13 42 -33 -127 -90 4 -28 -81
+mul_mat_q y block0 qs[32..63]: -43 12 -2 -8 -21 12 15 22 0 21 0 -17 -127 -32 -17 38 -49 10 -17 -12 -43 -18 7 37 -13 -4 4 -34 1 -28 -24 -4
+mul_mat_q y block0 qs[64..95]: -41 5 7 1 -21 0 23 -1 70 29 -44 -30 -91 -26 107 70 -84 57 -18 -8 23 115 42 -83 -65 60 -12 -49 112 -100 -45 -127
+mul_mat_q y block0 qs[96..127]: -2 -33 7 40 -12 -4 19 -15 51 1 -12 22 3 -2 -38 -6 1 22 10 25 -27 -47 -17 -20 37 2 7 -1 48 24 -2 -127
+mul_mat_q nvfp4 x block0: e_u8=18 vals: 0 1 6 0 9 5 0 0 9 12 7 0 3 10 10 7
+mul_mat_q y block0: d4=0.0227719136 0.159734279 0.0212749634 0.0640796274
+mul_mat_q y block0 qs[0..31]: -11 0 1 -33 -2 -127 -33 64 -40 51 -15 -10 -92 92 -37 17 56 -21 -66 -33 -20 -99 -43 -4 25 -108 5 -77 18 -17 -28 -27
+mul_mat_q y block0 qs[32..63]: -3 9 4 -7 -4 -1 8 4 -6 2 1 1 0 4 0 0 0 127 -4 1 9 -1 -6 2 -1 -7 5 -11 5 -7 0 -1
+mul_mat_q y block0 qs[64..95]: -50 34 -13 -10 -7 41 -50 -1 48 81 68 -9 33 -2 -127 -52 -54 -4 32 -80 36 -82 -41 6 -38 -93 49 100 36 54 33 10
+mul_mat_q y block0 qs[96..127]: 9 -20 -18 7 25 16 -1 -127 23 6 -3 -14 -8 -28 -22 -23 2 26 4 -11 22 21 17 14 22 9 6 -28 11 -3 -8 1
+mul_mat_q nvfp4 x block0: e_u8=5 vals: 5 14 15 3 12 11 2 2 0 10 4 4 13 2 1 4
+mul_mat_q y block0: d4=0.0193077102 0.052665595 0.0174208265 0.0239664596
+mul_mat_q y block0 qs[0..31]: 13 -12 -5 -16 -2 8 -6 25 6 -31 -4 -15 6 37 -89 2 28 5 -79 16 0 -22 -27 25 -10 -69 -127 92 54 68 -63 -35
+mul_mat_q y block0 qs[32..63]: 4 16 -22 -15 62 31 51 -4 -59 4 -1 -27 -4 6 10 -12 127 -47 -13 -16 -23 12 12 -10 -12 1 14 17 -17 28 5 -16
+mul_mat_q y block0 qs[64..95]: -34 8 -35 -49 -14 2 23 -7 127 -12 3 34 -76 -10 -13 -27 -13 30 -68 -1 -40 12 -55 31 -41 -54 62 61 -105 127 -36 -55
+mul_mat_q y block0 qs[96..127]: 112 3 12 17 79 -52 19 -45 -57 -27 -1 -55 48 -27 -103 9 55 17 119 -127 -61 -50 -31 -19 34 38 -9 34 -25 22 35 -47
+mul_mat_q nvfp4 x block0: e_u8=23 vals: 4 10 0 1 10 12 12 4 10 7 13 1 1 9 9 2
+mul_mat_q y block0: d4=0.043248117 0.0305767115 0.0286350865 0.0652905032
+mul_mat_q y block0 qs[0..31]: -49 -24 0 31 0 9 1 17 18 -17 22 -19 -53 36 -48 -28 -9 66 -27 72 10 2 6 -127 66 -46 -7 59 -7 -57 59 52
+mul_mat_q y block0 qs[32..63]: -4 93 -21 -15 -19 -16 -39 16 36 44 19 -120 -100 122 108 -44 30 96 4 -114 51 19 127 21 -120 -47 2 -18 -50 23 57 94
+mul_mat_q y block0 qs[64..95]: 20 -25 4 22 1 -48 0 -32 -13 16 26 49 4 6 0 -32 33 -10 32 31 12 45 -18 -20 -5 46 86 -127 -50 -63 -24 -14
+mul_mat_q y block0 qs[96..127]: 27 -3 -60 -11 30 -25 -47 -16 -13 29 -22 45 -13 -1 8 127 -22 2 -7 -90 29 0 -56 26 -29 48 -12 15 -12 -16 18 -10
+mul_mat_q nvfp4 x block0: e_u8=10 vals: 0 14 0 0 2 10 10 0 6 3 9 9 10 10 7 11
+mul_mat_q y block0: d4=0.0290088579 0.0431224443 0.025425151 0.0704095587
+mul_mat_q y block0 qs[0..31]: 127 -76 0 0 57 31 0 89 25 -12 -69 0 -3 -79 27 49 -42 18 27 31 -15 -28 -35 11 37 -85 -27 14 -50 -54 -67 62
+mul_mat_q y block0 qs[32..63]: -34 -15 -27 36 -1 -31 -29 -41 2 -29 -10 17 -7 87 -46 -1 -28 -21 80 -51 3 -127 -6 -18 -38 53 -48 -17 9 5 -47 11
+mul_mat_q y block0 qs[64..95]: -37 0 0 3 102 4 -1 -61 -44 -65 37 39 41 36 57 41 -36 71 27 -68 -11 35 30 -39 -8 -18 -127 12 -48 71 26 8
+mul_mat_q y block0 qs[96..127]: -9 -11 17 44 16 16 -3 18 -5 29 0 -25 -61 41 12 -19 -9 -20 21 11 -52 127 -11 0 55 -6 23 2 -1 0 -16 16
+mul_mat_q nvfp4 x block0: e_u8=10 vals: 4 0 5 4 0 6 12 14 14 2 12 2 7 14 1 12
+mul_mat_q y block0: d4=0.020170996 0.0454107672 0.0148162385 0.0682564676
+mul_mat_q y block0 qs[0..31]: 9 31 -22 15 0 -82 29 13 74 -9 27 12 -27 29 29 23 -50 -17 25 -19 33 -22 10 -53 3 46 -75 -53 35 -36 -127 -43
+mul_mat_q y block0 qs[32..63]: -30 11 12 -5 -32 33 37 0 25 58 -16 41 3 -7 -8 -70 65 41 55 -74 31 1 -26 -85 12 -23 66 -109 -38 -127 -46 -62
+mul_mat_q y block0 qs[64..95]: 71 64 -39 -65 2 -127 78 36 32 -15 51 -69 29 -80 58 6 -57 -10 -7 23 -2 83 18 -26 21 -101 12 93 -9 47 -39 -59
+mul_mat_q y block0 qs[96..127]: 28 -6 -14 32 8 1 -1 -45 -6 -25 13 -1 30 -10 127 -20 6 -3 -48 21 -29 -66 -38 24 24 -41 104 -19 -30 9 -26 33
+mul_mat_q nvfp4 x block0: e_u8=9 vals: 0 0 7 5 0 5 15 0 0 0 4 0 6 4 15 14
+mul_mat_q y block0: d4=0.0183063727 0.0294804592 0.0319154859 0.0462211221
+mul_mat_q y block0 qs[0..31]: -33 -22 0 3 -2 -117 -64 77 -113 116 60 -53 38 2 -24 6 -30 45 -52 96 18 38 -74 -11 63 63 5 -86 -127 73 -69 -51
+mul_mat_q y block0 qs[32..63]: 31 11 -21 -19 -127 -7 -21 -33 113 -53 42 105 10 -72 -33 -62 -11 12 30 58 -3 20 -127 -98 -101 38 3 60 46 -67 -81 82
+mul_mat_q y block0 qs[64..95]: -127 20 -70 1 1 -43 -13 -123 -5 -31 -40 -19 15 -23 -33 -7 12 -7 37 -49 2 2 17 6 -4 -5 25 -21 17 -6 29 -58
+mul_mat_q y block0 qs[96..127]: -4 -47 -50 -16 15 21 25 -58 -47 -24 9 -87 -127 -35 28 -15 3 63 -6 23 -19 0 67 -35 -54 74 108 -54 -14 -45 13 10
+mul_mat_q nvfp4 x block0: e_u8=5 vals: 11 10 1 0 12 0 0 7 2 0 0 11 4 6 12 14
+mul_mat_q y block0: d4=0.0325116441 0.0510508455 0.0267062187 0.0552143157
+mul_mat_q y block0 qs[0..31]: 60 0 0 -58 27 -69 -47 30 -3 -14 48 -10 7 -41 -72 8 -32 -5 59 -59 -30 6 53 11 4 -37 -35 38 -36 -127 15 31
+mul_mat_q y block0 qs[32..63]: -12 -4 -13 -13 36 25 -127 -8 -5 -12 35 -52 -33 15 18 3 3 -18 -23 0 11 91 29 -3 1 57 27 1 -28 28 8 -33
+mul_mat_q y block0 qs[64..95]: 30 -3 4 18 -40 25 8 -14 36 75 58 27 32 -127 4 61 -14 60 75 -31 -7 36 49 57 31 -52 -30 -61 27 67 -29 -21
+mul_mat_q y block0 qs[96..127]: 13 4 -14 25 52 30 1 -5 20 39 -9 -6 -15 -1 -13 -9 23 127 26 25 28 -20 -50 11 18 -11 -12 76 -53 18 -27 4
+mul_mat_q nvfp4 x block0: e_u8=22 vals: 11 15 9 0 5 0 0 11 9 11 5 9 0 3 9 9
+mul_mat_q y block0: d4=0.0266896132 0.0322150365 0.025144266 0.126641527
+mul_mat_q y block0 qs[0..31]: 22 -46 3 1 -7 28 0 17 15 -10 -27 58 1 46 99 5 25 14 -119 -2 23 -19 41 -97 -14 -2 -70 -32 -20 17 43 -127
+mul_mat_q y block0 qs[32..63]: 2 80 69 93 119 -21 -127 -35 44 -97 -84 -87 22 -3 -12 47 0 5 -46 35 -50 -21 -84 -32 31 -92 83 24 -55 -62 56 -41
+mul_mat_q y block0 qs[64..95]: -20 1 1 -27 35 -49 52 40 -62 -34 7 14 -127 -44 -13 60 76 -37 -17 -19 16 -83 3 61 14 -7 84 -16 -62 101 55 -47
+mul_mat_q y block0 qs[96..127]: -8 -10 1 -3 -5 -13 -4 -31 12 6 2 21 21 14 -4 -13 -8 -127 -19 -1 -3 1 -20 -1 -2 -29 14 -11 1 3 -19 -10
+mul_mat_q nvfp4 x block0: e_u8=16 vals: 0 0 0 0 0 5 5 0 0 0 9 7 11 7 0 14
+mul_mat_q y block0: d4=0.0147379562 0.0322875381 0.0142004313 0.0395105816
+mul_mat_q y block0 qs[0..31]: 3 6 3 -3 -6 -16 -44 -19 127 -21 -49 -46 33 -34 -25 -22 39 -44 -3 -29 20 -27 -95 79 -81 -84 -116 -83 -52 -52 32 -11
+mul_mat_q y block0 qs[32..63]: 99 -14 -53 30 35 -11 64 2 13 11 121 -49 40 -29 -32 -49 27 -21 77 -25 50 26 -30 -20 90 16 102 -89 -127 39 37 2
+mul_mat_q y block0 qs[64..95]: -3 8 -6 -4 6 -19 102 -13 -83 19 -7 -41 77 127 17 11 -37 4 -30 77 56 18 -69 4 48 74 -48 30 5 -27 -46 -3
+mul_mat_q y block0 qs[96..127]: 58 33 -28 -11 75 -35 9 -6 -50 7 -62 84 71 68 -48 -35 28 20 -98 7 127 -35 -13 7 0 64 -43 -61 -12 -58 -3 -68
+mul_mat_q nvfp4 x block0: e_u8=4 vals: 5 13 0 0 0 12 11 1 1 7 6 13 10 6 4 15
+mul_mat_q y block0: d4=0.0277868994 0.0234291665 0.0347140841 0.0502752066
+mul_mat_q y block0 qs[0..31]: -32 -31 73 49 13 -39 -99 -72 -51 -7 -20 80 27 68 -4 -43 -20 -75 68 -74 -20 69 -34 49 -127 57 0 3 -56 -41 74 35
+mul_mat_q y block0 qs[32..63]: -20 -40 114 -24 13 -4 -93 -32 17 -100 2 81 -51 -25 -63 -66 -7 67 -35 7 -89 -30 127 28 -72 -80 16 101 -1 -93 64 86
+mul_mat_q y block0 qs[64..95]: 67 60 17 -50 -28 -120 -6 0 -2 2 -46 -47 16 -63 59 53 -2 -4 -26 -4 -44 12 -104 16 38 115 -57 -127 -49 41 -13 -54
+mul_mat_q y block0 qs[96..127]: -26 53 3 -45 -36 -127 18 13 47 -25 -1 37 -33 -14 -32 -18 90 -126 -13 -3 32 33 76 35 -65 44 -29 -20 68 -30 5 -30
+mul_mat_q nvfp4 x block0: e_u8=16 vals: 9 12 6 14 0 0 0 9 7 14 0 3 14 14 4 0
+mul_mat_q y block0: d4=0.0153285898 0.0334695131 0.0134215578 0.0477233902
+mul_mat_q y block0 qs[0..31]: -84 -38 2 -76 0 0 -58 55 -23 -33 -50 -52 10 -5 -28 9 -50 5 -59 78 85 122 95 69 24 -51 5 -10 -127 19 -10 2
+mul_mat_q y block0 qs[32..63]: 7 -22 -2 23 14 -15 38 22 -28 -32 -17 51 -43 -16 3 -4 -8 14 90 -44 43 52 41 11 127 104 -27 21 16 -15 -17 43
+mul_mat_q y block0 qs[64..95]: -9 71 0 -23 9 83 60 41 -66 -13 -57 44 -108 -19 50 4 97 11 -38 -62 -8 -45 73 54 -38 -85 -25 68 -47 3 127 -2
+mul_mat_q y block0 qs[96..127]: 7 -10 -26 32 -25 -22 39 -64 -23 -51 -20 47 -18 -33 44 61 44 12 53 29 -86 -23 29 -50 0 127 12 32 36 0 -52 43
+mul_mat_q nvfp4 x block0: e_u8=17 vals: 0 0 0 6 6 5 15 12 0 13 9 9 6 4 2 0
+mul_mat_q y block0: d4=0.0195522066 0.046666164 0.0248167925 0.0283605754
+mul_mat_q y block0 qs[0..31]: 37 48 -1 11 34 -8 -64 -18 12 -11 40 -36 -5 -22 -21 1 5 74 -68 1 -105 69 -40 -75 22 -79 -85 -127 42 -95 -55 -49
+mul_mat_q y block0 qs[32..63]: -4 28 -22 -6 -33 -12 1 7 46 -13 -25 8 40 11 -44 127 6 7 -19 -49 -12 -6 12 -9 -29 15 -36 -71 14 103 9 51
+mul_mat_q y block0 qs[64..95]: -22 -12 48 -50 38 -78 65 29 60 -10 7 -63 24 -12 31 65 48 8 1 41 12 -29 42 -41 -49 48 -16 3 -127 -10 83 98
+mul_mat_q y block0 qs[96..127]: -12 -75 -24 -17 9 20 -61 45 -127 -12 53 -6 71 -71 94 -26 12 124 22 -65 -75 -34 -37 4 44 -36 -58 13 42 -58 -46 13
+mul_mat_q nvfp4 x block0: e_u8=26 vals: 5 1 15 0 0 0 0 0 0 0 0 0 3 9 9 0
+mul_mat_q y block0: d4=0.0210332852 0.0316456892 0.0177705623 0.037516091
+mul_mat_q y block0 qs[0..31]: 0 46 -26 61 0 -67 -48 -17 24 -58 0 0 94 84 102 0 -48 -83 -25 47 18 41 -44 -52 -127 28 -60 -47 -77 1 -123 -84
+mul_mat_q y block0 qs[32..63]: 36 34 -46 -32 -24 84 86 -17 -19 1 -52 47 28 57 -84 38 33 16 101 125 50 63 -28 -1 -43 50 -67 127 24 -86 26 -29
+mul_mat_q y block0 qs[64..95]: 57 -2 0 90 6 2 70 -62 34 1 29 15 0 -26 1 -6 118 -40 23 -60 -24 40 -127 -3 36 -19 -16 19 22 -10 51 -1
+mul_mat_q y block0 qs[96..127]: -14 -78 13 0 -70 -27 19 -5 -29 -84 -54 -55 60 -61 76 34 -9 -28 25 -67 33 -41 127 -17 -11 -20 -56 -30 -23 7 16 74
+mul_mat_q nvfp4 x block0: e_u8=26 vals: 9 15 12 12 0 4 0 1 12 0 6 0 13 10 4 13
+mul_mat_q y block0: d4=0.0146227125 0.0583719984 0.0173234772 0.0439388081
+mul_mat_q y block0 qs[0..31]: 5 1 -66 12 22 -11 16 -6 -21 45 39 19 -28 -60 31 -111 31 68 64 -57 24 -106 -111 -11 -35 65 -122 92 8 -127 78 85
+mul_mat_q y block0 qs[32..63]: 6 -2 -11 36 -7 -14 -28 -71 -1 14 -34 1 -55 -18 -16 -39 64 4 127 42 -26 -10 -68 -11 -25 4 -34 5 12 -13 45 6
+mul_mat_q y block0 qs[64..95]: -57 11 4 14 -12 -14 -51 -12 7 34 -48 4 29 -51 57 55 -86 -29 71 6 -4 -43 -5 -127 -71 70 -98 -68 7 -31 -33 -23
+mul_mat_q y block0 qs[96..127]: -27 -29 -3 12 6 7 -6 47 -21 -14 60 -94 -28 -71 33 4 127 104 72 23 4 -9 32 -44 -97 55 -17 -27 -5 13 -1 -31
+mul_mat_q nvfp4 x block0: e_u8=16 vals: 3 12 4 1 13 0 12 9 1 10 10 6 13 5 2 15
+mul_mat_q y block0: d4=0.0195191186 0.0271929372 0.0225221813 0.0384548791
+mul_mat_q y block0 qs[0..31]: 42 23 7 -105 28 -24 31 -63 -127 -127 -12 -87 -31 -35 -8 -73 28 -2 -106 -17 4 -47 -11 5 -33 65 0 2 30 78 -55 -52
+mul_mat_q y block0 qs[32..63]: -34 -76 -1 63 -4 -66 45 101 5 30 -40 -17 -13 75 -7 -42 -9 47 -64 -5 -35 20 11 -127 9 -24 -73 18 40 -10 77 -49
+mul_mat_q y block0 qs[64..95]: -9 -74 10 -93 -66 -22 43 -45 -34 -54 -117 53 9 7 -40 46 97 -65 -27 47 76 59 13 -28 -7 19 -27 127 38 65 -36 -55
+mul_mat_q y block0 qs[96..127]: -7 43 30 -39 20 -9 -9 -13 -17 14 -21 -10 24 11 -7 -36 -59 10 8 40 47 -127 -17 -18 -16 -29 112 -43 40 -77 -20 -8
+srv  update_slots: llama_decode end, n_tokens = 16, n_batch = 2048, i = 0, ret = 0, dt = 279.587 ms
+slot process_toke: id  0 | task 0 | sampled token: tok=59166, piece_len=4, is_eog=0, piece=' fld'
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0295410156 -0.00729370117 0.0205078125 -0.0388183594
+NVFP4 vec_dot first: kbx=72 iqs=0 e=0 qs=0 0 0 0 0 0 0 0 | q8 ds=(0.0655518,1.65039) qs=-1 -58 6 -18 72 38 -13 16
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 46.565 ms
+slot process_toke: id  0 | task 0 | sampled token: tok=101533, piece_len=6, is_eog=0, piece='\xE8\xA7\xA3\xE6\x94\xBE'
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.00402832031 0.0341796875 0.0336914062 0.0189208984
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.262 ms
+slot process_toke: id  0 | task 0 | sampled token: tok=94, piece_len=1, is_eog=0, piece='\xA1'
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.00988769531 0.0142211914 -0.0198974609 0.0147705078
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.164 ms
+slot process_toke: id  0 | task 0 | sampled token: tok=90630, piece_len=7, is_eog=0, piece=',output'
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.0102539062 0.0137329102 0.00933837891 0.0145263672
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.019 ms
+slot process_toke: id  0 | task 0 | sampled token: tok=2979, piece_len=2, is_eog=0, piece='{{'
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.0034942627 -0.0127563477 -0.0120239258 0.0629882812
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.047 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.03125 -0.0303955078 -0.0116577148 0.000448226929
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.069 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0120849609 0.00114440918 -0.0189208984 0.00573730469
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.120 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0220947266 0.048828125 -0.0147094727 -0.0234375
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.161 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.00640869141 -0.0111694336 0.0241699219 -0.0191650391
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.036 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.00674438477 0.0122070312 0.00257873535 0.0130004883
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.130 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.00799560547 0.00370788574 -0.0100708008 0.0334472656
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.104 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0146484375 -0.00988769531 -0.0211181641 0.00915527344
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.148 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0422363281 -0.0551757812 0.0119628906 0.0181884766
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.210 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.048828125 -0.0402832031 0.0400390625 0.0140380859
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.121 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.03125 -0.0303955078 -0.0116577148 0.000448226929
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.065 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0155029297 0.00239562988 0.0393066406 -0.00427246094
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.199 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0390625 -0.0266113281 -0.00170135498 -0.000345230103
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 37.210 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.0159912109 0.0187988281 -0.0218505859 0.0108032227
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.357 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0262451172 0.0227050781 -0.0498046875 0.0240478516
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.317 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0106811523 -0.0152587891 0.017578125 0.0173339844
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.319 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.000486373901 0.0135498047 -0.00321960449 0.0126953125
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.252 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.0218505859 0.0113525391 -0.0629882812 -0.0301513672
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.419 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0439453125 0.0138549805 0.0102539062 0.017578125
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.323 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.0109863281 0.00466918945 0.000755310059 0.00854492188
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.610 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.00637817383 -0.0114135742 0.00909423828 0.00823974609
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.371 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.00738525391 -0.0164794922 -0.00311279297 0.0191650391
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.369 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0281982422 -0.0078125 0.0169677734 -0.00772094727
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.348 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0078125 0.0515136719 -0.00451660156 0.00714111328
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.291 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.0375976562 -0.0216064453 0.0444335938 0.0235595703
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.300 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=0.00436401367 -0.0209960938 0.0025177002 0.00107574463
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.277 ms
+srv  update_slots: llama_decode begin, n_tokens = 1, n_batch = 2048, i = 0
+ggml_compute_forward_get_rows_f32: dst=inp_embd first4=-0.00154876709 -0.0131835938 0.0100708008 -0.0278320312
+srv  update_slots: llama_decode end, n_tokens = 1, n_batch = 2048, i = 0, ret = 0, dt = 35.276 ms
+slot      release: id  0 | task 0 | stop processing: n_past = 47, truncated = 0
+slot print_timing: id  0 | task 0 | 
+prompt eval time =     282.52 ms /    16 tokens (   17.66 ms per token,    56.63 tokens per second)
+       eval time =    1152.01 ms /    32 tokens (   36.00 ms per token,    27.78 tokens per second)
+      total time =    1434.53 ms /    48 tokens
+srv  update_slots: all slots are idle
+srv  log_server_r: request: POST /v1/chat/completions 127.0.0.1 200
+srv    operator(): operator(): cleaning up before exit...

@@ -4,12 +4,105 @@
 #include "ggml-impl.h"
 #include "binary-ops.h"
 #include "ggml.h"
+#include "ggml-quants.h"
 #include "unary-ops.h"
 #include "vec.h"
 
 #include <float.h>
 #include <algorithm>
 #include <cstdio>
+#include <vector>
+
+static bool ggml_cpu_fetch_scalar_f32(const ggml_tensor * t, float & out) {
+    if (t == nullptr || !ggml_is_scalar(t) || t->data == nullptr) {
+        return false;
+    }
+
+    switch (t->type) {
+        case GGML_TYPE_F32:
+            out = *(const float *) t->data;
+            return true;
+        case GGML_TYPE_F16:
+            out = GGML_CPU_FP16_TO_FP32(*(const ggml_fp16_t *) t->data);
+            return true;
+        case GGML_TYPE_BF16:
+            out = GGML_BF16_TO_FP32(*(const ggml_bf16_t *) t->data);
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void ggml_cpu_store_row_f16(const float * src, ggml_fp16_t * dst, int64_t n) {
+    ggml_fp32_to_fp16_row(src, dst, n);
+}
+
+static void ggml_cpu_store_row_bf16(const float * src, ggml_bf16_t * dst, int64_t n) {
+    ggml_fp32_to_bf16_row_ref(src, dst, n);
+}
+
+static void ggml_cpu_cpy_nvfp4(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * scale_tensor = ggml_cpy_get_nvfp4_scale(dst);
+
+    float global_scale = 0.0f;
+    GGML_ASSERT(ggml_cpu_fetch_scalar_f32(scale_tensor, global_scale));
+    GGML_ASSERT(global_scale != 0.0f);
+
+    GGML_TENSOR_UNARY_OP_LOCALS
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t nr = ne01 * ne02 * ne03;
+    const int64_t dr = (nr + nth - 1) / nth;
+    const int64_t ir0 = dr * ith;
+    const int64_t ir1 = std::min(ir0 + dr, nr);
+
+    GGML_ASSERT(ne00 % QK_NVFP4 == 0);
+
+    std::vector<float> row(ne00);
+
+    for (int64_t ir = ir0; ir < ir1; ++ir) {
+        const int64_t i03 = ir / (ne02 * ne01);
+        const int64_t i02 = (ir - i03 * ne02 * ne01) / ne01;
+        const int64_t i01 = ir - i03 * ne02 * ne01 - i02 * ne01;
+
+        const char * src0_row = (const char *) src0->data + i01 * nb01 + i02 * nb02 + i03 * nb03;
+        char * dst_row = (char *) dst->data + i01 * nb1 + i02 * nb2 + i03 * nb3;
+
+        if (src0->type == GGML_TYPE_NVFP4) {
+            dequantize_row_nvfp4((const block_nvfp4 *) src0_row, row.data(), ne00, global_scale);
+
+            if (dst->type == GGML_TYPE_F32) {
+                memcpy(dst_row, row.data(), ne00 * sizeof(float));
+            } else if (dst->type == GGML_TYPE_F16) {
+                ggml_cpu_store_row_f16(row.data(), (ggml_fp16_t *) dst_row, ne00);
+            } else if (dst->type == GGML_TYPE_BF16) {
+                ggml_cpu_store_row_bf16(row.data(), (ggml_bf16_t *) dst_row, ne00);
+            } else {
+                GGML_ABORT("unsupported NVFP4 dequant destination type: %s", ggml_type_name(dst->type));
+            }
+        } else if (dst->type == GGML_TYPE_NVFP4) {
+            GGML_ASSERT(src0->type == GGML_TYPE_F32);
+
+            if (nb00 == sizeof(float)) {
+                quantize_row_nvfp4_ref((const float *) src0_row, (block_nvfp4 *) dst_row, ne00, global_scale);
+            } else {
+                const float * src_f32 = (const float *) src0->data;
+                for (int64_t i00 = 0; i00 < ne00; ++i00) {
+                    row[i00] = *(const float *) ((const char *) src_f32 + i00 * nb00 + i01 * nb01 + i02 * nb02 + i03 * nb03);
+                }
+                quantize_row_nvfp4_ref(row.data(), (block_nvfp4 *) dst_row, ne00, global_scale);
+            }
+        } else {
+            GGML_ABORT("unsupported NVFP4 copy type combination (%s to %s)",
+                    ggml_type_name(src0->type), ggml_type_name(dst->type));
+        }
+    }
+}
 
 // ggml_compute_forward_dup
 
@@ -5066,6 +5159,14 @@ void ggml_compute_forward_set(
 void ggml_compute_forward_cpy(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+
+    if ((src0->type == GGML_TYPE_NVFP4 || dst->type == GGML_TYPE_NVFP4) &&
+        ggml_cpy_get_nvfp4_scale(dst) != nullptr) {
+        ggml_cpu_cpy_nvfp4(params, dst);
+        return;
+    }
+
     ggml_compute_forward_dup(params, dst);
 }
 
@@ -5424,11 +5525,77 @@ static void ggml_compute_forward_set_rows_f32(
     }
 }
 
+static void ggml_compute_forward_set_rows_f32_nvfp4(
+        const ggml_compute_params * params,
+              ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    const ggml_tensor * scale_tensor = ggml_set_rows_get_nvfp4_scale(dst);
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+
+    float global_scale = 0.0f;
+    GGML_ASSERT(ggml_cpu_fetch_scalar_f32(scale_tensor, global_scale));
+    GGML_ASSERT(global_scale != 0.0f);
+
+    const int64_t nc = ne00;
+    const int64_t nr = ne01;
+
+    assert(ne0 == nc);
+    assert(ne2 == ne02);
+    assert(ne3 == ne03);
+    assert(src0->type == GGML_TYPE_F32);
+    assert(dst->type == GGML_TYPE_NVFP4);
+    assert(ne02 % ne11 == 0);
+    assert(ne03 % ne12 == 0);
+    assert(nc % QK_NVFP4 == 0);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t dr = (nr + nth - 1) / nth;
+    const int64_t ir0 = dr * ith;
+    const int64_t ir1 = std::min(ir0 + dr, nr);
+
+    std::vector<float> row(nc);
+
+    for (int64_t i03 = 0; i03 < ne03; ++i03) {
+        for (int64_t i02 = 0; i02 < ne02; ++i02) {
+            for (int64_t i = ir0; i < ir1; ++i) {
+                const int64_t i12 = i03 % ne12;
+                const int64_t i11 = i02 % ne11;
+                const int64_t i10 = i;
+
+                const int64_t i1 = *(int64_t *) ((char *) src1->data + i10 * nb10 + i11 * nb11 + i12 * nb12);
+
+                GGML_ASSERT(i1 >= 0 && i1 < ne1);
+
+                const char * src_row = (const char *) src0->data + i * nb01 + i02 * nb02 + i03 * nb03;
+                char * dst_row = (char *) dst->data + i1 * nb1 + i02 * nb2 + i03 * nb3;
+
+                if (nb00 == sizeof(float)) {
+                    quantize_row_nvfp4_ref((const float *) src_row, (block_nvfp4 *) dst_row, nc, global_scale);
+                } else {
+                    for (int64_t i00 = 0; i00 < nc; ++i00) {
+                        row[i00] = *(const float *) (src_row + i00 * nb00);
+                    }
+                    quantize_row_nvfp4_ref(row.data(), (block_nvfp4 *) dst_row, nc, global_scale);
+                }
+            }
+        }
+    }
+}
+
 void ggml_compute_forward_set_rows(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
 
     const ggml_tensor * src0 = dst->src[0];
+
+    if (dst->type == GGML_TYPE_NVFP4) {
+        ggml_compute_forward_set_rows_f32_nvfp4(params, dst);
+        return;
+    }
 
     switch (src0->type) {
         case GGML_TYPE_F32:

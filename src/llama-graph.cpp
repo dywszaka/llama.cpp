@@ -1225,6 +1225,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * kq_mask,
          ggml_tensor * v_mla,
          ggml_tensor * sinks,
+         ggml_tensor * k_scale,
+         ggml_tensor * v_scale,
              float     kq_scale) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
@@ -1283,6 +1285,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
     } else {
         ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+        if (k->type == GGML_TYPE_NVFP4) {
+            ggml_mul_mat_set_nvfp4_weight_scale(kq, k_scale);
+        }
 
         // note: this op tends to require high floating point range
         //       while for some models F16 is enough, for others it is not, so we default to F32 here
@@ -1311,6 +1316,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
         ggml_soft_max_add_sinks(kq, sinks);
+
+        if (v->type == GGML_TYPE_NVFP4) {
+            ggml_tensor * v_deq = ggml_cast(ctx0, v, GGML_TYPE_F16);
+            ggml_cpy_set_nvfp4_scale(v_deq, v_scale);
+            v = v_deq;
+        }
 
         if (!v_trans) {
             // note: avoid this branch
@@ -1381,7 +1392,7 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = k_cur;
     ggml_tensor * v = v_cur;
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, nullptr, kq_scale);
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, nullptr, nullptr, nullptr, kq_scale);
     cb(cur, "kqv_out", il);
 
     if (wo) {
@@ -1469,7 +1480,7 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, nullptr, kq_scale);
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, nullptr, mctx_cur->get_k_scale(il), mctx_cur->get_v_scale(il), kq_scale);
     cb(cur, "kqv_out", il);
 
     if (wo) {
@@ -1561,7 +1572,7 @@ ggml_tensor * llm_graph_context::build_attn_with_sinks(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, sinks, kq_scale);
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, sinks, mctx_cur->get_k_scale(il), mctx_cur->get_v_scale(il), kq_scale);
     cb(cur, "kqv_out", il);
 
     if (wo) {
@@ -1615,7 +1626,7 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = k_cur;
     ggml_tensor * v = v_cur;
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, nullptr, kq_scale);
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, nullptr, nullptr, nullptr, kq_scale);
     cb(cur, "kqv_out", il);
 
     if (wo) {
