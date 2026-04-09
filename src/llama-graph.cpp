@@ -1227,6 +1227,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * sinks,
              float     kq_scale) const {
     const bool v_trans = v->nb[1] > v->nb[2];
+    ggml_tensor * k_scale = (ggml_tensor *) ggml_tensor_get_nvfp4_scale(k);
+    ggml_tensor * v_scale = (ggml_tensor *) ggml_tensor_get_nvfp4_scale(v);
 
     // split the batch into streams if needed
     const auto n_stream = k->ne[3];
@@ -1288,6 +1290,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         //       while for some models F16 is enough, for others it is not, so we default to F32 here
         ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
 
+        if (k_scale) {
+            kq = ggml_mul(ctx0, kq, k_scale);
+        }
+
         if (arch == LLM_ARCH_GROK) {
             // need to do the following:
             // multiply by attn_output_multiplyer of 0.08838834764831845
@@ -1312,9 +1318,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
         ggml_soft_max_add_sinks(kq, sinks);
 
+        if (v_scale) {
+            v = ggml_cast(ctx0, v, GGML_TYPE_F32);
+        }
+
         if (!v_trans) {
             // note: avoid this branch
             v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
+        }
+
+        if (v_scale) {
+            kq = ggml_mul(ctx0, kq, v_scale);
         }
 
         ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);

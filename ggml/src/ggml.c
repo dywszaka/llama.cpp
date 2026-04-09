@@ -6961,6 +6961,17 @@ void ggml_set_loss(struct ggml_tensor * tensor) {
     tensor->flags |= GGML_TENSOR_FLAG_LOSS;
 }
 
+void ggml_tensor_set_nvfp4_scale(
+        struct ggml_tensor       * tensor,
+        const struct ggml_tensor * scale) {
+    tensor->src[GGML_MAX_SRC - 1] = (struct ggml_tensor *) scale;
+}
+
+const struct ggml_tensor * ggml_tensor_get_nvfp4_scale(
+        const struct ggml_tensor * tensor) {
+    return tensor->src[GGML_MAX_SRC - 1];
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 void ggml_quantize_init(enum ggml_type type) {

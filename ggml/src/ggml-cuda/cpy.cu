@@ -267,6 +267,75 @@ static void ggml_cpy_q5_1_f32_cuda(
         ne10, ne11, ne12, nb10, nb11, nb12, nb13, cdst_indirect, graph_cpynode_index++);
 }
 
+static __global__ void cpy_nvfp4_f32(
+        const char * cx, const float * cscale,
+        char * cdst_direct, const int ne,
+        const int ne00, const int ne01, const int ne02,
+        const int nb00, const int nb01, const int nb02, const int nb03,
+        const int ne10, const int ne11, const int ne12,
+        const int nb10, const int nb11, const int nb12, const int nb13,
+        const int scale_axis,
+        const int scale_nb0, const int scale_nb1, const int scale_nb2, const int scale_nb3,
+        char ** cdst_indirect, int graph_cpynode_index) {
+    const int i = (blockDim.x * blockIdx.x + threadIdx.x) * QK_NVFP4;
+
+    if (i >= ne) {
+        return;
+    }
+
+    char * cdst = (cdst_indirect != nullptr) ? cdst_indirect[graph_cpynode_index] : cdst_direct;
+
+    const int i03 = i / (ne00 * ne01 * ne02);
+    const int i02 = (i - i03 * ne00 * ne01 * ne02) / (ne00 * ne01);
+    const int i01 = (i - i03 * ne00 * ne01 * ne02 - i02 * ne01 * ne00) / ne00;
+    const int i00 = i - i03 * ne00 * ne01 * ne02 - i02 * ne01 * ne00 - i01 * ne00;
+    const int x_offset = (i00 / QK_NVFP4) * nb00 + i01 * nb01 + i02 * nb02 + i03 * nb03;
+
+    const int i13 = i / (ne10 * ne11 * ne12);
+    const int i12 = (i - i13 * ne10 * ne11 * ne12) / (ne10 * ne11);
+    const int i11 = (i - i13 * ne10 * ne11 * ne12 - i12 * ne10 * ne11) / ne10;
+    const int i10 = i - i13 * ne10 * ne11 * ne12 - i12 * ne10 * ne11 - i11 * ne10;
+    const int dst_offset = i10 * nb10 + i11 * nb11 + i12 * nb12 + i13 * nb13;
+
+    const block_nvfp4 * x = (const block_nvfp4 *) (cx + x_offset);
+    float * dst_f32 = (float *) (cdst + dst_offset);
+
+    float input_scale = 1.0f;
+    if (cscale != nullptr && scale_axis >= 0) {
+        const int scale_i0 = scale_axis == 0 ? i00 : scale_axis == 1 ? i01 : scale_axis == 2 ? i02 : i03;
+        const char * scale_ptr = (const char *) cscale + scale_i0 * scale_nb0 + i01 * scale_nb1 + i02 * scale_nb2 + i03 * scale_nb3;
+        input_scale = *(const float *) scale_ptr;
+    }
+
+    const float d = ggml_cuda_e4m3_to_fp32_half(x->e) * input_scale;
+
+#pragma unroll
+    for (int j = 0; j < QK_NVFP4/2; ++j) {
+        const uint8_t packed = x->qs[j];
+        dst_f32[2*j + 0] = d * kvalues_nvfp4[packed & 0x0F];
+        dst_f32[2*j + 1] = d * kvalues_nvfp4[packed >> 4];
+    }
+}
+
+static void ggml_cpy_nvfp4_f32_cuda(
+        const char * cx, const float * cscale, char * cdst, const int ne,
+        const int ne00, const int ne01, const int ne02,
+        const int nb00, const int nb01, const int nb02, const int nb03,
+        const int ne10, const int ne11, const int ne12,
+        const int nb10, const int nb11, const int nb12, const int nb13,
+        const int scale_axis,
+        const int scale_nb0, const int scale_nb1, const int scale_nb2, const int scale_nb3,
+        cudaStream_t stream, char ** cdst_indirect, int & graph_cpynode_index) {
+    GGML_ASSERT(ne % QK_NVFP4 == 0);
+    const int num_blocks = ne / QK_NVFP4;
+    cpy_nvfp4_f32<<<num_blocks, 1, 0, stream>>>(
+            cx, cscale, cdst, ne,
+            ne00, ne01, ne02, nb00, nb01, nb02, nb03,
+            ne10, ne11, ne12, nb10, nb11, nb12, nb13,
+            scale_axis, scale_nb0, scale_nb1, scale_nb2, scale_nb3,
+            cdst_indirect, graph_cpynode_index++);
+}
+
 static void ggml_cpy_f32_iq4_nl_cuda(
     const char * cx, char * cdst, const int ne,
     const int ne00, const int ne01, const int ne02, const int nb00, const int nb01, const int nb02,
@@ -311,6 +380,35 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
 
     char * src0_ddc = (char *) src0->data;
     char * src1_ddc = (char *) src1->data;
+    const ggml_tensor * src0_nvfp4_scale = ggml_tensor_get_nvfp4_scale(src0);
+    const float * src0_nvfp4_scale_d = nullptr;
+    int scale_axis = -1;
+    int scale_nb0 = 0;
+    int scale_nb1 = 0;
+    int scale_nb2 = 0;
+    int scale_nb3 = 0;
+
+    if (src0->type == GGML_TYPE_NVFP4 && src1->type == GGML_TYPE_F32 && src0_nvfp4_scale != nullptr) {
+        GGML_ASSERT(src0_nvfp4_scale->type == GGML_TYPE_F32);
+        src0_nvfp4_scale_d = (const float *) src0_nvfp4_scale->data;
+        scale_nb0 = (int) src0_nvfp4_scale->nb[0];
+        scale_nb1 = (int) src0_nvfp4_scale->nb[1];
+        scale_nb2 = (int) src0_nvfp4_scale->nb[2];
+        scale_nb3 = (int) src0_nvfp4_scale->nb[3];
+
+        if (src0_nvfp4_scale->ne[0] == src0->ne[1] && src0_nvfp4_scale->ne[3] == src0->ne[3]) {
+            scale_axis = 1;
+        } else if (src0_nvfp4_scale->ne[0] == src0->ne[2] && src0_nvfp4_scale->ne[3] == src0->ne[3]) {
+            scale_axis = 2;
+        } else if (src0_nvfp4_scale->ne[0] == src0->ne[0] && src0_nvfp4_scale->ne[3] == src0->ne[3]) {
+            scale_axis = 0;
+        } else {
+            GGML_ABORT("%s: unsupported NVFP4 scale layout for %s (src0=[%lld,%lld,%lld,%lld], scale=[%lld,%lld,%lld,%lld])\n",
+                    __func__, ggml_get_name(src0),
+                    (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2], (long long) src0->ne[3],
+                    (long long) src0_nvfp4_scale->ne[0], (long long) src0_nvfp4_scale->ne[1], (long long) src0_nvfp4_scale->ne[2], (long long) src0_nvfp4_scale->ne[3]);
+        }
+    }
 
     char ** dest_ptrs_d = nullptr;
     int graph_cpynode_index = -1;
@@ -363,6 +461,11 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
         ggml_cpy_f32_q5_1_cuda(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_Q5_1 && src1->type == GGML_TYPE_F32) {
         ggml_cpy_q5_1_f32_cuda(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
+    } else if (src0->type == GGML_TYPE_NVFP4 && src1->type == GGML_TYPE_F32) {
+        ggml_cpy_nvfp4_f32_cuda(src0_ddc, src0_nvfp4_scale_d, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03,
+                ne10, ne11, ne12, nb10, nb11, nb12, nb13,
+                scale_axis, scale_nb0, scale_nb1, scale_nb2, scale_nb3,
+                main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16) {
         ggml_cpy_flt_cuda<half, half> (src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_BF16) {
@@ -426,6 +529,8 @@ void* ggml_cuda_cpy_fn(const ggml_tensor * src0, ggml_tensor * src1) {
         return (void*) cpy_f32_q<cpy_blck_f32_q5_1, QK5_1>;
     } else if (src0->type == GGML_TYPE_Q5_1 && src1->type == GGML_TYPE_F32) {
         return (void*) cpy_q_f32<cpy_blck_q_f32<dequantize_q5_1, QK5_1>, QK5_1>;
+    } else if (src0->type == GGML_TYPE_NVFP4 && src1->type == GGML_TYPE_F32) {
+        return (void*) cpy_nvfp4_f32;
     } else if (src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16) {
         return (void*) cpy_flt<cpy_1_flt<half, half>>;
     } else if (src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_BF16) {

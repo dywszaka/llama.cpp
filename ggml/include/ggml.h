@@ -820,6 +820,14 @@ extern "C" {
     GGML_API void ggml_set_param(struct ggml_tensor * tensor);
     GGML_API void ggml_set_loss(struct ggml_tensor * tensor);
 
+    // bind optional NVFP4 sidecar scale metadata to a tensor or op result
+    GGML_API void ggml_tensor_set_nvfp4_scale(
+            struct ggml_tensor       * tensor,
+            const struct ggml_tensor * scale);
+
+    GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_scale(
+            const struct ggml_tensor * tensor);
+
     //
     // operations on tensors with backpropagation
     //

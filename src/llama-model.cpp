@@ -18160,6 +18160,7 @@ struct llm_build_smallthinker : public llm_graph_context{
 
 llama_memory_i * llama_model::create_memory(const llama_memory_params & params, llama_cparams & cparams) const {
     llama_memory_i * res;
+    const bool attn_v_trans = !cparams.flash_attn && params.type_v != GGML_TYPE_NVFP4;
 
     switch (arch) {
         // Models that need specific instantiation should be handled in the
@@ -18197,7 +18198,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         /* model             */ *this,
                         /* attn_type_k       */ params.type_k,
                         /* attn_type_v       */ params.type_v,
-                        /* attn_v_trans      */ !cparams.flash_attn,
+                        /* attn_v_trans      */ attn_v_trans,
                         /* attn_kv_size      */ cparams.n_ctx,
                         /* attn_n_pad        */ padding,
                         /* attn_n_swa        */ hparams.n_swa,
@@ -18235,7 +18236,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 *this,
                                 params.type_k,
                                 params.type_v,
-                                !cparams.flash_attn,
+                                attn_v_trans,
                                 cparams.offload_kqv,
                                 params.swa_full,
                                 cparams.kv_unified,
@@ -18251,7 +18252,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 nullptr,
                                 params.type_k,
                                 params.type_v,
-                                !cparams.flash_attn,
+                                attn_v_trans,
                                 cparams.offload_kqv,
                                 cparams.kv_unified,
                                 n_ctx_per_stream,
