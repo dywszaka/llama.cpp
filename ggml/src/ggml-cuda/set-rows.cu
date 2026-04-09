@@ -7,8 +7,8 @@
 typedef void (*set_rows_kernel_t)(const char * src, char * dst);
 
 static constexpr float GGML_CUDA_NVFP4_FP4_MAX = 6.0f;
-static constexpr float GGML_CUDA_NVFP4_E4M3_HALF_MAX = 224.0f;
-static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_HALF_MAX;
+static constexpr float GGML_CUDA_NVFP4_E4M3_MAX = 448.0f;
+static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_MAX;
 
 static __device__ __forceinline__ void ggml_cuda_atomic_max_f32(float * addr, float value) {
     int * addr_i = (int *) addr;
