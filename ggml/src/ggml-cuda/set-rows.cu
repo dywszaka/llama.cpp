@@ -7,8 +7,8 @@
 typedef void (*set_rows_kernel_t)(const char * src, char * dst);
 
 static constexpr float GGML_CUDA_NVFP4_FP4_MAX = 6.0f;
-static constexpr float GGML_CUDA_NVFP4_E4M3_MAX = 448.0f;
-static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_MAX;
+static constexpr float GGML_CUDA_NVFP4_E4M3_HALF_MAX = 224.0f;
+static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_HALF_MAX;
 
 static __device__ __forceinline__ void ggml_cuda_atomic_max_f32(float * addr, float value) {
     int * addr_i = (int *) addr;
@@ -59,22 +59,21 @@ static __device__ __forceinline__ uint8_t ggml_cuda_best_index_e4m3_set_rows(flo
     return best_index;
 }
 
-static __global__ void k_abs_max_f32(
+static __global__ void k_abs_max_f32_rows(
         const float * __restrict__ src0,
         float * __restrict__ amax,
-        const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
-        const int64_t s01, const int64_t s02, const int64_t s03) {
+        const int64_t ne00,
+        const int64_t ne01,
+        const int64_t s01) {
+    const int64_t row = blockIdx.x;
+    if (row >= ne01) {
+        return;
+    }
+
     float local_max = 0.0f;
-    const int64_t ne_total = ne00 * ne01 * ne02 * ne03;
-
-    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < ne_total; i += (int64_t) blockDim.x * gridDim.x) {
-        const int64_t i03 = i / (ne00 * ne01 * ne02);
-        const int64_t i02 = (i - i03 * ne00 * ne01 * ne02) / (ne00 * ne01);
-        const int64_t i01 = (i - i03 * ne00 * ne01 * ne02 - i02 * ne00 * ne01) / ne00;
-        const int64_t i00 = i - i03 * ne00 * ne01 * ne02 - i02 * ne00 * ne01 - i01 * ne00;
-
-        const float v = fabsf(src0[i03*s03 + i02*s02 + i01*s01 + i00]);
-        local_max = fmaxf(local_max, v);
+    const int64_t row_off = row * s01;
+    for (int64_t i = threadIdx.x; i < ne00; i += blockDim.x) {
+        local_max = fmaxf(local_max, fabsf(src0[row_off + i]));
     }
 
     __shared__ float shared_max[CUDA_SET_ROWS_BLOCK_SIZE];
@@ -89,7 +88,7 @@ static __global__ void k_abs_max_f32(
     }
 
     if (threadIdx.x == 0) {
-        ggml_cuda_atomic_max_f32(amax, shared_max[0]);
+        amax[row] = shared_max[0];
     }
 }
 
@@ -99,7 +98,7 @@ static __global__ void k_set_rows_nvfp4(
         const int64_t s01,
         const int64_t s10,
         const int64_t s1,
-        const float * __restrict__ amax) {
+        const float * __restrict__ amax_rows) {
     const int lane = threadIdx.x;
     const bool lane_active = lane < QK_NVFP4;
 
@@ -121,7 +120,7 @@ static __global__ void k_set_rows_nvfp4(
     block_nvfp4 * dst_row_ptr = dst + dst_row*s1 / sizeof(block_nvfp4);
 
     float scale_f = 0.0f;
-    const float amax_f = *amax;
+    const float amax_f = amax_rows[i1];
     const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
     if (lane == 0) {
         const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
@@ -145,13 +144,13 @@ static __global__ void k_set_rows_scale(
         float * __restrict__ scale,
         const int64_t ne10,
         const int64_t s10,
-        const float * __restrict__ amax) {
+        const float * __restrict__ amax_rows) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= ne10) {
         return;
     }
 
-    const float amax_f = *amax;
+    const float amax_f = amax_rows[i];
     const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
     const float input_scale = (global_scale != 0.0f && isfinite(global_scale)) ? (1.0f / global_scale) : 0.0f;
     const int64_t dst_row = *(src1 + i*s10);
@@ -426,15 +425,14 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         GGML_ASSERT(scale_tensor != nullptr);
         GGML_ASSERT(scale_tensor->type == GGML_TYPE_F32);
         GGML_ASSERT(scale_tensor->data != nullptr);
-        ggml_cuda_pool_alloc<float> amax_d(ctx.pool(), 1);
-        CUDA_CHECK(cudaMemsetAsync(amax_d.get(), 0, sizeof(float), stream));
-
-        const int num_blocks = (int) std::min<int64_t>((ne00 * ne01 + CUDA_SET_ROWS_BLOCK_SIZE - 1) / CUDA_SET_ROWS_BLOCK_SIZE, 4096);
-        k_abs_max_f32<<<num_blocks, CUDA_SET_ROWS_BLOCK_SIZE, 0, stream>>>(
-                src0_d, amax_d.get(),
-                ne00, ne01, ne02, ne03,
-                nb01/sizeof(float), nb02/sizeof(float), nb03/sizeof(float));
-        CUDA_CHECK(cudaGetLastError());
+        ggml_cuda_pool_alloc<float> amax_d(ctx.pool(), (size_t) ne01);
+        if (ne01 > 0) {
+            k_abs_max_f32_rows<<<(int) ne01, CUDA_SET_ROWS_BLOCK_SIZE, 0, stream>>>(
+                    src0_d, amax_d.get(),
+                    ne00, ne01,
+                    nb01/sizeof(float));
+            CUDA_CHECK(cudaGetLastError());
+        }
 
         if (ne01 > 0) {
             const dim3 block_size(QK_NVFP4);

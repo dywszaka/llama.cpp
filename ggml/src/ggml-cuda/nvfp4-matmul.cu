@@ -12,8 +12,8 @@
 namespace {
 
 static constexpr float GGML_CUDA_NVFP4_FP4_MAX = 6.0f;
-static constexpr float GGML_CUDA_NVFP4_E4M3_MAX = 448.0f;
-static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_MAX;
+static constexpr float GGML_CUDA_NVFP4_E4M3_HALF_MAX = 224.0f;
+static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_HALF_MAX;
 
 #if defined(CUBLAS_VERSION)
 #define GGML_CUDA_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
@@ -80,20 +80,21 @@ static __device__ __forceinline__ void ggml_cuda_atomic_max_f32(float * addr, fl
     }
 }
 
-static __global__ void ggml_cuda_nvfp4_abs_max_2d_f32(
+static __global__ void ggml_cuda_nvfp4_abs_max_rows_f32(
         const float * __restrict__ src0,
-        float * __restrict__ amax,
+        float * __restrict__ amax_rows,
         const int64_t ne00,
         const int64_t ne01,
         const int64_t s01) {
+    const int64_t row = blockIdx.x;
+    if (row >= ne01) {
+        return;
+    }
+
     float local_max = 0.0f;
-    const int64_t ne_total = ne00 * ne01;
-
-    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < ne_total; i += (int64_t) blockDim.x * gridDim.x) {
-        const int64_t i01 = i / ne00;
-        const int64_t i00 = i - i01 * ne00;
-
-        const float v = fabsf(src0[i01 * s01 + i00]);
+    const int64_t row_off = row * s01;
+    for (int64_t i = threadIdx.x; i < ne00; i += blockDim.x) {
+        const float v = fabsf(src0[row_off + i]);
         local_max = fmaxf(local_max, v);
     }
 
@@ -109,23 +110,40 @@ static __global__ void ggml_cuda_nvfp4_abs_max_2d_f32(
     }
 
     if (threadIdx.x == 0) {
-        ggml_cuda_atomic_max_f32(amax, shared_max[0]);
+        amax_rows[row] = shared_max[0];
     }
 }
 
-static __global__ void ggml_cuda_nvfp4_prepare_dynamic_alpha_kernel(
-        const float * __restrict__ amax,
-        float * __restrict__ alpha,
-        float * __restrict__ beta,
+static __global__ void ggml_cuda_nvfp4_prepare_dynamic_input_scales_kernel(
+        const float * __restrict__ amax_rows,
+        float * __restrict__ input_scales,
+        const int64_t nrows,
         const float out_scale) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) {
+    const int64_t row = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= nrows) {
         return;
     }
 
-    const float amax_f = *amax;
+    const float amax_f = amax_rows[row];
     const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
-    *alpha = (global_scale != 0.0f) ? (out_scale / global_scale) : out_scale;
-    *beta = 0.0f;
+    input_scales[row] = (global_scale != 0.0f) ? (out_scale / global_scale) : 0.0f;
+}
+
+static __global__ void ggml_cuda_nvfp4_apply_column_scales_kernel(
+        float * __restrict__ dst,
+        const float * __restrict__ column_scales,
+        const int64_t m,
+        const int64_t n,
+        const int64_t ld) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t total = m * n;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t col = idx / m;
+    const int64_t row = idx - col * m;
+    dst[col * ld + row] *= column_scales[col];
 }
 
 static bool ggml_cuda_nvfp4_native_debug_enabled() {
@@ -326,7 +344,7 @@ static __global__ void quantize_row_nvfp4_dynamic_kernel(
         block_nvfp4 * __restrict__ y,
         const int64_t ne00,
         const int64_t s01,
-        const float * __restrict__ amax) {
+        const float * __restrict__ amax_rows) {
     const int lane = threadIdx.x;
     const bool lane_active = lane < QK_NVFP4;
 
@@ -343,7 +361,7 @@ static __global__ void quantize_row_nvfp4_dynamic_kernel(
     vmax = __shfl_sync(0xFFFFFFFF, vmax, 0, WARP_SIZE);
 
     float scale_f = 0.0f;
-    const float amax_f = *amax;
+    const float amax_f = amax_rows[i1];
     const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
     if (lane == 0) {
         const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
@@ -383,14 +401,14 @@ static void quantize_row_nvfp4_dynamic_cuda(
         const int64_t ne00,
         const int64_t s01,
         const int64_t ne01,
-        const float * amax,
+        const float * amax_rows,
         cudaStream_t stream) {
     GGML_ASSERT(ne00 % QK_NVFP4 == 0);
 
     const dim3 num_blocks((uint32_t) (ne00 / QK_NVFP4), (uint32_t) ne01, 1);
     const dim3 block_size(WARP_SIZE, 1, 1);
 
-    quantize_row_nvfp4_dynamic_kernel<<<num_blocks, block_size, 0, stream>>>(x, y, ne00, s01, amax);
+    quantize_row_nvfp4_dynamic_kernel<<<num_blocks, block_size, 0, stream>>>(x, y, ne00, s01, amax_rows);
 }
 
 struct ggml_cuda_nvfp4_split_matrix {
@@ -528,18 +546,21 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
         bool linear_scale_layout,
         cudaStream_t stream,
         ggml_cuda_nvfp4_split_matrix & out) {
+    const bool cacheable = src0->buffer != nullptr;
     auto & cache = ctx.nvfp4_repack_cache[ctx.device];
-    for (const ggml_cuda_nvfp4_cache_entry & entry : cache) {
-        if (ggml_cuda_nvfp4_cache_key_match(entry, src0) &&
-            entry.data_repacked != nullptr &&
-            entry.scale_repacked != nullptr) {
-            out.data = entry.data_repacked;
-            out.scale = entry.scale_repacked;
-            out.data_nbytes = entry.data_nbytes;
-            out.scale_nbytes = entry.scale_nbytes;
-            out.scale_inner_padded = entry.scale_inner_padded;
-            out.scale_outer_padded = entry.scale_outer_padded;
-            return true;
+    if (cacheable) {
+        for (const ggml_cuda_nvfp4_cache_entry & entry : cache) {
+            if (ggml_cuda_nvfp4_cache_key_match(entry, src0) &&
+                entry.data_repacked != nullptr &&
+                entry.scale_repacked != nullptr) {
+                out.data = entry.data_repacked;
+                out.scale = entry.scale_repacked;
+                out.data_nbytes = entry.data_nbytes;
+                out.scale_nbytes = entry.scale_nbytes;
+                out.scale_inner_padded = entry.scale_inner_padded;
+                out.scale_outer_padded = entry.scale_outer_padded;
+                return true;
+            }
         }
     }
 
@@ -594,19 +615,21 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
             linear_scale_layout,
             stream);
 
-    ggml_cuda_nvfp4_cache_entry entry = {};
-    entry.src0_data = src0->data;
-    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
-        entry.ne[i] = src0->ne[i];
-        entry.nb[i] = src0->nb[i];
+    if (cacheable) {
+        ggml_cuda_nvfp4_cache_entry entry = {};
+        entry.src0_data = src0->data;
+        for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+            entry.ne[i] = src0->ne[i];
+            entry.nb[i] = src0->nb[i];
+        }
+        entry.data_repacked = data_repacked;
+        entry.scale_repacked = scale_repacked;
+        entry.data_nbytes = data_nbytes_built;
+        entry.scale_nbytes = scale_nbytes_built;
+        entry.scale_inner_padded = scale_inner_padded;
+        entry.scale_outer_padded = scale_outer_padded;
+        cache.push_back(entry);
     }
-    entry.data_repacked = data_repacked;
-    entry.scale_repacked = scale_repacked;
-    entry.data_nbytes = data_nbytes_built;
-    entry.scale_nbytes = scale_nbytes_built;
-    entry.scale_inner_padded = scale_inner_padded;
-    entry.scale_outer_padded = scale_outer_padded;
-    cache.push_back(entry);
 
     out.data = data_repacked;
     out.scale = scale_repacked;
@@ -655,6 +678,7 @@ static void ggml_cuda_nvfp4_materialize_contiguous_matrix(
             stream));
 
     slice.data = storage.get();
+    slice.buffer = nullptr;
     slice.nb[0] = ggml_type_size(slice.type);
     slice.nb[1] = row_bytes;
     slice.nb[2] = row_bytes * slice.ne[1];
@@ -794,37 +818,33 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4(ctx.pool(), (size_t) nblk_k * (size_t) ne11);
     ggml_cuda_pool_alloc<uint8_t> src1_repacked_data(ctx.pool(), (size_t) ne11_padded * (size_t) ne10 / 2);
     ggml_cuda_pool_alloc<uint8_t> src1_repacked_scale(ctx.pool(), (size_t) scale_outer_padded_b * (size_t) scale_inner_padded);
-    ggml_cuda_pool_alloc<float> dynamic_amax(ctx.pool(), 1);
-    ggml_cuda_pool_alloc<float> dynamic_alpha(ctx.pool(), 1);
-    ggml_cuda_pool_alloc<float> dynamic_beta(ctx.pool(), 1);
+    ggml_cuda_pool_alloc<float> dynamic_amax_rows(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
+    ggml_cuda_pool_alloc<float> dynamic_input_scales(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
 
     bool used_dynamic_scale = ggml_mul_mat_get_nvfp4_input_scale(dst) == nullptr;
     float global_scale = ggml_cuda_nvfp4_input_global_scale(dst, &used_dynamic_scale);
     if (used_dynamic_scale) {
-        CUDA_CHECK(cudaMemsetAsync(dynamic_amax.get(), 0, sizeof(float), stream));
-
         const int block_size = 256;
-        const int64_t ne_total = ne10 * ne11;
-        const int grid_size = (int) std::min<int64_t>((ne_total + block_size - 1) / block_size, 4096);
-        ggml_cuda_nvfp4_abs_max_2d_f32<<<grid_size, block_size, 0, stream>>>(
+        ggml_cuda_nvfp4_abs_max_rows_f32<<<(int) ne11, block_size, 0, stream>>>(
                 (const float *) src1->data,
-                dynamic_amax.get(),
+                dynamic_amax_rows.get(),
                 ne10,
                 ne11,
                 src1->nb[1] / (int64_t) sizeof(float));
         CUDA_CHECK(cudaGetLastError());
 
-        ggml_cuda_nvfp4_prepare_dynamic_alpha_kernel<<<1, 1, 0, stream>>>(
-                dynamic_amax.get(),
-                dynamic_alpha.get(),
-                dynamic_beta.get(),
+        const int scale_grid = (int) ((ne11 + block_size - 1) / block_size);
+        ggml_cuda_nvfp4_prepare_dynamic_input_scales_kernel<<<scale_grid, block_size, 0, stream>>>(
+                dynamic_amax_rows.get(),
+                dynamic_input_scales.get(),
+                ne11,
                 out_scale);
         CUDA_CHECK(cudaGetLastError());
 
         quantize_row_nvfp4_dynamic_cuda(
                 (const float *) src1->data, src1_q_nvfp4.get(),
                 ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
-                dynamic_amax.get(), stream);
+                dynamic_amax_rows.get(), stream);
     } else {
         quantize_row_nvfp4_cuda(
                 (const float *) src1->data, src1_q_nvfp4.get(),
@@ -1148,11 +1168,6 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         stage = "matmul_desc_set_b_scale_ptr";
         st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr));
     }
-    if (st == CUBLAS_STATUS_SUCCESS && used_dynamic_scale) {
-        const cublasLtPointerMode_t pointer_mode = CUBLASLT_POINTER_MODE_DEVICE;
-        stage = "matmul_desc_set_pointer_mode_device";
-        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode));
-    }
 #else
     static std::atomic<bool> logged(false);
     if (verbose_skip || !logged.exchange(true)) {
@@ -1202,16 +1217,16 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     }
 
     // cuBLASLt FP4 path applies the channel scale directly to packed FP4 values.
-    // Our activation quantization uses x ~= q * (scale / global_scale), so account
-    // for the missing 1/global_scale factor in alpha.
-    const float matmul_alpha = (global_scale != 0.0f) ? (out_scale / global_scale) : out_scale;
+    // For statically-bound activations we recover the missing 1/global_scale in alpha.
+    // For dynamic RHS quantization we apply per-column input_scale after matmul.
+    const float matmul_alpha = used_dynamic_scale ? 1.0f : ((global_scale != 0.0f) ? (out_scale / global_scale) : out_scale);
 
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "matmul";
         const float alpha = matmul_alpha;
         const float beta  = 0.0f;
-        const void * alpha_ptr = used_dynamic_scale ? (const void *) dynamic_alpha.get() : (const void *) &alpha;
-        const void * beta_ptr  = used_dynamic_scale ? (const void *) dynamic_beta.get()  : (const void *) &beta;
+        const void * alpha_ptr = (const void *) &alpha;
+        const void * beta_ptr  = (const void *) &beta;
         st = cublasLtMatmul(
                 ctx.cublaslt_handle(),
                 op_desc,
@@ -1224,6 +1239,20 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 nullptr,
                 nullptr, 0,
                 stream);
+    }
+
+    if (st == CUBLAS_STATUS_SUCCESS && used_dynamic_scale && ne11 > 0) {
+        stage = "post_scale_dynamic_rhs";
+        const int block_size = 256;
+        const int64_t total = ne01 * ne11;
+        const int grid_size = (int) ((total + block_size - 1) / block_size);
+        ggml_cuda_nvfp4_apply_column_scales_kernel<<<grid_size, block_size, 0, stream>>>(
+                (float *) dst_data,
+                dynamic_input_scales.get(),
+                ne01,
+                ne11,
+                ne01);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     if (st == CUBLAS_STATUS_SUCCESS && pad_n) {

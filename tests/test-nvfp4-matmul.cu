@@ -115,6 +115,62 @@ static float compute_dynamic_global_scale(const std::vector<float> & src) {
     return amax > 0.0f ? (6.0f * 224.0f) / amax : 0.0f;
 }
 
+static void compute_dynamic_global_scales_per_row(
+        const std::vector<float> & src,
+        int rows,
+        int k,
+        std::vector<float> & global_scales) {
+    global_scales.resize((size_t) rows);
+    for (int r = 0; r < rows; ++r) {
+        const float * row = src.data() + (size_t) r * (size_t) k;
+        float amax = 0.0f;
+        for (int i = 0; i < k; ++i) {
+            amax = fmaxf(amax, fabsf(row[i]));
+        }
+        global_scales[(size_t) r] = amax > 0.0f ? (6.0f * 224.0f) / amax : 0.0f;
+    }
+}
+
+static void quantize_matrix_nvfp4_per_row_scale(
+        const std::vector<float> & src,
+        std::vector<block_nvfp4> & dst,
+        int rows,
+        int k,
+        const std::vector<float> & global_scales) {
+    GGML_ASSERT((int) global_scales.size() == rows);
+    GGML_ASSERT(k % QK_NVFP4 == 0);
+    const int nblk_k = k / QK_NVFP4;
+    dst.resize((size_t) rows * (size_t) nblk_k);
+
+    for (int r = 0; r < rows; ++r) {
+        quantize_row_nvfp4_ref(
+                src.data() + (size_t) r * (size_t) k,
+                dst.data() + (size_t) r * (size_t) nblk_k,
+                k,
+                global_scales[(size_t) r]);
+    }
+}
+
+static void dequantize_matrix_nvfp4_per_row_scale(
+        const std::vector<block_nvfp4> & src,
+        std::vector<float> & dst,
+        int rows,
+        int k,
+        const std::vector<float> & global_scales) {
+    GGML_ASSERT((int) global_scales.size() == rows);
+    GGML_ASSERT(k % QK_NVFP4 == 0);
+    const int nblk_k = k / QK_NVFP4;
+    dst.resize((size_t) rows * (size_t) k);
+
+    for (int r = 0; r < rows; ++r) {
+        dequantize_row_nvfp4(
+                src.data() + (size_t) r * (size_t) nblk_k,
+                dst.data() + (size_t) r * (size_t) k,
+                k,
+                global_scales[(size_t) r]);
+    }
+}
+
 static void split_nvfp4_blocks(
         const std::vector<block_nvfp4> & src,
         int64_t k,
@@ -530,17 +586,18 @@ static bool run_case_integration_style_dynamic_device_alpha(int m, int n, int k,
         v = dist_b(rng);
     }
 
-    const float global_scale_b = compute_dynamic_global_scale(b_fp32);
+    std::vector<float> global_scales_b;
+    compute_dynamic_global_scales_per_row(b_fp32, n, k, global_scales_b);
 
     std::vector<block_nvfp4> a_nvfp4;
     std::vector<block_nvfp4> b_nvfp4;
     quantize_matrix_nvfp4(a_fp32, a_nvfp4, m, k, global_scale_a);
-    quantize_matrix_nvfp4(b_fp32, b_nvfp4, n, k, global_scale_b);
+    quantize_matrix_nvfp4_per_row_scale(b_fp32, b_nvfp4, n, k, global_scales_b);
 
     std::vector<float> a_deq;
     std::vector<float> b_deq;
     dequantize_matrix_nvfp4(a_nvfp4, a_deq, m, k, global_scale_a);
-    dequantize_matrix_nvfp4(b_nvfp4, b_deq, n, k, global_scale_b);
+    dequantize_matrix_nvfp4_per_row_scale(b_nvfp4, b_deq, n, k, global_scales_b);
 
     std::vector<float> c_ref;
     fp32_reference_matmul(a_deq, b_deq, c_ref, m, n, k);
@@ -565,26 +622,22 @@ static bool run_case_integration_style_dynamic_device_alpha(int m, int n, int k,
     uint8_t * d_a_scale = nullptr;
     uint8_t * d_b_scale = nullptr;
     float * d_c = nullptr;
-    float * d_alpha = nullptr;
-    float * d_beta = nullptr;
+    std::vector<float> input_scales_b((size_t) n, 0.0f);
+    for (int i = 0; i < n; ++i) {
+        const float gs = global_scales_b[(size_t) i];
+        input_scales_b[(size_t) i] = gs != 0.0f ? (1.0f / gs) : 0.0f;
+    }
 
     CUDA_CHECK(cudaMalloc(&d_a_data, a_data.size()));
     CUDA_CHECK(cudaMalloc(&d_b_data, b_data.size()));
     CUDA_CHECK(cudaMalloc(&d_a_scale, a_scale.size()));
     CUDA_CHECK(cudaMalloc(&d_b_scale, b_scale.size()));
     CUDA_CHECK(cudaMalloc(&d_c, (size_t) m * (size_t) n_padded * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_alpha, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_beta, sizeof(float)));
 
     CUDA_CHECK(cudaMemcpy(d_a_data, a_data.data(), a_data.size(), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_b_data, b_data.data(), b_data.size(), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_a_scale, a_scale.data(), a_scale.size(), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_b_scale, b_scale.data(), b_scale.size(), cudaMemcpyHostToDevice));
-
-    const float alpha_h = 1.0f / (global_scale_a * global_scale_b);
-    const float beta_h = 0.0f;
-    CUDA_CHECK(cudaMemcpy(d_alpha, &alpha_h, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_beta, &beta_h, sizeof(float), cudaMemcpyHostToDevice));
 
     cublasLtHandle_t lt = nullptr;
     CUBLASLT_CHECK(cublasLtCreate(&lt));
@@ -602,10 +655,8 @@ static bool run_case_integration_style_dynamic_device_alpha(int m, int n, int k,
 
 #if defined(CUBLAS_VER_MAJOR) && (CUBLAS_VER_MAJOR >= 13)
     const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
-    const cublasLtPointerMode_t pointer_mode = CUBLASLT_POINTER_MODE_DEVICE;
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode, sizeof(scale_mode)));
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode, sizeof(scale_mode)));
-    CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
     const void * a_scale_ptr = d_a_scale;
     const void * b_scale_ptr = d_b_scale;
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_ptr, sizeof(a_scale_ptr)));
@@ -619,13 +670,15 @@ static bool run_case_integration_style_dynamic_device_alpha(int m, int n, int k,
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) k, (uint64_t) n_padded, (int64_t) k));
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F,     (uint64_t) m, (uint64_t) n_padded, (int64_t) m));
 
+    const float alpha = 1.0f / global_scale_a;
+    const float beta = 0.0f;
     CUBLASLT_CHECK(cublasLtMatmul(
             lt,
             op_desc,
-            d_alpha,
+            &alpha,
             d_a_data, a_desc,
             d_b_data, b_desc,
-            d_beta,
+            &beta,
             d_c, c_desc,
             d_c, c_desc,
             nullptr,
@@ -645,7 +698,7 @@ static bool run_case_integration_style_dynamic_device_alpha(int m, int n, int k,
     for (int i = 0; i < m; ++i) {
         for (int j = 0; j < n; ++j) {
             c_gpu[(size_t) i * (size_t) n + (size_t) j] =
-                    c_gpu_padded[(size_t) j * (size_t) m + (size_t) i];
+                    c_gpu_padded[(size_t) j * (size_t) m + (size_t) i] * input_scales_b[(size_t) j];
         }
     }
 
@@ -663,8 +716,6 @@ static bool run_case_integration_style_dynamic_device_alpha(int m, int n, int k,
     CUBLASLT_CHECK(cublasLtMatrixLayoutDestroy(a_desc));
     CUBLASLT_CHECK(cublasLtMatmulDescDestroy(op_desc));
     CUBLASLT_CHECK(cublasLtDestroy(lt));
-    CUDA_CHECK(cudaFree(d_alpha));
-    CUDA_CHECK(cudaFree(d_beta));
     CUDA_CHECK(cudaFree(d_c));
     CUDA_CHECK(cudaFree(d_b_scale));
     CUDA_CHECK(cudaFree(d_a_scale));
@@ -672,7 +723,7 @@ static bool run_case_integration_style_dynamic_device_alpha(int m, int n, int k,
     CUDA_CHECK(cudaFree(d_a_data));
 
     const bool ok = max_abs_err <= 1e-2f || max_rel_err <= 1e-2f;
-    std::printf("integration-style dynamic-device-alpha m=%d n=%d k=%d q_amp=%.1f | max_abs=%.6g max_rel=%.6g | %s\n",
+    std::printf("integration-style dynamic-per-row-scale m=%d n=%d k=%d q_amp=%.1f | max_abs=%.6g max_rel=%.6g | %s\n",
             m, n, k, q_amplitude, max_abs_err, max_rel_err, ok ? "PASS" : "FAIL");
     return ok;
 }
@@ -737,12 +788,13 @@ static bool run_case_backend_batched_dynamic_rhs(
         std::vector<float> b_fp32_slice(
                 b_fp32.begin() + (ptrdiff_t) ib * (ptrdiff_t) b_slice_elems,
                 b_fp32.begin() + (ptrdiff_t) (ib + 1) * (ptrdiff_t) b_slice_elems);
-        const float global_scale_b = compute_dynamic_global_scale(b_fp32_slice);
+        std::vector<float> global_scales_b;
+        compute_dynamic_global_scales_per_row(b_fp32_slice, n, k, global_scales_b);
 
         std::vector<block_nvfp4> b_q_slice;
         std::vector<float> b_deq_slice;
-        quantize_matrix_nvfp4(b_fp32_slice, b_q_slice, n, k, global_scale_b);
-        dequantize_matrix_nvfp4(b_q_slice, b_deq_slice, n, k, global_scale_b);
+        quantize_matrix_nvfp4_per_row_scale(b_fp32_slice, b_q_slice, n, k, global_scales_b);
+        dequantize_matrix_nvfp4_per_row_scale(b_q_slice, b_deq_slice, n, k, global_scales_b);
 
         std::vector<float> c_slice;
         fp32_reference_matmul(
@@ -857,6 +909,204 @@ static bool run_case_backend_batched_dynamic_rhs(
     return ok;
 }
 
+static bool run_case_backend_batched_dynamic_rhs_permuted_lhs(
+        int m,
+        int n,
+        int k,
+        int batch_k,
+        int batch_q,
+        float global_scale_a,
+        float q_amplitude,
+        uint32_t seed) {
+    GGML_ASSERT((m % 16) == 0);
+    GGML_ASSERT((k % 16) == 0);
+    GGML_ASSERT((k % QK_NVFP4) == 0);
+    GGML_ASSERT(batch_q % batch_k == 0);
+
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist_k(-1.0f, 1.0f);
+    std::uniform_real_distribution<float> dist_q(-q_amplitude, q_amplitude);
+
+    const int q_per_k = batch_q / batch_k;
+    const size_t a_slice_elems = (size_t) m * (size_t) k;
+    const size_t b_slice_elems = (size_t) n * (size_t) k;
+    const size_t c_slice_elems = (size_t) m * (size_t) n;
+
+    std::vector<float> a_fp32((size_t) batch_k * a_slice_elems);
+    std::vector<float> b_fp32((size_t) batch_q * b_slice_elems);
+    for (float & v : a_fp32) {
+        v = dist_k(rng);
+    }
+    for (float & v : b_fp32) {
+        v = dist_q(rng);
+    }
+
+    std::vector<block_nvfp4> a_nvfp4((size_t) batch_k * (a_slice_elems / QK_NVFP4));
+    std::vector<float> a_deq((size_t) batch_k * a_slice_elems);
+    for (int ib = 0; ib < batch_k; ++ib) {
+        std::vector<block_nvfp4> a_q_slice;
+        std::vector<float> a_deq_slice;
+        std::vector<float> a_fp32_slice(
+                a_fp32.begin() + (ptrdiff_t) ib * (ptrdiff_t) a_slice_elems,
+                a_fp32.begin() + (ptrdiff_t) (ib + 1) * (ptrdiff_t) a_slice_elems);
+
+        quantize_matrix_nvfp4(a_fp32_slice, a_q_slice, m, k, global_scale_a);
+        dequantize_matrix_nvfp4(a_q_slice, a_deq_slice, m, k, global_scale_a);
+
+        std::memcpy(
+                a_nvfp4.data() + (size_t) ib * (a_slice_elems / QK_NVFP4),
+                a_q_slice.data(),
+                a_q_slice.size() * sizeof(block_nvfp4));
+        std::memcpy(
+                a_deq.data() + (size_t) ib * a_slice_elems,
+                a_deq_slice.data(),
+                a_deq_slice.size() * sizeof(float));
+    }
+
+    std::vector<float> c_ref((size_t) batch_q * c_slice_elems, 0.0f);
+    for (int ib = 0; ib < batch_q; ++ib) {
+        const int ia = ib / q_per_k;
+        std::vector<float> b_fp32_slice(
+                b_fp32.begin() + (ptrdiff_t) ib * (ptrdiff_t) b_slice_elems,
+                b_fp32.begin() + (ptrdiff_t) (ib + 1) * (ptrdiff_t) b_slice_elems);
+        std::vector<float> global_scales_b;
+        compute_dynamic_global_scales_per_row(b_fp32_slice, n, k, global_scales_b);
+
+        std::vector<block_nvfp4> b_q_slice;
+        std::vector<float> b_deq_slice;
+        quantize_matrix_nvfp4_per_row_scale(b_fp32_slice, b_q_slice, n, k, global_scales_b);
+        dequantize_matrix_nvfp4_per_row_scale(b_q_slice, b_deq_slice, n, k, global_scales_b);
+
+        std::vector<float> c_slice;
+        fp32_reference_matmul(
+                std::vector<float>(
+                        a_deq.begin() + (ptrdiff_t) ia * (ptrdiff_t) a_slice_elems,
+                        a_deq.begin() + (ptrdiff_t) (ia + 1) * (ptrdiff_t) a_slice_elems),
+                b_deq_slice,
+                c_slice,
+                m,
+                n,
+                k);
+
+        float * c_ref_slice = c_ref.data() + (size_t) ib * c_slice_elems;
+        for (int i = 0; i < m; ++i) {
+            for (int j = 0; j < n; ++j) {
+                c_ref_slice[(size_t) j * (size_t) m + (size_t) i] = c_slice[(size_t) i * (size_t) n + (size_t) j];
+            }
+        }
+    }
+
+    ggml_init_params params = {
+        /* .mem_size   = */ 16u * 1024u * 1024u,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    // Build A in a layout that requires a permute view to reach [k, m, batch_k, 1].
+    ggml_tensor * a_base = ggml_new_tensor_4d(ctx, GGML_TYPE_NVFP4, k, batch_k, m, 1);
+    ggml_tensor * a = ggml_permute(ctx, a_base, 0, 2, 1, 3);
+    ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, k, n, batch_q, 1);
+    ggml_tensor * c = ggml_mul_mat(ctx, a, b);
+    ggml_mul_mat_set_prec(c, GGML_PREC_F32);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(gf, c);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    // Store A into a_base's physical layout [k, batch_k, m, 1].
+    std::vector<block_nvfp4> a_nvfp4_base((size_t) batch_k * (a_slice_elems / QK_NVFP4));
+    {
+        const size_t row_blocks = (size_t) k / QK_NVFP4;
+        for (int ib = 0; ib < batch_k; ++ib) {
+            for (int row = 0; row < m; ++row) {
+                const block_nvfp4 * src_row =
+                        a_nvfp4.data() + ((size_t) ib * (size_t) m + (size_t) row) * row_blocks;
+                block_nvfp4 * dst_row =
+                        a_nvfp4_base.data() + ((size_t) row * (size_t) batch_k + (size_t) ib) * row_blocks;
+                std::memcpy(dst_row, src_row, row_blocks * sizeof(block_nvfp4));
+            }
+        }
+    }
+
+    ggml_backend_tensor_set(a_base, a_nvfp4_base.data(), 0, ggml_nbytes(a_base));
+    ggml_backend_tensor_set(b, b_fp32.data(), 0, b_fp32.size() * sizeof(float));
+
+#if defined(_WIN32)
+    _putenv_s("GGML_CUDA_NVFP4_NATIVE", "1");
+    _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
+    _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
+#else
+    setenv("GGML_CUDA_NVFP4_NATIVE", "1", 1);
+    setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
+    setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
+#endif
+
+    ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "backend permuted lhs compute failed: %s\n", ggml_status_to_string(status));
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> c_gpu(c_ref.size(), 0.0f);
+    ggml_backend_tensor_get(c, c_gpu.data(), 0, c_gpu.size() * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+
+    float max_abs_err = 0.0f;
+    float max_rel_err = 0.0f;
+    size_t worst_idx = 0;
+    for (size_t i = 0; i < c_ref.size(); ++i) {
+        const float ref = c_ref[i];
+        const float got = c_gpu[i];
+        const float abs_err = std::fabs(got - ref);
+        const float rel_err = abs_err / (std::fabs(ref) + 1e-6f);
+        if (abs_err > max_abs_err) {
+            max_abs_err = abs_err;
+            worst_idx = i;
+        }
+        if (rel_err > max_rel_err) {
+            max_rel_err = rel_err;
+        }
+    }
+
+    const float tol_abs = 2e-1f;
+    const float tol_rel = 5e-2f;
+    const bool ok = max_abs_err <= tol_abs || max_rel_err <= tol_rel;
+
+    std::printf(
+            "backend-permuted-lhs case m=%d n=%d k=%d batch_k=%d batch_q=%d q_amp=%.1f | max_abs=%.6g max_rel=%.6g | %s\n",
+            m, n, k, batch_k, batch_q, q_amplitude, max_abs_err, max_rel_err, ok ? "PASS" : "FAIL");
+    if (!ok) {
+        std::printf("  worst idx=%zu ref=%.8f gpu=%.8f\n", worst_idx, c_ref[worst_idx], c_gpu[worst_idx]);
+    }
+
+    return ok;
+}
+
 int main() {
     int dev_count = 0;
     const cudaError_t dev_err = cudaGetDeviceCount(&dev_count);
@@ -882,6 +1132,7 @@ int main() {
     ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 1, 1, 1.0f, 96.0f, 22u) && ok;
     ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 8, 1.0f, 96.0f, 23u) && ok;
     ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 32, 1.0f, 96.0f, 21u) && ok;
+    ok = run_case_backend_batched_dynamic_rhs_permuted_lhs(32, 16, 128, 8, 32, 1.0f, 96.0f, 24u) && ok;
 
     if (!ok) {
         std::fprintf(stderr, "test-nvfp4-matmul: FAILED\n");
