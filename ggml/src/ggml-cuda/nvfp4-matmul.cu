@@ -11,6 +11,10 @@
 
 namespace {
 
+static constexpr float GGML_CUDA_NVFP4_FP4_MAX = 6.0f;
+static constexpr float GGML_CUDA_NVFP4_E4M3_HALF_MAX = 224.0f;
+static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_HALF_MAX;
+
 #if defined(CUBLAS_VERSION)
 #define GGML_CUDA_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
 #elif defined(CUBLAS_VER_MAJOR)
@@ -61,6 +65,67 @@ static bool ggml_cuda_fetch_input_scale_f32(const ggml_tensor * scale, float & o
         default:
             return false;
     }
+}
+
+static __device__ __forceinline__ void ggml_cuda_atomic_max_f32(float * addr, float value) {
+    int * addr_i = (int *) addr;
+    int old = *addr_i;
+
+    while (__int_as_float(old) < value) {
+        const int assumed = old;
+        old = atomicCAS(addr_i, assumed, __float_as_int(value));
+        if (old == assumed) {
+            break;
+        }
+    }
+}
+
+static __global__ void ggml_cuda_nvfp4_abs_max_2d_f32(
+        const float * __restrict__ src0,
+        float * __restrict__ amax,
+        const int64_t ne00,
+        const int64_t ne01,
+        const int64_t s01) {
+    float local_max = 0.0f;
+    const int64_t ne_total = ne00 * ne01;
+
+    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < ne_total; i += (int64_t) blockDim.x * gridDim.x) {
+        const int64_t i01 = i / ne00;
+        const int64_t i00 = i - i01 * ne00;
+
+        const float v = fabsf(src0[i01 * s01 + i00]);
+        local_max = fmaxf(local_max, v);
+    }
+
+    __shared__ float shared_max[256];
+    shared_max[threadIdx.x] = local_max;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared_max[threadIdx.x] = fmaxf(shared_max[threadIdx.x], shared_max[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        ggml_cuda_atomic_max_f32(amax, shared_max[0]);
+    }
+}
+
+static __global__ void ggml_cuda_nvfp4_prepare_dynamic_alpha_kernel(
+        const float * __restrict__ amax,
+        float * __restrict__ alpha,
+        float * __restrict__ beta,
+        const float out_scale) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+
+    const float amax_f = *amax;
+    const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
+    *alpha = (global_scale != 0.0f) ? (out_scale / global_scale) : out_scale;
+    *beta = 0.0f;
 }
 
 static bool ggml_cuda_nvfp4_native_debug_enabled() {
@@ -149,10 +214,19 @@ static void ggml_cuda_nvfp4_build_cublas_triplet(int * major, int * minor, int *
     }
 }
 
-static float ggml_cuda_nvfp4_input_global_scale(const ggml_tensor * dst) {
+static float ggml_cuda_nvfp4_input_global_scale(
+        const ggml_tensor * dst,
+        bool * used_dynamic_scale = nullptr) {
     const ggml_tensor * scale = ggml_mul_mat_get_nvfp4_input_scale(dst);
     if (scale == nullptr) {
+        if (used_dynamic_scale != nullptr) {
+            *used_dynamic_scale = true;
+        }
         return 1.0f;
+    }
+
+    if (used_dynamic_scale != nullptr) {
+        *used_dynamic_scale = false;
     }
 
     float input_scale = 0.0f;
@@ -247,6 +321,47 @@ static __global__ void quantize_row_nvfp4_kernel(
     }
 }
 
+static __global__ void quantize_row_nvfp4_dynamic_kernel(
+        const float * __restrict__ x,
+        block_nvfp4 * __restrict__ y,
+        const int64_t ne00,
+        const int64_t s01,
+        const float * __restrict__ amax) {
+    const int lane = threadIdx.x;
+    const bool lane_active = lane < QK_NVFP4;
+
+    const int ib = blockIdx.x;
+    const int i1 = blockIdx.y;
+    const int64_t k0 = (int64_t) ib * QK_NVFP4 + lane;
+    const float xi = (lane_active && k0 < ne00) ? x[(int64_t) i1 * s01 + k0] : 0.0f;
+
+    float vmax = fabsf(xi);
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 8, WARP_SIZE));
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 4, WARP_SIZE));
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 2, WARP_SIZE));
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 1, WARP_SIZE));
+    vmax = __shfl_sync(0xFFFFFFFF, vmax, 0, WARP_SIZE);
+
+    float scale_f = 0.0f;
+    const float amax_f = *amax;
+    const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
+    if (lane == 0) {
+        const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
+        const uint8_t scale_q = ggml_cuda_best_index_e4m3(scale);
+        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].e = scale_q;
+        scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
+    }
+    scale_f = __shfl_sync(0xFFFFFFFF, scale_f, 0, WARP_SIZE);
+
+    const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
+    const uint8_t q = ggml_cuda_best_index_nvfp4(xi * inv_scale);
+    const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
+
+    if (lane_active && (lane & 1) == 0) {
+        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].qs[lane/2] = q | (q_peer << 4);
+    }
+}
+
 static void quantize_row_nvfp4_cuda(
         const float * x,
         block_nvfp4 * y,
@@ -260,6 +375,22 @@ static void quantize_row_nvfp4_cuda(
     const dim3 num_blocks((uint32_t) (ne00 / QK_NVFP4), (uint32_t) ne01, 1);
     const dim3 block_size(WARP_SIZE, 1, 1);
     quantize_row_nvfp4_kernel<<<num_blocks, block_size, 0, stream>>>(x, y, ne00, s01, global_scale);
+}
+
+static void quantize_row_nvfp4_dynamic_cuda(
+        const float * x,
+        block_nvfp4 * y,
+        const int64_t ne00,
+        const int64_t s01,
+        const int64_t ne01,
+        const float * amax,
+        cudaStream_t stream) {
+    GGML_ASSERT(ne00 % QK_NVFP4 == 0);
+
+    const dim3 num_blocks((uint32_t) (ne00 / QK_NVFP4), (uint32_t) ne01, 1);
+    const dim3 block_size(WARP_SIZE, 1, 1);
+
+    quantize_row_nvfp4_dynamic_kernel<<<num_blocks, block_size, 0, stream>>>(x, y, ne00, s01, amax);
 }
 
 struct ggml_cuda_nvfp4_split_matrix {
@@ -487,6 +618,49 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
 }
 #endif
 
+static ggml_tensor ggml_cuda_nvfp4_make_matrix_slice(
+        const ggml_tensor * src,
+        const int64_t i2,
+        const int64_t i3) {
+    ggml_tensor slice = *src;
+    slice.data = (char *) src->data + i2 * src->nb[2] + i3 * src->nb[3];
+    slice.ne[2] = 1;
+    slice.ne[3] = 1;
+    slice.nb[2] = slice.nb[1] * slice.ne[1];
+    slice.nb[3] = slice.nb[2] * slice.ne[2];
+    return slice;
+}
+
+static void ggml_cuda_nvfp4_materialize_contiguous_matrix(
+        ggml_backend_cuda_context & ctx,
+        ggml_tensor & slice,
+        ggml_cuda_pool_alloc<char> & storage,
+        cudaStream_t stream) {
+    if (!ggml_is_transposed(&slice) && ggml_is_contiguous(&slice)) {
+        return;
+    }
+
+    const size_t row_bytes = ggml_row_size(slice.type, slice.ne[0]);
+    const size_t total_bytes = row_bytes * (size_t) slice.ne[1];
+    storage.alloc(ctx.pool(), total_bytes);
+
+    CUDA_CHECK(cudaMemcpy2DAsync(
+            storage.get(),
+            row_bytes,
+            slice.data,
+            slice.nb[1],
+            row_bytes,
+            slice.ne[1],
+            cudaMemcpyDeviceToDevice,
+            stream));
+
+    slice.data = storage.get();
+    slice.nb[0] = ggml_type_size(slice.type);
+    slice.nb[1] = row_bytes;
+    slice.nb[2] = row_bytes * slice.ne[1];
+    slice.nb[3] = slice.nb[2] * slice.ne[2];
+}
+
 } // namespace
 
 bool ggml_cuda_mul_mat_nvfp4_native(
@@ -524,10 +698,39 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         return false;
     }
 
-    // This pass intentionally handles only dense, non-batched MUL_MAT.
     if (src0->ne[2] != 1 || src0->ne[3] != 1 || src1->ne[2] != 1 || src1->ne[3] != 1 || dst->ne[2] != 1 || dst->ne[3] != 1) {
-        log_skip("batched tensor shape not supported");
-        return false;
+        if (!ggml_is_contiguous(dst)) {
+            log_skip("batched path requires contiguous dst tensor");
+            return false;
+        }
+
+        if (src1->ne[2] % src0->ne[2] != 0 || src1->ne[3] % src0->ne[3] != 0) {
+            log_skip("batched tensor shape broadcast is not supported");
+            return false;
+        }
+
+        const int64_t r2 = src1->ne[2] / src0->ne[2];
+        const int64_t r3 = src1->ne[3] / src0->ne[3];
+        cudaStream_t stream = ctx.stream();
+
+        for (int64_t i3 = 0; i3 < src1->ne[3]; ++i3) {
+            for (int64_t i2 = 0; i2 < src1->ne[2]; ++i2) {
+                ggml_tensor src0_slice = ggml_cuda_nvfp4_make_matrix_slice(src0, i2 / r2, i3 / r3);
+                ggml_tensor src1_slice = ggml_cuda_nvfp4_make_matrix_slice(src1, i2, i3);
+                ggml_tensor dst_slice  = ggml_cuda_nvfp4_make_matrix_slice(dst,  i2, i3);
+                ggml_cuda_pool_alloc<char> src0_contig(ctx.pool());
+                ggml_cuda_pool_alloc<char> src1_contig(ctx.pool());
+
+                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src0_slice, src0_contig, stream);
+                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src1_slice, src1_contig, stream);
+
+                if (!ggml_cuda_mul_mat_nvfp4_native(ctx, &src0_slice, &src1_slice, &dst_slice)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     if (ggml_is_transposed(src0) || ggml_is_transposed(src1) || !ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
@@ -580,15 +783,54 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     const int64_t scale_inner_padded = ggml_cuda_pad_i64(nblk_k, 4);
     const int64_t scale_outer_padded_b = ggml_cuda_pad_i64(ne11_padded, 128);
 
+    float out_scale = 1.0f;
+    if (const ggml_tensor * scale = ggml_mul_mat_get_nvfp4_weight_scale(dst)) {
+        float scale_val = 0.0f;
+        if (ggml_cuda_fetch_input_scale_f32(scale, scale_val) && std::isfinite(scale_val)) {
+            out_scale = scale_val;
+        }
+    }
+
     ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4(ctx.pool(), (size_t) nblk_k * (size_t) ne11);
     ggml_cuda_pool_alloc<uint8_t> src1_repacked_data(ctx.pool(), (size_t) ne11_padded * (size_t) ne10 / 2);
     ggml_cuda_pool_alloc<uint8_t> src1_repacked_scale(ctx.pool(), (size_t) scale_outer_padded_b * (size_t) scale_inner_padded);
+    ggml_cuda_pool_alloc<float> dynamic_amax(ctx.pool(), 1);
+    ggml_cuda_pool_alloc<float> dynamic_alpha(ctx.pool(), 1);
+    ggml_cuda_pool_alloc<float> dynamic_beta(ctx.pool(), 1);
 
-    const float global_scale = ggml_cuda_nvfp4_input_global_scale(dst);
-    quantize_row_nvfp4_cuda(
-            (const float *) src1->data, src1_q_nvfp4.get(),
-            ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
-            global_scale, stream);
+    bool used_dynamic_scale = ggml_mul_mat_get_nvfp4_input_scale(dst) == nullptr;
+    float global_scale = ggml_cuda_nvfp4_input_global_scale(dst, &used_dynamic_scale);
+    if (used_dynamic_scale) {
+        CUDA_CHECK(cudaMemsetAsync(dynamic_amax.get(), 0, sizeof(float), stream));
+
+        const int block_size = 256;
+        const int64_t ne_total = ne10 * ne11;
+        const int grid_size = (int) std::min<int64_t>((ne_total + block_size - 1) / block_size, 4096);
+        ggml_cuda_nvfp4_abs_max_2d_f32<<<grid_size, block_size, 0, stream>>>(
+                (const float *) src1->data,
+                dynamic_amax.get(),
+                ne10,
+                ne11,
+                src1->nb[1] / (int64_t) sizeof(float));
+        CUDA_CHECK(cudaGetLastError());
+
+        ggml_cuda_nvfp4_prepare_dynamic_alpha_kernel<<<1, 1, 0, stream>>>(
+                dynamic_amax.get(),
+                dynamic_alpha.get(),
+                dynamic_beta.get(),
+                out_scale);
+        CUDA_CHECK(cudaGetLastError());
+
+        quantize_row_nvfp4_dynamic_cuda(
+                (const float *) src1->data, src1_q_nvfp4.get(),
+                ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
+                dynamic_amax.get(), stream);
+    } else {
+        quantize_row_nvfp4_cuda(
+                (const float *) src1->data, src1_q_nvfp4.get(),
+                ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
+                global_scale, stream);
+    }
     CUDA_CHECK(cudaGetLastError());
 
     ggml_cuda_nvfp4_split_blocks_cuda(
@@ -630,8 +872,8 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 (long long) scale_inner_padded);
         GGML_LOG_INFO("%s: scale layout mode for %s: %s\n",
                 __func__, ggml_get_name(dst), linear_scale_layout ? "linear" : "tiled-128x4");
-        GGML_LOG_INFO("%s: alpha mode for %s: out_scale/global_scale\n",
-                __func__, ggml_get_name(dst));
+        GGML_LOG_INFO("%s: alpha mode for %s: out_scale/global_scale (%s)\n",
+                __func__, ggml_get_name(dst), used_dynamic_scale ? "dynamic-rhs" : "bound-scale");
 
         // Compare first-row source scale bytes against repacked channel bytes.
         // This helps verify channel split/indexing before Lt matmul.
@@ -906,6 +1148,11 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         stage = "matmul_desc_set_b_scale_ptr";
         st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr));
     }
+    if (st == CUBLAS_STATUS_SUCCESS && used_dynamic_scale) {
+        const cublasLtPointerMode_t pointer_mode = CUBLASLT_POINTER_MODE_DEVICE;
+        stage = "matmul_desc_set_pointer_mode_device";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode));
+    }
 #else
     static std::atomic<bool> logged(false);
     if (verbose_skip || !logged.exchange(true)) {
@@ -954,13 +1201,6 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) ne01, (uint64_t) ne11_padded, (int64_t) ne01);
     }
 
-    float out_scale = 1.0f;
-    if (const ggml_tensor * scale = ggml_mul_mat_get_nvfp4_weight_scale(dst)) {
-        float scale_val = 0.0f;
-        if (ggml_cuda_fetch_input_scale_f32(scale, scale_val) && std::isfinite(scale_val)) {
-            out_scale = scale_val;
-        }
-    }
     // cuBLASLt FP4 path applies the channel scale directly to packed FP4 values.
     // Our activation quantization uses x ~= q * (scale / global_scale), so account
     // for the missing 1/global_scale factor in alpha.
@@ -970,13 +1210,15 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         stage = "matmul";
         const float alpha = matmul_alpha;
         const float beta  = 0.0f;
+        const void * alpha_ptr = used_dynamic_scale ? (const void *) dynamic_alpha.get() : (const void *) &alpha;
+        const void * beta_ptr  = used_dynamic_scale ? (const void *) dynamic_beta.get()  : (const void *) &beta;
         st = cublasLtMatmul(
                 ctx.cublaslt_handle(),
                 op_desc,
-                &alpha,
+                alpha_ptr,
                 src0_repacked.data, a_desc,
                 src1_repacked_data.get(), b_desc,
-                &beta,
+                beta_ptr,
                 dst_data, c_desc,
                 dst_data, c_desc,
                 nullptr,
@@ -991,7 +1233,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 cudaMemcpyDeviceToDevice, stream));
     }
 
-    if (st == CUBLAS_STATUS_SUCCESS && validate_enabled && ne10 % QK_NVFP4 == 0 && ne01 > 0 && ne11 > 0) {
+    if (st == CUBLAS_STATUS_SUCCESS && validate_enabled && !used_dynamic_scale && ne10 % QK_NVFP4 == 0 && ne01 > 0 && ne11 > 0) {
         static std::atomic<bool> logged(false);
         if (debug_enabled || !logged.exchange(true)) {
             const int64_t nblk = ne10 / QK_NVFP4;
