@@ -384,7 +384,7 @@ static void print_usage(int /* argc */, char ** argv) {
         "'first-last' or 'first-last+step' or 'first-last*mult'.\n");
 }
 
-static ggml_type ggml_type_from_name(const std::string & s) {
+static ggml_type ggml_type_from_name(const std::string & s, bool allow_nvfp4 = true) {
     if (s == "f16") {
         return GGML_TYPE_F16;
     }
@@ -409,7 +409,7 @@ static ggml_type ggml_type_from_name(const std::string & s) {
     if (s == "iq4_nl") {
         return GGML_TYPE_IQ4_NL;
     }
-    if (s == "nvfp4") {
+    if (allow_nvfp4 && s == "nvfp4") {
         return GGML_TYPE_NVFP4;
     }
 
@@ -525,7 +525,7 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
 
                 std::vector<ggml_type> types;
                 for (const auto & t : p) {
-                    ggml_type gt = ggml_type_from_name(t);
+                    ggml_type gt = ggml_type_from_name(t, false);
                     if (gt == GGML_TYPE_COUNT) {
                         invalid_param = true;
                         break;

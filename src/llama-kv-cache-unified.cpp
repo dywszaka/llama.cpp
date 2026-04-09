@@ -35,7 +35,6 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     GGML_ASSERT(kv_size % n_pad == 0);
 
     has_k_scale = type_k == GGML_TYPE_NVFP4;
-    has_v_scale = type_v == GGML_TYPE_NVFP4;
 
     // TODO: this is temporary until we support passing reuse layer filters [KV_REUSE]
     auto n_layer_cache = hparams.n_layer;
@@ -131,7 +130,6 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         ggml_tensor * k;
         ggml_tensor * v;
         ggml_tensor * k_scale = nullptr;
-        ggml_tensor * v_scale = nullptr;
 
         k = ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream);
         v = ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream);
@@ -140,10 +138,6 @@ llama_kv_cache_unified::llama_kv_cache_unified(
             k_scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (int64_t) kv_size * n_stream);
             ggml_format_name(k_scale, "cache_k_gscale_l%d", il);
         }
-        if (has_v_scale) {
-            v_scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (int64_t) kv_size * n_stream);
-            ggml_format_name(v_scale, "cache_v_gscale_l%d", il);
-        }
 
         ggml_format_name(k, "cache_k_l%d", il);
         ggml_format_name(v, "cache_v_l%d", il);
@@ -151,7 +145,6 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
         std::vector<ggml_tensor *> k_scale_stream;
-        std::vector<ggml_tensor *> v_scale_stream;
 
         for (uint32_t s = 0; s < n_stream; ++s) {
             k_stream.push_back(ggml_view_2d(ctx, k, n_embd_k_gqa, kv_size, k->nb[1], s*k->nb[2]));
@@ -159,14 +152,11 @@ llama_kv_cache_unified::llama_kv_cache_unified(
             if (k_scale) {
                 k_scale_stream.push_back(ggml_view_1d(ctx, k_scale, kv_size, (int64_t) s * kv_size * sizeof(float)));
             }
-            if (v_scale) {
-                v_scale_stream.push_back(ggml_view_1d(ctx, v_scale, kv_size, (int64_t) s * kv_size * sizeof(float)));
-            }
         }
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_scale, v_scale, k_stream, v_stream, k_scale_stream, v_scale_stream, });
+        layers.push_back({ il, k, v, k_scale, k_stream, v_stream, k_scale_stream, });
     }
 
     // TODO: this is temporary until we support passing reuse layer filters [KV_REUSE]
@@ -682,9 +672,6 @@ bool llama_kv_cache_unified::update(llama_context * lctx, bool do_shift, const d
                 if (layer.k_scale) {
                     ggml_backend_tensor_copy(layer.k_scale_stream[ssrc], layer.k_scale_stream[sdst]);
                 }
-                if (layer.v_scale) {
-                    ggml_backend_tensor_copy(layer.v_scale_stream[ssrc], layer.v_scale_stream[sdst]);
-                }
             }
         }
     }
@@ -1118,7 +1105,6 @@ ggml_tensor * llama_kv_cache_unified::get_v(ggml_context * ctx, int32_t il, uint
     const int32_t ikv = map_layer_ids.at(il);
 
     auto * v = layers[ikv].v;
-    auto * v_scale = layers[ikv].v_scale;
 
     const uint64_t kv_size      = get_size();
     const uint64_t n_embd_v_gqa = v->ne[0];
@@ -1137,16 +1123,6 @@ ggml_tensor * llama_kv_cache_unified::get_v(ggml_context * ctx, int32_t il, uint
                 ggml_row_size(v->type, n_embd_v_gqa*kv_size), // v->nb[3]
                 ggml_row_size(v->type, n_embd_v_gqa*kv_size)*sinfo.s0);
 
-        if (v_scale) {
-            ggml_tensor * scale = ggml_view_4d(ctx, v_scale,
-                    n_kv, 1, 1, ns,
-                    0,
-                    0,
-                    (int64_t) kv_size * sizeof(float),
-                    (int64_t) sinfo.s0 * kv_size * sizeof(float));
-            ggml_tensor_set_nvfp4_scale(res, scale);
-        }
-
         return res;
     }
 
@@ -1157,16 +1133,6 @@ ggml_tensor * llama_kv_cache_unified::get_v(ggml_context * ctx, int32_t il, uint
             ggml_row_size(v->type, kv_size),                          // v->nb[2]
             ggml_row_size(v->type, kv_size*n_embd_v_gqa), // v->nb[3]
             ggml_row_size(v->type, kv_size*n_embd_v_gqa)*sinfo.s0);
-
-    if (v_scale) {
-        ggml_tensor * scale = ggml_view_4d(ctx, v_scale,
-                n_kv, 1, 1, ns,
-                sizeof(float),
-                0,
-                0,
-                (int64_t) sinfo.s0 * kv_size * sizeof(float));
-        ggml_tensor_set_nvfp4_scale(res, scale);
-    }
 
     return res;
 }
@@ -1221,14 +1187,8 @@ ggml_tensor * llama_kv_cache_unified::cpy_v(ggml_context * ctx, ggml_tensor * v_
                 v = ggml_reshape_2d(ctx, v, v->ne[0], v->ne[1]*v->ne[2]);
             }
 
-            ggml_tensor * res = ggml_set_rows(ctx, v, v_cur, v_idxs);
-            if (layers[ikv].v_scale) {
-                ggml_tensor_set_nvfp4_scale(res, layers[ikv].v_scale);
-            }
-            return res;
+            return ggml_set_rows(ctx, v, v_cur, v_idxs);
         }
-
-        GGML_ASSERT(layers[ikv].v_scale == nullptr && "NVFP4 V cache requires non-transposed V storage");
 
         // [TAG_V_CACHE_VARIABLE]
         if (n_embd_v_gqa < v->ne[0]) {
@@ -1720,8 +1680,6 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_defrag(
             ggml_tensor * view_v_dst;
             ggml_tensor * view_k_scale_src = nullptr;
             ggml_tensor * view_k_scale_dst = nullptr;
-            ggml_tensor * view_v_scale_src = nullptr;
-            ggml_tensor * view_v_scale_dst = nullptr;
 
             if (cparams.flash_attn) {
                 // NOTE: the V cache is not transposed when using flash attention
@@ -1753,12 +1711,6 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_defrag(
                 view_k_scale_src = ggml_view_1d(ctx, layer.k_scale, nm, i * sizeof(float));
                 view_k_scale_dst = ggml_view_1d(ctx, layer.k_scale, nm, id * sizeof(float));
                 ggml_build_forward_expand(gf, ggml_cpy(ctx, view_k_scale_src, view_k_scale_dst));
-            }
-
-            if (layer.v_scale) {
-                view_v_scale_src = ggml_view_1d(ctx, layer.v_scale, nm, i * sizeof(float));
-                view_v_scale_dst = ggml_view_1d(ctx, layer.v_scale, nm, id * sizeof(float));
-                ggml_build_forward_expand(gf, ggml_cpy(ctx, view_v_scale_src, view_v_scale_dst));
             }
         }
 
@@ -2106,15 +2058,6 @@ void llama_kv_cache_unified::state_write_data(llama_io_write_i & io, const cell_
                 io.write_tensor(v, range.first * v_size_row, buf_size);
             }
 
-            const uint32_t has_scale = layer.v_scale ? 1u : 0u;
-            io.write(&has_scale, sizeof(has_scale));
-            if (layer.v_scale) {
-                auto * v_scale = layer.v_scale_stream[cr.strm];
-                for (const auto & range : cr.data) {
-                    const size_t range_size = range.second - range.first;
-                    io.write_tensor(v_scale, range.first * sizeof(float), range_size * sizeof(float));
-                }
-            }
         }
     } else {
         // When v is transposed, we also need the element size and get the element ranges from each row
@@ -2149,15 +2092,6 @@ void llama_kv_cache_unified::state_write_data(llama_io_write_i & io, const cell_
                 }
             }
 
-            const uint32_t has_scale = layer.v_scale ? 1u : 0u;
-            io.write(&has_scale, sizeof(has_scale));
-            if (layer.v_scale) {
-                auto * v_scale = layer.v_scale_stream[cr.strm];
-                for (const auto & range : cr.data) {
-                    const size_t range_size = range.second - range.first;
-                    io.write_tensor(v_scale, range.first * sizeof(float), range_size * sizeof(float));
-                }
-            }
         }
     }
 }
@@ -2357,15 +2291,6 @@ bool llama_kv_cache_unified::state_read_data(llama_io_read_i & io, uint32_t strm
                 ggml_backend_tensor_set(v, io.read(cell_count * v_size_row), head * v_size_row, cell_count * v_size_row);
             }
 
-            uint32_t has_scale_ref = 0;
-            io.read_to(&has_scale_ref, sizeof(has_scale_ref));
-            if ((layer.v_scale != nullptr) != (has_scale_ref != 0)) {
-                LLAMA_LOG_ERROR("%s: mismatched value scale sidecar presence (layer %d)\n", __func__, il);
-                return false;
-            }
-            if (cell_count && layer.v_scale) {
-                ggml_backend_tensor_set(layer.v_scale_stream[strm], io.read(cell_count * sizeof(float)), head * sizeof(float), cell_count * sizeof(float));
-            }
         }
     } else {
         // For each layer, read the values for each cell (transposed)
@@ -2410,15 +2335,6 @@ bool llama_kv_cache_unified::state_read_data(llama_io_read_i & io, uint32_t strm
                 }
             }
 
-            uint32_t has_scale_ref = 0;
-            io.read_to(&has_scale_ref, sizeof(has_scale_ref));
-            if ((layer.v_scale != nullptr) != (has_scale_ref != 0)) {
-                LLAMA_LOG_ERROR("%s: mismatched value scale sidecar presence (layer %d)\n", __func__, il);
-                return false;
-            }
-            if (cell_count && layer.v_scale) {
-                ggml_backend_tensor_set(layer.v_scale_stream[strm], io.read(cell_count * sizeof(float)), head * sizeof(float), cell_count * sizeof(float));
-            }
         }
     }
 

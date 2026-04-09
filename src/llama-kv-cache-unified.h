@@ -210,17 +210,14 @@ private:
         ggml_tensor * k;
         ggml_tensor * v;
         ggml_tensor * k_scale;
-        ggml_tensor * v_scale;
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
         std::vector<ggml_tensor *> k_scale_stream;
-        std::vector<ggml_tensor *> v_scale_stream;
     };
 
     bool v_trans = true;  // the value tensor is transposed
     bool has_k_scale = false;
-    bool has_v_scale = false;
 
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;

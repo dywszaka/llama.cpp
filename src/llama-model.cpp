@@ -18160,7 +18160,7 @@ struct llm_build_smallthinker : public llm_graph_context{
 
 llama_memory_i * llama_model::create_memory(const llama_memory_params & params, llama_cparams & cparams) const {
     llama_memory_i * res;
-    const bool attn_v_trans = !cparams.flash_attn && params.type_v != GGML_TYPE_NVFP4;
+    const bool attn_v_trans = !cparams.flash_attn;
 
     switch (arch) {
         // Models that need specific instantiation should be handled in the
