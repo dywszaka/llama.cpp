@@ -630,6 +630,22 @@ static void dequantize_row_nvfp4_cuda(const void * vx, dst_t * y, const int64_t 
     dequantize_block_nvfp4<<<nb, 32, 0, stream>>>(vx, y);
 }
 
+template <typename dst_t, ggml_type type>
+static __global__ void dequantize_block_fp8_e4m3(const uint8_t * __restrict__ x, dst_t * __restrict__ y, const int64_t k) {
+    const int64_t i = (int64_t) blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= k) {
+        return;
+    }
+
+    y[i] = (dst_t) ggml_cuda_dequantize_fp8_e4m3(x[i], type);
+}
+
+template<typename dst_t, ggml_type type>
+static void dequantize_row_fp8_e4m3_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int nb = (k + CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / CUDA_DEQUANTIZE_BLOCK_SIZE;
+    dequantize_block_fp8_e4m3<dst_t, type><<<nb, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>((const uint8_t *) vx, y, k);
+}
+
 template<typename dst_t>
 static void dequantize_row_nvfp4_nc_cuda(const void * vx, dst_t * y,
         const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
@@ -642,6 +658,23 @@ static void dequantize_row_nvfp4_nc_cuda(const void * vx, dst_t * y,
                 const void * x_row = x_bytes + x_off;
                 dst_t * y_row = y + ((i03*ne02 + i02)*ne01 + i01)*ne00;
                 dequantize_row_nvfp4_cuda(x_row, y_row, ne00, stream);
+            }
+        }
+    }
+}
+
+template<typename dst_t, ggml_type type>
+static void dequantize_row_fp8_e4m3_nc_cuda(const void * vx, dst_t * y,
+        const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
+        const int64_t s01, const int64_t s02, const int64_t s03, cudaStream_t stream) {
+    const char * x_bytes = (const char *) vx;
+    for (int64_t i03 = 0; i03 < ne03; ++i03) {
+        for (int64_t i02 = 0; i02 < ne02; ++i02) {
+            for (int64_t i01 = 0; i01 < ne01; ++i01) {
+                const size_t x_off = i03*s03 + i02*s02 + i01*s01;
+                const void * x_row = x_bytes + x_off;
+                dst_t * y_row = y + ((i03*ne02 + i02)*ne01 + i01)*ne00;
+                dequantize_row_fp8_e4m3_cuda<dst_t, type>(x_row, y_row, ne00, stream);
             }
         }
     }
@@ -742,6 +775,10 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_row_iq4_xs_cuda;
         case GGML_TYPE_IQ3_S:
             return dequantize_row_iq3_s_cuda;
+        case GGML_TYPE_FP8_E4M3_S3:
+            return dequantize_row_fp8_e4m3_cuda<half, GGML_TYPE_FP8_E4M3_S3>;
+        case GGML_TYPE_FP8_E4M3_S5:
+            return dequantize_row_fp8_e4m3_cuda<half, GGML_TYPE_FP8_E4M3_S5>;
         case GGML_TYPE_MXFP4:
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
@@ -795,6 +832,10 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return dequantize_row_iq4_xs_cuda;
         case GGML_TYPE_IQ3_S:
             return dequantize_row_iq3_s_cuda;
+        case GGML_TYPE_FP8_E4M3_S3:
+            return dequantize_row_fp8_e4m3_cuda<float, GGML_TYPE_FP8_E4M3_S3>;
+        case GGML_TYPE_FP8_E4M3_S5:
+            return dequantize_row_fp8_e4m3_cuda<float, GGML_TYPE_FP8_E4M3_S5>;
         case GGML_TYPE_MXFP4:
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
@@ -822,6 +863,10 @@ to_fp16_nc_cuda_t ggml_get_to_fp16_nc_cuda(ggml_type type) {
             return dequantize_block_cuda<QK5_1, QR5_1, dequantize_q5_1>;
         case GGML_TYPE_Q8_0:
             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
+        case GGML_TYPE_FP8_E4M3_S3:
+            return dequantize_row_fp8_e4m3_nc_cuda<half, GGML_TYPE_FP8_E4M3_S3>;
+        case GGML_TYPE_FP8_E4M3_S5:
+            return dequantize_row_fp8_e4m3_nc_cuda<half, GGML_TYPE_FP8_E4M3_S5>;
         case GGML_TYPE_NVFP4:
             return dequantize_row_nvfp4_nc_cuda<half>;
         case GGML_TYPE_BF16:
@@ -845,6 +890,10 @@ to_bf16_nc_cuda_t ggml_get_to_bf16_nc_cuda(ggml_type type) {
             return dequantize_block_cuda<QK5_1, QR5_1, dequantize_q5_1>;
         case GGML_TYPE_Q8_0:
             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
+        case GGML_TYPE_FP8_E4M3_S3:
+            return dequantize_row_fp8_e4m3_nc_cuda<nv_bfloat16, GGML_TYPE_FP8_E4M3_S3>;
+        case GGML_TYPE_FP8_E4M3_S5:
+            return dequantize_row_fp8_e4m3_nc_cuda<nv_bfloat16, GGML_TYPE_FP8_E4M3_S5>;
         case GGML_TYPE_NVFP4:
             return dequantize_row_nvfp4_nc_cuda<nv_bfloat16>;
         case GGML_TYPE_F16:
@@ -868,6 +917,10 @@ to_fp32_nc_cuda_t ggml_get_to_fp32_nc_cuda(ggml_type type) {
             return dequantize_block_cuda<QK5_1, QR5_1, dequantize_q5_1>;
         case GGML_TYPE_Q8_0:
             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
+        case GGML_TYPE_FP8_E4M3_S3:
+            return dequantize_row_fp8_e4m3_nc_cuda<float, GGML_TYPE_FP8_E4M3_S3>;
+        case GGML_TYPE_FP8_E4M3_S5:
+            return dequantize_row_fp8_e4m3_nc_cuda<float, GGML_TYPE_FP8_E4M3_S5>;
         case GGML_TYPE_NVFP4:
             return dequantize_row_nvfp4_nc_cuda<float>;
         case GGML_TYPE_BF16:

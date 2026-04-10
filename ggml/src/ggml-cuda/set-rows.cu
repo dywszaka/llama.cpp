@@ -157,6 +157,14 @@ static __global__ void k_set_rows_scale(
     scale[dst_row] = input_scale;
 }
 
+static __device__ __forceinline__ void quantize_f32_fp8_e4m3_s3(const float * x, uint8_t * y) {
+    y[0] = ggml_cuda_quantize_fp8_e4m3(x[0], GGML_TYPE_FP8_E4M3_S3);
+}
+
+static __device__ __forceinline__ void quantize_f32_fp8_e4m3_s5(const float * x, uint8_t * y) {
+    y[0] = ggml_cuda_quantize_fp8_e4m3(x[0], GGML_TYPE_FP8_E4M3_S5);
+}
+
 // Generic quantized set_rows kernel template
 template<typename block_type, int qk, void (*quantize_func)(const float*, block_type*)>
 static __global__ void k_set_rows_quant(
@@ -399,6 +407,26 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     } else if (dst->type == GGML_TYPE_Q8_0) {
         set_rows_cuda_quant<block_q8_0, QK8_0, quantize_f32_q8_0_block>(
             src0_d, src1_d, (block_q8_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_FP8_E4M3_S3) {
+        set_rows_cuda_quant<uint8_t, 1, quantize_f32_fp8_e4m3_s3>(
+            src0_d, src1_d, (uint8_t *) dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_FP8_E4M3_S5) {
+        set_rows_cuda_quant<uint8_t, 1, quantize_f32_fp8_e4m3_s5>(
+            src0_d, src1_d, (uint8_t *) dst->data,
             ne00, ne01, ne02, ne03,
             ne10, ne11, ne12, ne13,
             nb01, nb02, nb03,

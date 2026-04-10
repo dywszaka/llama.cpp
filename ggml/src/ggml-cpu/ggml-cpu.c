@@ -255,6 +255,16 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_Q8_1,
         .nrows                    = 1,
     },
+    [GGML_TYPE_FP8_E4M3_S3] = {
+        .from_float               = quantize_row_fp8_e4m3_s3,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_FP8_E4M3_S5] = {
+        .from_float               = quantize_row_fp8_e4m3_s5,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
     [GGML_TYPE_MXFP4] = {
         .from_float               = quantize_row_mxfp4,
         .vec_dot                  = ggml_vec_dot_mxfp4_q8_0,

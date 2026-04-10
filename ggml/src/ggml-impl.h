@@ -519,6 +519,21 @@ static inline float ggml_e4m3_to_fp32_half(uint8_t x) {
 #define GGML_E4M3_TO_FP32(x) ggml_e4m3_to_fp32(x)
 #define GGML_E4M3_TO_FP32_HALF(x) ggml_e4m3_to_fp32_half(x)
 
+static inline bool ggml_is_fp8_e4m3(enum ggml_type type) {
+    return type == GGML_TYPE_FP8_E4M3_S3 || type == GGML_TYPE_FP8_E4M3_S5;
+}
+
+static inline float ggml_fp8_e4m3_scale(enum ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_FP8_E4M3_S3:
+            return 448.0f / 3.0f;
+        case GGML_TYPE_FP8_E4M3_S5:
+            return 448.0f / 5.0f;
+        default:
+            return 0.0f;
+    }
+}
+
 /**
  * Converts brain16 to float32.
  *

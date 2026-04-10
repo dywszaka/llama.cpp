@@ -598,6 +598,30 @@ static __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32_half(uint8_t x) {
     return ggml_cuda_e4m3_to_fp32(x) * 0.5f;
 }
 
+static __host__ __device__ __forceinline__ bool ggml_cuda_is_fp8_e4m3(ggml_type type) {
+    return type == GGML_TYPE_FP8_E4M3_S3 || type == GGML_TYPE_FP8_E4M3_S5;
+}
+
+static __host__ __device__ __forceinline__ float ggml_cuda_fp8_e4m3_scale(ggml_type type) {
+    return type == GGML_TYPE_FP8_E4M3_S3 ? (448.0f / 3.0f) :
+           type == GGML_TYPE_FP8_E4M3_S5 ? (448.0f / 5.0f) : 0.0f;
+}
+
+static __host__ __device__ __forceinline__ uint8_t ggml_cuda_quantize_fp8_e4m3(float x, ggml_type type) {
+    const float scale = ggml_cuda_fp8_e4m3_scale(type);
+    return scale != 0.0f ? __nv_cvt_float_to_fp8(x * scale, __NV_SATFINITE, __NV_E4M3) : 0;
+}
+
+static __host__ __device__ __forceinline__ float ggml_cuda_dequantize_fp8_e4m3(uint8_t x, ggml_type type) {
+    const float scale = ggml_cuda_fp8_e4m3_scale(type);
+    return scale != 0.0f ? (ggml_cuda_e4m3_to_fp32(x) / scale) : 0.0f;
+}
+
+static __host__ __device__ __forceinline__ float ggml_cuda_quantize_dequantize_fp8_e4m3_prob(float x) {
+    const uint8_t q = __nv_cvt_float_to_fp8(x * 448.0f, __NV_SATFINITE, __NV_E4M3);
+    return ggml_cuda_e4m3_to_fp32(q) / 448.0f;
+}
+
 typedef void (*dequantize_kernel_t)(const void * vx, const int64_t ib, const int iqs, dfloat2 & v);
 
 static __device__ __forceinline__ float get_alibi_slope(
@@ -654,6 +678,20 @@ struct ggml_cuda_type_traits<GGML_TYPE_Q8_0> {
     static constexpr int qk = QK8_0;
     static constexpr int qr = QR8_0;
     static constexpr int qi = QI8_0;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_FP8_E4M3_S3> {
+    static constexpr int qk = 1;
+    static constexpr int qr = 1;
+    static constexpr int qi = 1;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_FP8_E4M3_S5> {
+    static constexpr int qk = 1;
+    static constexpr int qr = 1;
+    static constexpr int qi = 1;
 };
 
 template<>

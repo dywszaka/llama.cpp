@@ -46,6 +46,14 @@ void quantize_row_q8_1_generic(const float * GGML_RESTRICT x, void * GGML_RESTRI
     quantize_row_q8_1_ref(x, y, k);
 }
 
+void quantize_row_fp8_e4m3_s3(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_fp8_e4m3_s3_ref(x, (uint8_t *) y, k);
+}
+
+void quantize_row_fp8_e4m3_s5(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_fp8_e4m3_s5_ref(x, (uint8_t *) y, k);
+}
+
 void quantize_row_mxfp4(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_mxfp4_ref(x, y, k);
 }
