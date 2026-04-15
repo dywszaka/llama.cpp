@@ -153,6 +153,33 @@ static __device__ void quantize_f32_q8_0_block(const float * __restrict__ x, blo
     }
 }
 
+static __device__ void quantize_f32_fp8_e4m3_e8m0_32_block(const float * __restrict__ x, block_fp8_e4m3_e8m0_32 * __restrict__ y) {
+    float amax = 0.0f;
+
+    for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
+        amax = fmaxf(amax, fabsf(x[j]));
+    }
+
+    if (amax == 0.0f) {
+        y->e = 0;
+#pragma unroll
+        for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
+            y->qs[j] = 0;
+        }
+        return;
+    }
+
+    const uint8_t scale_q = ggml_cuda_fp32_to_e8m0_ceil_scale(amax / 448.0f);
+    const float scale = ggml_cuda_e8m0_to_fp32(scale_q);
+    const float inv_scale = scale > 0.0f ? 1.0f / scale : 0.0f;
+
+    y->e = scale_q;
+#pragma unroll
+    for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
+        y->qs[j] = __nv_cvt_float_to_fp8(x[j] * inv_scale, __NV_SATFINITE, __NV_E4M3);
+    }
+}
+
 static __device__ void quantize_f32_iq4_nl_block(const float * __restrict__ x, block_iq4_nl * __restrict__ y) {
     float amax = 0.0f;
     float vmax = 0.0f;
@@ -209,6 +236,10 @@ static __device__ void cpy_blck_f32_q8_0(const char * cxi, char * cdsti) {
 
 static __device__ void cpy_blck_f32_iq4_nl(const char * cxi, char * cdsti) {
     quantize_f32_iq4_nl_block((const float *)cxi, (block_iq4_nl *)cdsti);
+}
+
+static __device__ void cpy_blck_f32_fp8_e4m3_e8m0_32(const char * cxi, char * cdsti) {
+    quantize_f32_fp8_e4m3_e8m0_32_block((const float *) cxi, (block_fp8_e4m3_e8m0_32 *) cdsti);
 }
 
 template<typename src_t, typename dst_t>

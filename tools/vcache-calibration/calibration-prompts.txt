@@ -1,0 +1,10 @@
+Summarize the main causes and consequences of the 2008 global financial crisis in 5 bullet points.
+Write a concise explanation of how a transformer uses query, key, and value tensors during self-attention.
+Translate this sentence into Chinese and Japanese: The model should remain stable under long-context decoding workloads.
+Give a short Python function that merges overlapping intervals and explain its time complexity.
+Draft a two-paragraph product announcement for a new local LLM inference engine optimized for GPU KV cache efficiency.
+List 8 probing questions a security reviewer would ask before approving a production AI inference service.
+Explain the differences between FP16, BF16, FP8 E4M3, and FP8 E5M2 in terms of range, precision, and common usage.
+Write a brief travel itinerary for three days in Kyoto focused on food, temples, and walking routes.
+Provide a structured comparison between per-tensor, per-channel, and per-block quantization for activation caching.
+Summarize the plot and themes of The Three-Body Problem without spoilers for later books.

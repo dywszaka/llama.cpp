@@ -210,6 +210,8 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-rope.cpp)
 endif()
 
+llama_build_and_test(test-vcache-calibration.cpp)
+
 if (GGML_CUDA)
     enable_language(CUDA)
     if (NOT TARGET CUDA::cudart)
@@ -235,6 +237,37 @@ if (GGML_CUDA)
     llama_test(test-vcache-fp8-e4m3 LABEL "cuda")
     target_link_libraries(${LLAMA_TEST_NAME} PRIVATE CUDA::cudart)
     unset(LLAMA_TEST_NAME)
+
+    set(LLAMA_TEST_NAME test-vcache-fp8-e4m3-e8m0)
+    llama_build(test-vcache-fp8-e4m3-e8m0.cu)
+    if (LLAMA_TEST_CUDA_ARCH AND NOT LLAMA_TEST_CUDA_ARCH STREQUAL "LLAMA_TEST_CUDA_ARCH-NOTFOUND")
+        set_property(TARGET ${LLAMA_TEST_NAME} PROPERTY CUDA_ARCHITECTURES "${LLAMA_TEST_CUDA_ARCH}")
+    endif()
+    llama_test(test-vcache-fp8-e4m3-e8m0 LABEL "cuda")
+    target_link_libraries(${LLAMA_TEST_NAME} PRIVATE CUDA::cudart)
+    unset(LLAMA_TEST_NAME)
+
+    llama_test_cmd(
+        bash
+        NAME test-vcache-fp8-e4m3-e8m0-generate-smoke
+        LABEL "cuda"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS
+            ${CMAKE_CURRENT_SOURCE_DIR}/test-vcache-fp8-e4m3-e8m0-generate-smoke.sh
+            $<TARGET_FILE:llama-cli>
+            ${PROJECT_SOURCE_DIR}/../models/qwen3-8b-nvfp4.gguf
+    )
+
+    llama_test_cmd(
+        bash
+        NAME test-vcache-fp8-e8m0-non-flash-generate-smoke
+        LABEL "cuda"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS
+            ${CMAKE_CURRENT_SOURCE_DIR}/test-vcache-fp8-e8m0-non-flash-generate-smoke.sh
+            $<TARGET_FILE:llama-cli>
+            ${PROJECT_SOURCE_DIR}/../models/qwen3-8b-nvfp4.gguf
+    )
 
     unset(LLAMA_TEST_CUDA_ARCH)
 endif()

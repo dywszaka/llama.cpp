@@ -26,6 +26,7 @@ static __global__ void flash_attn_vec_ext_f16(
         const float m1,
         const uint32_t n_head_log2,
         const float logit_softcap,
+        const int32_t flags,
         const int32_t ne00, const int32_t ne01, const int32_t ne02, const int32_t ne03,
                             const int32_t nb01, const int32_t nb02, const int32_t nb03,
         const int32_t ne10, const int32_t ne11, const int32_t ne12, const int32_t ne13,
@@ -52,7 +53,7 @@ static __global__ void flash_attn_vec_ext_f16(
     constexpr vec_dot_KQ_f16_t vec_dot_KQ = get_vec_dot_KQ_f16<D>(type_K);
     constexpr bool Q_q8_1 = type_K != GGML_TYPE_F16;
     constexpr dequantize_1_f16_t dequantize_1_v = get_dequantize_1_f16(type_V);
-    constexpr bool use_fp8_p = type_V == GGML_TYPE_FP8_E4M3_S3 || type_V == GGML_TYPE_FP8_E4M3_S5;
+    const bool use_fp8_p = (flags & 0x1) != 0;
 
     const int ic0 = blockIdx.x * ncols; // Index of the Q/QKV column to work on.
 
@@ -262,7 +263,10 @@ static __global__ void flash_attn_vec_ext_f16(
 
             const half val = hexp(KQ[j*D + tid] - kqmax[j]);
             kqsum[j] = kqsum[j]*KQ_max_scale + val;
-            KQ[j*D + tid] = use_fp8_p ? __float2half(ggml_cuda_quantize_dequantize_fp8_e4m3_prob(__half2float(val))) : val;
+            const half p_block_max = warp_reduce_max(val);
+            KQ[j*D + tid] = use_fp8_p
+                ? __float2half(ggml_cuda_quantize_dequantize_fp8_e4m3_e8m0(__half2float(val), __half2float(p_block_max)))
+                : val;
 
             VKQ[j] *= __half2half2(KQ_max_scale);
         }
@@ -353,7 +357,7 @@ static __global__ void flash_attn_vec_ext_f16(
     GGML_UNUSED(Q); GGML_UNUSED(K); GGML_UNUSED(V); GGML_UNUSED(mask); GGML_UNUSED(sinks);
     GGML_UNUSED(dst); GGML_UNUSED(dst_meta);
     GGML_UNUSED(scale); GGML_UNUSED(max_bias); GGML_UNUSED(m0); GGML_UNUSED(m1);
-    GGML_UNUSED(n_head_log2); GGML_UNUSED(logit_softcap);
+    GGML_UNUSED(n_head_log2); GGML_UNUSED(logit_softcap); GGML_UNUSED(flags);
     GGML_UNUSED(ne00); GGML_UNUSED(ne01); GGML_UNUSED(ne02); GGML_UNUSED(ne03);
     GGML_UNUSED(nb01); GGML_UNUSED(nb02); GGML_UNUSED(nb03);
     GGML_UNUSED(ne10); GGML_UNUSED(ne11); GGML_UNUSED(ne12); GGML_UNUSED(ne13);
@@ -453,6 +457,7 @@ extern DECL_FATTN_VEC_F16_CASE( 64, GGML_TYPE_F16, GGML_TYPE_Q5_1);
 extern DECL_FATTN_VEC_F16_CASE( 64, GGML_TYPE_F16, GGML_TYPE_Q8_0);
 extern DECL_FATTN_VEC_F16_CASE( 64, GGML_TYPE_F16, GGML_TYPE_FP8_E4M3_S3);
 extern DECL_FATTN_VEC_F16_CASE( 64, GGML_TYPE_F16, GGML_TYPE_FP8_E4M3_S5);
+extern DECL_FATTN_VEC_F16_CASE( 64, GGML_TYPE_F16, GGML_TYPE_FP8_E4M3_E8M0_32);
 extern DECL_FATTN_VEC_F16_CASE( 64, GGML_TYPE_F16, GGML_TYPE_F16);
 
 extern DECL_FATTN_VEC_F16_CASE(128, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0);
@@ -498,7 +503,9 @@ extern DECL_FATTN_VEC_F16_CASE(128, GGML_TYPE_Q8_0, GGML_TYPE_F16);
 extern DECL_FATTN_VEC_F16_CASE(128, GGML_TYPE_F16,  GGML_TYPE_F16);
 extern DECL_FATTN_VEC_F16_CASE(128, GGML_TYPE_F16,  GGML_TYPE_FP8_E4M3_S3);
 extern DECL_FATTN_VEC_F16_CASE(128, GGML_TYPE_F16,  GGML_TYPE_FP8_E4M3_S5);
+extern DECL_FATTN_VEC_F16_CASE(128, GGML_TYPE_F16,  GGML_TYPE_FP8_E4M3_E8M0_32);
 
 extern DECL_FATTN_VEC_F16_CASE(256, GGML_TYPE_F16, GGML_TYPE_F16);
 extern DECL_FATTN_VEC_F16_CASE(256, GGML_TYPE_F16, GGML_TYPE_FP8_E4M3_S3);
 extern DECL_FATTN_VEC_F16_CASE(256, GGML_TYPE_F16, GGML_TYPE_FP8_E4M3_S5);
+extern DECL_FATTN_VEC_F16_CASE(256, GGML_TYPE_F16, GGML_TYPE_FP8_E4M3_E8M0_32);

@@ -20,6 +20,7 @@
 #include "ggml-cuda/cross-entropy-loss.cuh"
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/fattn.cuh"
+#include "ggml-cuda/fp8-e8m0-matmul.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"
@@ -2128,6 +2129,15 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         && ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) && src0->view_src;
 
     if (!split &&
+        src0->type == GGML_TYPE_FP8_E4M3_E8M0_32 &&
+        src1->type == GGML_TYPE_F32 &&
+        dst->type == GGML_TYPE_F32) {
+        if (ggml_cuda_mul_mat_fp8_e8m0_native(ctx, src0, src1, dst)) {
+            return;
+        }
+    }
+
+    if (!split &&
         ggml_cuda_nvfp4_native_enabled() &&
         src0->type == GGML_TYPE_NVFP4 &&
         src1->type == GGML_TYPE_F32 &&
@@ -2158,6 +2168,11 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
     bool use_mul_mat_q     = ggml_is_quantized(src0->type) && !bad_padding_clear
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
+
+    if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
+        use_mul_mat_vec_q = false;
+        use_mul_mat_q = false;
+    }
 
     bool any_gpus_with_slow_fp16 = false;
 
@@ -3560,6 +3575,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_Q5_0:
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_Q8_0:
+                    case GGML_TYPE_FP8_E4M3_E8M0_32:
                     case GGML_TYPE_MXFP4:
                     case GGML_TYPE_NVFP4:
                     case GGML_TYPE_Q2_K:
@@ -3599,6 +3615,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_Q8_0:
                     case GGML_TYPE_FP8_E4M3_S3:
                     case GGML_TYPE_FP8_E4M3_S5:
+                    case GGML_TYPE_FP8_E4M3_E8M0_32:
                         return true;
                     default:
                         return false;
@@ -3613,7 +3630,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 return (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
                        op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
                        op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 ||
-                       op->type == GGML_TYPE_FP8_E4M3_S3 || op->type == GGML_TYPE_FP8_E4M3_S5 ||
+                       op->type == GGML_TYPE_FP8_E4M3_S3 || op->type == GGML_TYPE_FP8_E4M3_S5 || op->type == GGML_TYPE_FP8_E4M3_E8M0_32 ||
                        op->type == GGML_TYPE_IQ4_NL ||
                        op->type == GGML_TYPE_NVFP4) &&
                        op->src[0]->type == GGML_TYPE_F32 &&
@@ -3634,10 +3651,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 if (src0_type == GGML_TYPE_Q8_0 && src1_type == GGML_TYPE_F32) {
                     return true;
                 }
-                if (src0_type == GGML_TYPE_F32 && (src1_type == GGML_TYPE_FP8_E4M3_S3 || src1_type == GGML_TYPE_FP8_E4M3_S5)) {
+                if (src0_type == GGML_TYPE_F32 && (src1_type == GGML_TYPE_FP8_E4M3_S3 || src1_type == GGML_TYPE_FP8_E4M3_S5 || src1_type == GGML_TYPE_FP8_E4M3_E8M0_32)) {
                     return true;
                 }
-                if ((src0_type == GGML_TYPE_FP8_E4M3_S3 || src0_type == GGML_TYPE_FP8_E4M3_S5) && src1_type == GGML_TYPE_F32) {
+                if ((src0_type == GGML_TYPE_FP8_E4M3_S3 || src0_type == GGML_TYPE_FP8_E4M3_S5 || src0_type == GGML_TYPE_FP8_E4M3_E8M0_32) && src1_type == GGML_TYPE_F32) {
                     return true;
                 }
                 if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_Q4_0) {
@@ -3821,7 +3838,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 return true;
             }
             if (op->src[0]->ne[0] == 256 && op->src[1]->type == GGML_TYPE_F16 &&
-                    (op->src[2]->type == GGML_TYPE_F16 || op->src[2]->type == GGML_TYPE_FP8_E4M3_S3 || op->src[2]->type == GGML_TYPE_FP8_E4M3_S5)) {
+                    (op->src[2]->type == GGML_TYPE_F16 || op->src[2]->type == GGML_TYPE_FP8_E4M3_S3 || op->src[2]->type == GGML_TYPE_FP8_E4M3_S5 || op->src[2]->type == GGML_TYPE_FP8_E4M3_E8M0_32)) {
                 return true;
             }
             if (op->src[3] && op->src[3]->ne[2] != 1) {

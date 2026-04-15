@@ -35,6 +35,7 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     GGML_ASSERT(kv_size % n_pad == 0);
 
     has_k_scale = type_k == GGML_TYPE_NVFP4;
+    non_flash_fp8_e8m0 = type_v == GGML_TYPE_FP8_E4M3_E8M0_32 && !v_trans;
 
     // TODO: this is temporary until we support passing reuse layer filters [KV_REUSE]
     auto n_layer_cache = hparams.n_layer;
@@ -1064,6 +1065,14 @@ uint32_t llama_kv_cache_unified::get_n_kv() const {
     return result;
 }
 
+uint32_t llama_kv_cache_unified::get_n_kv_tensor(uint32_t n_kv) const {
+    if (!non_flash_fp8_e8m0) {
+        return n_kv;
+    }
+
+    return GGML_PAD(n_kv, 32);
+}
+
 bool llama_kv_cache_unified::get_supports_set_rows() const {
     return supports_set_rows;
 }
@@ -1076,6 +1085,7 @@ ggml_tensor * llama_kv_cache_unified::get_k(ggml_context * ctx, int32_t il, uint
 
     const uint64_t kv_size      = get_size();
     const uint64_t n_embd_k_gqa = k->ne[0];
+    n_kv = get_n_kv_tensor(n_kv);
 
     assert(n_embd_k_gqa == hparams.n_embd_k_gqa(il));
 
@@ -1108,6 +1118,7 @@ ggml_tensor * llama_kv_cache_unified::get_v(ggml_context * ctx, int32_t il, uint
 
     const uint64_t kv_size      = get_size();
     const uint64_t n_embd_v_gqa = v->ne[0];
+    n_kv = get_n_kv_tensor(n_kv);
 
     // [TAG_V_CACHE_VARIABLE]
     assert(n_embd_v_gqa >= hparams.n_embd_v_gqa(il));
@@ -2349,7 +2360,7 @@ llama_kv_cache_unified_context::llama_kv_cache_unified_context(llama_memory_stat
 
 llama_kv_cache_unified_context::llama_kv_cache_unified_context(
         llama_kv_cache_unified * kv) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv) {
-    n_kv = kv->get_size();
+    n_kv = kv->get_n_kv_tensor(kv->get_size());
 
     const uint32_t n_stream = kv->get_n_stream();
 
@@ -2405,7 +2416,7 @@ bool llama_kv_cache_unified_context::apply() {
 
     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
 
-    n_kv = kv->get_n_kv();
+    n_kv = kv->get_n_kv_tensor(kv->get_n_kv());
 
     return true;
 }

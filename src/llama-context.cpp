@@ -32,6 +32,10 @@ static ggml_type llama_exp_vcache_fp8_type_from_env() {
         return GGML_TYPE_FP8_E4M3_S5;
     }
 
+    if (strcmp(env, "e8m0") == 0) {
+        return GGML_TYPE_FP8_E4M3_E8M0_32;
+    }
+
     return GGML_TYPE_COUNT;
 }
 
@@ -2345,18 +2349,20 @@ llama_context * llama_init_from_model(
 
     const ggml_type exp_type_v = llama_exp_vcache_fp8_type_from_env();
     if (exp_type_v == GGML_TYPE_COUNT) {
-        LLAMA_LOG_ERROR("%s: invalid LLAMA_EXP_VCACHE_V_FP8 value, expected 's3' or 's5'\n", __func__);
+        LLAMA_LOG_ERROR("%s: invalid LLAMA_EXP_VCACHE_V_FP8 value, expected 's3', 's5', or 'e8m0'\n", __func__);
         return nullptr;
     }
-    if (exp_type_v == GGML_TYPE_FP8_E4M3_S3 || exp_type_v == GGML_TYPE_FP8_E4M3_S5) {
-        if (!params.flash_attn) {
-            LLAMA_LOG_ERROR("%s: LLAMA_EXP_VCACHE_V_FP8 requires flash_attn\n", __func__);
+    if (exp_type_v == GGML_TYPE_FP8_E4M3_S3 || exp_type_v == GGML_TYPE_FP8_E4M3_S5 || exp_type_v == GGML_TYPE_FP8_E4M3_E8M0_32) {
+        if (model->arch == LLM_ARCH_GROK && params.flash_attn) {
+            LLAMA_LOG_ERROR("%s: LLAMA_EXP_VCACHE_V_FP8 with flash_attn is not compatible with Grok\n", __func__);
             return nullptr;
         }
+
         if (!params.offload_kqv) {
-            LLAMA_LOG_ERROR("%s: LLAMA_EXP_VCACHE_V_FP8 requires offload_kqv\n", __func__);
-            return nullptr;
+            LLAMA_LOG_WARN("%s: LLAMA_EXP_VCACHE_V_FP8 set - enabling offload_kqv\n", __func__);
+            params.offload_kqv = true;
         }
+
         params.type_v = exp_type_v;
         LLAMA_LOG_INFO("%s: experimental V cache type = %s\n", __func__, ggml_type_name(params.type_v));
     }
@@ -2371,8 +2377,13 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
-    if (ggml_is_quantized(params.type_v) && !params.flash_attn) {
-        LLAMA_LOG_ERROR("%s: V cache quantization requires flash_attn\n", __func__);
+    if ((params.type_v == GGML_TYPE_FP8_E4M3_S3 || params.type_v == GGML_TYPE_FP8_E4M3_S5) && !params.flash_attn) {
+        LLAMA_LOG_ERROR("%s: FP8(E4M3 S3/S5) V cache requires flash_attn\n", __func__);
+        return nullptr;
+    }
+
+    if (params.type_v == GGML_TYPE_FP8_E4M3_E8M0_32 && !params.flash_attn && !params.offload_kqv) {
+        LLAMA_LOG_ERROR("%s: FP8(E4M3+E8M0) non-flash V cache requires offload_kqv\n", __func__);
         return nullptr;
     }
 

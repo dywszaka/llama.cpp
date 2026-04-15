@@ -471,6 +471,17 @@ static inline float ggml_e8m0_to_fp32_half(uint8_t x) {
 #define GGML_E8M0_TO_FP32(x) ggml_e8m0_to_fp32(x)
 #define GGML_E8M0_TO_FP32_HALF(x) ggml_e8m0_to_fp32_half(x)
 
+static inline uint8_t ggml_fp32_to_e8m0_ceil_scale(float x) {
+    if (!(x > 0.0f) || !isfinite(x)) {
+        return 0;
+    }
+
+    int exp = (int) ceilf(log2f(x)) + 127;
+    exp = exp < 1 ? 1 : exp;
+    exp = exp > 254 ? 254 : exp;
+    return (uint8_t) exp;
+}
+
 static inline float ggml_e4m3_to_fp32(uint8_t x) {
     uint32_t sign     = (uint32_t)(x & 0x80) << 24; // bit7 -> float sign
     uint32_t exponent = (x >> 3) & 0x0F;           // bits 6..3
@@ -520,7 +531,7 @@ static inline float ggml_e4m3_to_fp32_half(uint8_t x) {
 #define GGML_E4M3_TO_FP32_HALF(x) ggml_e4m3_to_fp32_half(x)
 
 static inline bool ggml_is_fp8_e4m3(enum ggml_type type) {
-    return type == GGML_TYPE_FP8_E4M3_S3 || type == GGML_TYPE_FP8_E4M3_S5;
+    return type == GGML_TYPE_FP8_E4M3_S3 || type == GGML_TYPE_FP8_E4M3_S5 || type == GGML_TYPE_FP8_E4M3_E8M0_32;
 }
 
 static inline float ggml_fp8_e4m3_scale(enum ggml_type type) {

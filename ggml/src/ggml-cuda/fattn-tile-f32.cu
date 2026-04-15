@@ -23,6 +23,7 @@ static __global__ void flash_attn_tile_ext_f32(
         const float m1,
         const uint32_t n_head_log2,
         const float logit_softcap,
+        const int32_t flags,
         const int32_t ne00, const int32_t ne01, const int32_t ne02, const int32_t ne03,
                             const int32_t nb01, const int32_t nb02, const int32_t nb03,
         const int32_t ne10, const int32_t ne11, const int32_t ne12, const int32_t ne13,
@@ -37,6 +38,7 @@ static __global__ void flash_attn_tile_ext_f32(
     NO_DEVICE_CODE;
     return;
 #endif // FP16_MMA_AVAILABLE
+    GGML_UNUSED(flags);
     if (use_logit_softcap && !(D == 128 || D == 256)) {
         GGML_UNUSED(Q); GGML_UNUSED(K); GGML_UNUSED(V); GGML_UNUSED(mask); GGML_UNUSED(sinks);
         GGML_UNUSED(dst); GGML_UNUSED(dst_meta);

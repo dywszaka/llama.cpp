@@ -215,6 +215,18 @@ static bool test_flash_attn_vs_f16(const flash_attn_case & tc, ggml_type v_type)
 }
 
 int main() {
+    int dev_count = 0;
+    const cudaError_t dev_err = cudaGetDeviceCount(&dev_count);
+    if (dev_err != cudaSuccess || dev_count <= 0) {
+        std::puts("test-vcache-fp8-e4m3: SKIP (no CUDA device)");
+        return 0;
+    }
+
+    if (cudaSetDevice(0) != cudaSuccess) {
+        std::puts("test-vcache-fp8-e4m3: SKIP (failed to select CUDA device 0)");
+        return 0;
+    }
+
     disable_cuda_truncation();
 
     if (!test_fp8_row_roundtrip(GGML_TYPE_FP8_E4M3_S3, 448.0f / 3.0f)) {

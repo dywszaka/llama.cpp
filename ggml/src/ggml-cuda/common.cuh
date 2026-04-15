@@ -538,8 +538,9 @@ static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, i
 #endif // defined(GGML_USE_HIP)
 }
 
-static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
+static __host__ __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
 #if CUDART_VERSION >= 12080
+#if defined(__CUDA_ARCH__)
     const nv_bfloat16 e = __nv_cvt_e8m0_to_bf16raw(x);
     return (float) e;
 #else
@@ -553,7 +554,36 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
     float result;
     memcpy(&result, &bits, sizeof(float));
     return result;
+#endif
+#else
+    uint32_t bits;
+    if (x == 0) {
+        bits = 0x00400000;
+    } else {
+        bits = (uint32_t) x << 23;
+    }
+
+    float result;
+    memcpy(&result, &bits, sizeof(float));
+    return result;
 #endif // CUDART_VERSION >= 12050
+}
+
+static __host__ __device__ __forceinline__ uint8_t ggml_cuda_fp32_to_e8m0_ceil_scale(float x) {
+    if (!(x > 0.0f) || !isfinite(x)) {
+        return 0;
+    }
+
+    int exp;
+#if defined(__CUDA_ARCH__)
+    exp = (int) ceilf(log2f(x));
+#else
+    exp = (int) ceilf(log2f(x));
+#endif
+    exp += 127;
+    exp = exp < 1 ? 1 : exp;
+    exp = exp > 254 ? 254 : exp;
+    return (uint8_t) exp;
 }
 
 static __host__ __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32(uint8_t x) {
@@ -599,7 +629,7 @@ static __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32_half(uint8_t x) {
 }
 
 static __host__ __device__ __forceinline__ bool ggml_cuda_is_fp8_e4m3(ggml_type type) {
-    return type == GGML_TYPE_FP8_E4M3_S3 || type == GGML_TYPE_FP8_E4M3_S5;
+    return type == GGML_TYPE_FP8_E4M3_S3 || type == GGML_TYPE_FP8_E4M3_S5 || type == GGML_TYPE_FP8_E4M3_E8M0_32;
 }
 
 static __host__ __device__ __forceinline__ float ggml_cuda_fp8_e4m3_scale(ggml_type type) {
@@ -620,6 +650,18 @@ static __host__ __device__ __forceinline__ float ggml_cuda_dequantize_fp8_e4m3(u
 static __host__ __device__ __forceinline__ float ggml_cuda_quantize_dequantize_fp8_e4m3_prob(float x) {
     const uint8_t q = __nv_cvt_float_to_fp8(x * 448.0f, __NV_SATFINITE, __NV_E4M3);
     return ggml_cuda_e4m3_to_fp32(q) / 448.0f;
+}
+
+static __host__ __device__ __forceinline__ float ggml_cuda_quantize_dequantize_fp8_e4m3_e8m0(float x, float amax) {
+    if (!(amax > 0.0f)) {
+        return 0.0f;
+    }
+
+    const uint8_t scale_q = ggml_cuda_fp32_to_e8m0_ceil_scale(amax / 448.0f);
+    const float scale = ggml_cuda_e8m0_to_fp32(scale_q);
+    const float inv_scale = scale > 0.0f ? 1.0f / scale : 0.0f;
+    const uint8_t q = __nv_cvt_float_to_fp8(x * inv_scale, __NV_SATFINITE, __NV_E4M3);
+    return ggml_cuda_e4m3_to_fp32(q) * scale;
 }
 
 typedef void (*dequantize_kernel_t)(const void * vx, const int64_t ib, const int iqs, dfloat2 & v);
@@ -690,6 +732,13 @@ struct ggml_cuda_type_traits<GGML_TYPE_FP8_E4M3_S3> {
 template<>
 struct ggml_cuda_type_traits<GGML_TYPE_FP8_E4M3_S5> {
     static constexpr int qk = 1;
+    static constexpr int qr = 1;
+    static constexpr int qi = 1;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_FP8_E4M3_E8M0_32> {
+    static constexpr int qk = QK_FP8_E4M3_E8M0_32;
     static constexpr int qr = 1;
     static constexpr int qi = 1;
 };

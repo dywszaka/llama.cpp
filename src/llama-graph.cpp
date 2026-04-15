@@ -1259,19 +1259,27 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
         }
 
-        const bool v_fp8_e4m3 = v->type == GGML_TYPE_FP8_E4M3_S3 || v->type == GGML_TYPE_FP8_E4M3_S5;
+        const bool v_fp8_e4m3 =
+            v->type == GGML_TYPE_FP8_E4M3_S3 ||
+            v->type == GGML_TYPE_FP8_E4M3_S5 ||
+            v->type == GGML_TYPE_FP8_E4M3_E8M0_32;
         const bool can_native_fp8_v =
             v_fp8_e4m3 &&
             k->type == GGML_TYPE_F16 &&
             q->ne[1] == 1 &&
             (q->ne[0] == 64 || q->ne[0] == 128 || q->ne[0] == 256);
 
-        if (v_fp8_e4m3 && !can_native_fp8_v) {
+        if ((v->type == GGML_TYPE_FP8_E4M3_S3 || v->type == GGML_TYPE_FP8_E4M3_S5) && !can_native_fp8_v) {
             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
         }
 
         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+
+        if (v->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
+            const int32_t flags = 1;
+            memcpy((int32_t *) cur->op_params + 4, &flags, sizeof(flags));
+        }
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
