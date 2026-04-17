@@ -24,14 +24,6 @@ static ggml_type llama_exp_vcache_fp8_type_from_env() {
         return GGML_TYPE_F16;
     }
 
-    if (strcmp(env, "s3") == 0) {
-        return GGML_TYPE_FP8_E4M3_S3;
-    }
-
-    if (strcmp(env, "s5") == 0) {
-        return GGML_TYPE_FP8_E4M3_S5;
-    }
-
     if (strcmp(env, "e8m0") == 0) {
         return GGML_TYPE_FP8_E4M3_E8M0_32;
     }
@@ -2349,10 +2341,10 @@ llama_context * llama_init_from_model(
 
     const ggml_type exp_type_v = llama_exp_vcache_fp8_type_from_env();
     if (exp_type_v == GGML_TYPE_COUNT) {
-        LLAMA_LOG_ERROR("%s: invalid LLAMA_EXP_VCACHE_V_FP8 value, expected 's3', 's5', or 'e8m0'\n", __func__);
+        LLAMA_LOG_ERROR("%s: invalid LLAMA_EXP_VCACHE_V_FP8 value, expected 'e8m0'\n", __func__);
         return nullptr;
     }
-    if (exp_type_v == GGML_TYPE_FP8_E4M3_S3 || exp_type_v == GGML_TYPE_FP8_E4M3_S5 || exp_type_v == GGML_TYPE_FP8_E4M3_E8M0_32) {
+    if (exp_type_v == GGML_TYPE_FP8_E4M3_E8M0_32) {
         if (model->arch == LLM_ARCH_GROK && params.flash_attn) {
             LLAMA_LOG_ERROR("%s: LLAMA_EXP_VCACHE_V_FP8 with flash_attn is not compatible with Grok\n", __func__);
             return nullptr;
@@ -2374,11 +2366,6 @@ llama_context * llama_init_from_model(
 
     if (params.flash_attn && params.type_k == GGML_TYPE_NVFP4) {
         LLAMA_LOG_ERROR("%s: NVFP4 K cache does not support flash_attn yet\n", __func__);
-        return nullptr;
-    }
-
-    if ((params.type_v == GGML_TYPE_FP8_E4M3_S3 || params.type_v == GGML_TYPE_FP8_E4M3_S5) && !params.flash_attn) {
-        LLAMA_LOG_ERROR("%s: FP8(E4M3 S3/S5) V cache requires flash_attn\n", __func__);
         return nullptr;
     }
 

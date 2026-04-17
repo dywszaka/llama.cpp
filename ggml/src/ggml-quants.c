@@ -341,33 +341,6 @@ static uint8_t best_index_e4m3(float x) {
     return best_i;
 }
 
-static void quantize_row_fp8_e4m3_ref_impl(const float * GGML_RESTRICT x, uint8_t * GGML_RESTRICT y, int64_t k, enum ggml_type type) {
-    const float scale = ggml_fp8_e4m3_scale(type);
-    assert(scale != 0.0f);
-
-    for (int64_t i = 0; i < k; ++i) {
-        y[i] = best_index_e4m3(x[i] * scale);
-    }
-}
-
-static void dequantize_row_fp8_e4m3_impl(const uint8_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k, enum ggml_type type) {
-    const float scale = ggml_fp8_e4m3_scale(type);
-    assert(scale != 0.0f);
-    const float inv_scale = 1.0f / scale;
-
-    for (int64_t i = 0; i < k; ++i) {
-        y[i] = GGML_E4M3_TO_FP32(x[i]) * inv_scale;
-    }
-}
-
-void quantize_row_fp8_e4m3_s3_ref(const float * GGML_RESTRICT x, uint8_t * GGML_RESTRICT y, int64_t k) {
-    quantize_row_fp8_e4m3_ref_impl(x, y, k, GGML_TYPE_FP8_E4M3_S3);
-}
-
-void quantize_row_fp8_e4m3_s5_ref(const float * GGML_RESTRICT x, uint8_t * GGML_RESTRICT y, int64_t k) {
-    quantize_row_fp8_e4m3_ref_impl(x, y, k, GGML_TYPE_FP8_E4M3_S5);
-}
-
 void quantize_row_fp8_e4m3_e8m0_32_ref(const float * GGML_RESTRICT x, block_fp8_e4m3_e8m0_32 * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_FP8_E4M3_E8M0_32 == 0);
 
@@ -611,14 +584,6 @@ void dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_REST
 void dequantize_row_nvfp4_default(const block_nvfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     fprintf(stderr, "%s: NVFP4 dequantization without global scale is not supported", __func__);
     abort();
-}
-
-void dequantize_row_fp8_e4m3_s3(const uint8_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    dequantize_row_fp8_e4m3_impl(x, y, k, GGML_TYPE_FP8_E4M3_S3);
-}
-
-void dequantize_row_fp8_e4m3_s5(const uint8_t * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    dequantize_row_fp8_e4m3_impl(x, y, k, GGML_TYPE_FP8_E4M3_S5);
 }
 
 void dequantize_row_fp8_e4m3_e8m0_32(const block_fp8_e4m3_e8m0_32 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
@@ -2289,18 +2254,6 @@ size_t quantize_q8_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, 
     const size_t row_size = ggml_row_size(GGML_TYPE_Q8_0, n_per_row);
     quantize_row_q8_0_ref(src, dst, (int64_t)nrow*n_per_row);
     return nrow * row_size;
-}
-
-size_t quantize_fp8_e4m3_s3(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
-    GGML_UNUSED(quant_weights);
-    quantize_row_fp8_e4m3_s3_ref(src, (uint8_t *) dst, (int64_t) nrow*n_per_row);
-    return nrow * ggml_row_size(GGML_TYPE_FP8_E4M3_S3, n_per_row);
-}
-
-size_t quantize_fp8_e4m3_s5(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
-    GGML_UNUSED(quant_weights);
-    quantize_row_fp8_e4m3_s5_ref(src, (uint8_t *) dst, (int64_t) nrow*n_per_row);
-    return nrow * ggml_row_size(GGML_TYPE_FP8_E4M3_S5, n_per_row);
 }
 
 size_t quantize_fp8_e4m3_e8m0_32(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
@@ -5441,17 +5394,6 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_Q8_0:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q8_0, data, nb);
-            } break;
-        case GGML_TYPE_FP8_E4M3_S3:
-        case GGML_TYPE_FP8_E4M3_S5:
-            {
-                const uint8_t * q = (const uint8_t *) data;
-                for (size_t i = 0; i < nb; ++i) {
-                    const float v = GGML_E4M3_TO_FP32(q[i]);
-                    if (!validate_float(v, i)) {
-                        return false;
-                    }
-                }
             } break;
         case GGML_TYPE_FP8_E4M3_E8M0_32:
             {

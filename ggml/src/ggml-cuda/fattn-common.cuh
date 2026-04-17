@@ -461,20 +461,6 @@ static __device__ __forceinline__ T dequantize_1_f16(const void * __restrict__ v
     return x[i];
 }
 
-template <typename T, ggml_type type_V>
-static __device__ __forceinline__ T dequantize_1_fp8_e4m3(const void * __restrict__ vx, const int64_t i) {
-    const uint8_t * x = (const uint8_t *) vx;
-    const float v = ggml_cuda_dequantize_fp8_e4m3(x[i], type_V);
-
-#ifdef FP16_AVAILABLE
-    if (std::is_same<T, half>::value) {
-        return __float2half(v);
-    }
-#endif // FP16_AVAILABLE
-
-    return v;
-}
-
 template <typename T>
 static __device__ __forceinline__ T dequantize_1_fp8_e4m3_e8m0_32(const void * __restrict__ vx, const int64_t i) {
     const block_fp8_e4m3_e8m0_32 * x = (const block_fp8_e4m3_e8m0_32 *) vx;
@@ -520,8 +506,6 @@ constexpr __device__ dequantize_1_f16_t get_dequantize_1_f16(ggml_type type_V) {
         type_V == GGML_TYPE_Q5_0 ? dequantize_1_q5_0<half> :
         type_V == GGML_TYPE_Q5_1 ? dequantize_1_q5_1<half> :
         type_V == GGML_TYPE_Q8_0 ? dequantize_1_q8_0<half> :
-        type_V == GGML_TYPE_FP8_E4M3_S3 ? dequantize_1_fp8_e4m3<half, GGML_TYPE_FP8_E4M3_S3> :
-        type_V == GGML_TYPE_FP8_E4M3_S5 ? dequantize_1_fp8_e4m3<half, GGML_TYPE_FP8_E4M3_S5> :
         type_V == GGML_TYPE_FP8_E4M3_E8M0_32 ? dequantize_1_fp8_e4m3_e8m0_32<half> :
         type_V == GGML_TYPE_F16 ? dequantize_1_f16<half> :
         nullptr;
@@ -533,8 +517,6 @@ constexpr __device__ dequantize_1_f32_t get_dequantize_1_f32(ggml_type type_V) {
         type_V == GGML_TYPE_Q5_0 ? dequantize_1_q5_0<float> :
         type_V == GGML_TYPE_Q5_1 ? dequantize_1_q5_1<float> :
         type_V == GGML_TYPE_Q8_0 ? dequantize_1_q8_0<float> :
-        type_V == GGML_TYPE_FP8_E4M3_S3 ? dequantize_1_fp8_e4m3<float, GGML_TYPE_FP8_E4M3_S3> :
-        type_V == GGML_TYPE_FP8_E4M3_S5 ? dequantize_1_fp8_e4m3<float, GGML_TYPE_FP8_E4M3_S5> :
         type_V == GGML_TYPE_FP8_E4M3_E8M0_32 ? dequantize_1_fp8_e4m3_e8m0_32<float> :
         type_V == GGML_TYPE_F16 ? dequantize_1_f16<float> :
         nullptr;
