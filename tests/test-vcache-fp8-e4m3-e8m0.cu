@@ -17,8 +17,10 @@ static constexpr int32_t GGML_FLASH_ATTN_FLAG_FP8_P_E4M3_E8M0 = 1;
 static void disable_cuda_truncation() {
 #if defined(_WIN32)
     _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
+    _putenv_s("GGML_CUDA_FP8_E8M0_NATIVE_NO_FALLBACK", "1");
 #else
     setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
+    setenv("GGML_CUDA_FP8_E8M0_NATIVE_NO_FALLBACK", "1", 1);
 #endif
 }
 
@@ -370,6 +372,17 @@ int main() {
     };
 
     if (!test_mul_mat_variant(non_flash_decode_case, 1e-1, 2.0f)) {
+        return 1;
+    }
+
+    const mul_mat_case non_flash_prefill_case = {
+        /* .k    = */ 256,
+        /* .m    = */ 128,
+        /* .n    = */ 17,
+        /* .name = */ "non-flash-prefill-k256-m128-n17",
+    };
+
+    if (!test_mul_mat_variant(non_flash_prefill_case, 1e-1, 2.0f)) {
         return 1;
     }
 

@@ -226,7 +226,7 @@ bool ggml_cuda_mul_mat_fp8_e8m0_native(
         return false;
     }
 
-    if (n != 1 || (k % QK_FP8_E4M3_E8M0_32) != 0 || (m % 16) != 0) {
+    if ((k % QK_FP8_E4M3_E8M0_32) != 0 || (m % 16) != 0) {
         return false;
     }
 
