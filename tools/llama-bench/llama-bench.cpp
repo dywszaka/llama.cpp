@@ -412,6 +412,9 @@ static ggml_type ggml_type_from_name(const std::string & s, bool allow_nvfp4 = t
     if (allow_nvfp4 && s == "nvfp4") {
         return GGML_TYPE_NVFP4;
     }
+    if (!allow_nvfp4 && s == "fp8_e4m3_e8m0_32") {
+        return GGML_TYPE_FP8_E4M3_E8M0_32;
+    }
 
     return GGML_TYPE_COUNT;
 }

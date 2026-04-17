@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add an experimental CUDA path that supports non-`flash_attn` decode for `LLAMA_EXP_VCACHE_V_FP8=e8m0`, with both `V` and `P` quantized to `FP8(E4M3)` using `E8M0` scales, and with `P x V` computed directly through FP8 tensor operations instead of dequantizing to `F16`/`F32` first.
+Add a CUDA path that supports non-`flash_attn` decode for `--cache-type-v fp8_e4m3_e8m0_32`, with both `V` and `P` quantized to `FP8(E4M3)` using `E8M0` scales, and with `P x V` computed directly through FP8 tensor operations instead of dequantizing to `F16`/`F32` first.
 
 ## Scope
 
@@ -38,7 +38,7 @@ Implement a decode-only experimental branch in the non-`flash_attn` path:
 2. After `soft_max_ext`, quantize the materialized `P` vector online into a block FP8 format compatible with the existing `V` experimental format semantics: `E4M3` payload and `E8M0` block scale.
 3. Add a CUDA decode-only `mul_mat(v_fp8, p_fp8)` path that consumes the non-`flash_attn` transposed `V` layout directly and computes `FP8 * FP8 -> FP32 accumulate`.
 4. Dispatch that path only when all experimental constraints are satisfied.
-5. Remove the current behavior that auto-enables `flash_attn` when `LLAMA_EXP_VCACHE_V_FP8` is set.
+5. Remove the current environment-variable override and rely on the standard V cache type parameter.
 
 ## Data Representation
 
@@ -87,7 +87,7 @@ The implementation can still unpack or rearrange fragments into tensor-core-comp
 
 Enable the experimental non-`flash_attn` path only when all of the following hold:
 
-- `LLAMA_EXP_VCACHE_V_FP8=e8m0`
+- `--cache-type-v fp8_e4m3_e8m0_32`
 - CUDA backend
 - `flash_attn == false`
 - decode-only graph shape
@@ -98,7 +98,7 @@ If any requirement is not met, fail explicitly with a targeted error message. Do
 
 ## API and Behavior Changes
 
-- `LLAMA_EXP_VCACHE_V_FP8` will no longer auto-enable `flash_attn`.
+- The FP8 V cache type is selected through `--cache-type-v fp8_e4m3_e8m0_32` or `LLAMA_ARG_CACHE_TYPE_V=fp8_e4m3_e8m0_32`.
 - `llama_init_from_model()` should reject unsupported combinations directly:
   - unsupported model architecture
   - unsupported non-`flash_attn` shape
@@ -109,7 +109,7 @@ If any requirement is not met, fail explicitly with a targeted error message. Do
 
 ### Red/green tests
 
-1. Add a failing smoke test for non-`flash_attn` decode with `LLAMA_EXP_VCACHE_V_FP8=e8m0` and no `-fa`.
+1. Add a failing smoke test for non-`flash_attn` decode with `--cache-type-v fp8_e4m3_e8m0_32` and no `-fa`.
 2. Make it pass once the new dispatch and kernel path are in place.
 
 ### Numeric tests
@@ -146,7 +146,7 @@ Both must show:
 
 ## Acceptance Criteria
 
-- Debug and Release `llama-cli` and `llama-server` can run non-`flash_attn` decode with `LLAMA_EXP_VCACHE_V_FP8=e8m0`.
+- Debug and Release `llama-cli` and `llama-server` can run non-`flash_attn` decode with `--cache-type-v fp8_e4m3_e8m0_32`.
 - The path does not auto-enable `flash_attn`.
 - `P x V` uses direct FP8-input tensor operations with `FP32` accumulation.
 - Focused CUDA tests and smoke tests pass on the RTX 5090 environment.

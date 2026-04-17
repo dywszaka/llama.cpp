@@ -18,19 +18,6 @@
 // llama_context
 //
 
-static ggml_type llama_exp_vcache_fp8_type_from_env() {
-    const char * env = getenv("LLAMA_EXP_VCACHE_V_FP8");
-    if (env == nullptr || env[0] == '\0') {
-        return GGML_TYPE_F16;
-    }
-
-    if (strcmp(env, "e8m0") == 0) {
-        return GGML_TYPE_FP8_E4M3_E8M0_32;
-    }
-
-    return GGML_TYPE_COUNT;
-}
-
 llama_context::llama_context(
         const llama_model & model,
               llama_context_params params) :
@@ -2337,26 +2324,6 @@ llama_context * llama_init_from_model(
     if (params.flash_attn && model->arch == LLM_ARCH_GROK) {
         LLAMA_LOG_WARN("%s: flash_attn is not compatible with Grok - forcing off\n", __func__);
         params.flash_attn = false;
-    }
-
-    const ggml_type exp_type_v = llama_exp_vcache_fp8_type_from_env();
-    if (exp_type_v == GGML_TYPE_COUNT) {
-        LLAMA_LOG_ERROR("%s: invalid LLAMA_EXP_VCACHE_V_FP8 value, expected 'e8m0'\n", __func__);
-        return nullptr;
-    }
-    if (exp_type_v == GGML_TYPE_FP8_E4M3_E8M0_32) {
-        if (model->arch == LLM_ARCH_GROK && params.flash_attn) {
-            LLAMA_LOG_ERROR("%s: LLAMA_EXP_VCACHE_V_FP8 with flash_attn is not compatible with Grok\n", __func__);
-            return nullptr;
-        }
-
-        if (!params.offload_kqv) {
-            LLAMA_LOG_WARN("%s: LLAMA_EXP_VCACHE_V_FP8 set - enabling offload_kqv\n", __func__);
-            params.offload_kqv = true;
-        }
-
-        params.type_v = exp_type_v;
-        LLAMA_LOG_INFO("%s: experimental V cache type = %s\n", __func__, ggml_type_name(params.type_v));
     }
 
     if (params.type_v == GGML_TYPE_NVFP4) {

@@ -30,10 +30,10 @@ trap 'rm -f "${TMP_OUTPUT}"' EXIT
 
 GGML_CUDA_TRUNC_ENABLE=0 \
 GGML_CUDA_FP8_E8M0_NATIVE_NO_FALLBACK=1 \
-LLAMA_EXP_VCACHE_V_FP8=e8m0 \
 "${CLI_BIN}" \
     -m "${MODEL_PATH}" \
     -ngl 99 \
+    --cache-type-v fp8_e4m3_e8m0_32 \
     -no-cnv \
     -n 12 \
     -c 256 \
@@ -44,7 +44,6 @@ LLAMA_EXP_VCACHE_V_FP8=e8m0 \
     -p "The capital of France is" \
     > "${TMP_OUTPUT}" 2>&1
 
-grep -q "experimental V cache type = fp8_e4m3_e8m0_32" "${TMP_OUTPUT}"
 grep -q "flash_attn    = 0" "${TMP_OUTPUT}"
 grep -q "V (fp8_e4m3_e8m0_32)" "${TMP_OUTPUT}"
 grep -q "Paris" "${TMP_OUTPUT}"

@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add a CUDA-only experimental non-`flash_attn` decode path for `LLAMA_EXP_VCACHE_V_FP8=e8m0` that quantizes both `V` and `P` to `FP8(E4M3)+E8M0` and computes `P x V` with direct FP8 tensor operations, while removing the current auto-`flash_attn` behavior.
+**Goal:** Add a CUDA-only experimental non-`flash_attn` decode path for `--cache-type-v fp8_e4m3_e8m0_32` that quantizes both `V` and `P` to `FP8(E4M3)+E8M0` and computes `P x V` with direct FP8 tensor operations.
 
 **Architecture:** Keep the existing non-`flash_attn` `KQ -> softmax -> KQV` graph structure, but replace the decode-only `kqv = mul_mat(v, kq)` stage with a dedicated CUDA path when `V` and `P` are in the experimental FP8 format. Gate this tightly by shape and backend, and leave all unsupported cases as explicit errors.
 
@@ -15,24 +15,24 @@
 **Files:**
 - Modify: `tests/CMakeLists.txt`
 - Create: `tests/test-vcache-fp8-e8m0-non-flash-generate-smoke.sh`
-- Modify: `tests/test-vcache-fp8-e8m0-auto-flash-attn.sh`
+- Modify: `tests/test-vcache-fp8-e4m3-e8m0-generate-smoke.sh`
 
 **Step 1: Write the failing test**
 
 Create a smoke test that:
 
 - runs `llama-cli`
-- sets `LLAMA_EXP_VCACHE_V_FP8=e8m0`
+- passes `--cache-type-v fp8_e4m3_e8m0_32`
 - does not pass `-fa`
 - expects the model to generate a short answer
 - expects logs to show experimental `V` type
 - expects logs not to show forced `flash_attn = 1`
 
-Adjust the old auto-`flash_attn` test so it now encodes the opposite expectation or remove it if it no longer matches the accepted design.
+Adjust the flash-attn smoke test so it selects FP8 V cache explicitly through `--cache-type-v`.
 
 **Step 2: Run test to verify it fails**
 
-Run: `ctest --test-dir build_cuda -R 'test-vcache-fp8-e8m0-(auto-flash-attn|non-flash-generate-smoke)' --output-on-failure`
+Run: `ctest --test-dir build_cuda -R 'test-vcache-fp8-e8m0-non-flash-generate-smoke|test-vcache-fp8-e4m3-e8m0-generate-smoke' --output-on-failure`
 
 Expected: failure because the current code auto-enables `flash_attn` or rejects non-`flash_attn`.
 
@@ -40,7 +40,7 @@ Expected: failure because the current code auto-enables `flash_attn` or rejects 
 
 Do not commit yet. Continue to implementation after the failing behavior is captured.
 
-### Task 2: Remove the current auto-flash-attn default
+### Task 2: Remove the current environment-variable override
 
 **Files:**
 - Modify: `src/llama-context.cpp`
@@ -57,7 +57,7 @@ Run the same focused CTest command and confirm the failure is due to forced or r
 
 Update `llama_init_from_model()` so that:
 
-- `LLAMA_EXP_VCACHE_V_FP8` no longer auto-enables `flash_attn`
+- FP8 V cache selection uses the standard cache type parameter and does not auto-enable `flash_attn`
 - unsupported combinations are rejected with targeted errors
 - the new non-`flash_attn` experimental mode can proceed to graph building
 
@@ -162,7 +162,7 @@ Run the same focused CTest command and confirm both tests pass.
 
 Run a real debug server startup without `-fa`:
 
-`GGML_CUDA_TRUNC_ENABLE=0 LLAMA_EXP_VCACHE_V_FP8=e8m0 ./build_cuda/bin/llama-server -m ../models/qwen3-8b-nvfp4.gguf --n_gpu_layers 40 --host 127.0.0.1 --batch-size 2048 --ubatch-size 512 --port <port> -t 32 -c 2048 --no-warmup`
+`GGML_CUDA_TRUNC_ENABLE=0 ./build_cuda/bin/llama-server -m ../models/qwen3-8b-nvfp4.gguf --cache-type-v fp8_e4m3_e8m0_32 --n_gpu_layers 40 --host 127.0.0.1 --batch-size 2048 --ubatch-size 512 --port <port> -t 32 -c 2048 --no-warmup`
 
 Expected:
 
