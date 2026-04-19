@@ -556,8 +556,11 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
         const ggml_tensor * src0,
         bool linear_scale_layout,
         cudaStream_t stream,
+        ggml_cuda_pool_alloc<uint8_t> & transient_data,
+        ggml_cuda_pool_alloc<uint8_t> & transient_scale,
         ggml_cuda_nvfp4_split_matrix & out) {
-    const bool cacheable = src0->buffer != nullptr;
+    const bool cacheable = src0->buffer != nullptr &&
+            ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS;
     auto & cache = ctx.nvfp4_repack_cache[ctx.device];
     if (cacheable) {
         for (const ggml_cuda_nvfp4_cache_entry & entry : cache) {
@@ -587,25 +590,30 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
     void * data_repacked = nullptr;
     void * scale_repacked = nullptr;
 
-    cudaError_t err = cudaMalloc(&data_repacked, data_nbytes);
-    if (err != cudaSuccess) {
-        static std::atomic<bool> logged(false);
-        if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
-            GGML_LOG_WARN("%s: cudaMalloc failed for repacked src0 data (%zu bytes): %s\n",
-                    __func__, data_nbytes, cudaGetErrorString(err));
+    if (cacheable) {
+        cudaError_t err = cudaMalloc(&data_repacked, data_nbytes);
+        if (err != cudaSuccess) {
+            static std::atomic<bool> logged(false);
+            if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
+                GGML_LOG_WARN("%s: cudaMalloc failed for repacked src0 data (%zu bytes): %s\n",
+                        __func__, data_nbytes, cudaGetErrorString(err));
+            }
+            return false;
         }
-        return false;
-    }
 
-    err = cudaMalloc(&scale_repacked, scale_nbytes);
-    if (err != cudaSuccess) {
-        static std::atomic<bool> logged(false);
-        if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
-            GGML_LOG_WARN("%s: cudaMalloc failed for repacked src0 scale (%zu bytes): %s\n",
-                    __func__, scale_nbytes, cudaGetErrorString(err));
+        err = cudaMalloc(&scale_repacked, scale_nbytes);
+        if (err != cudaSuccess) {
+            static std::atomic<bool> logged(false);
+            if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
+                GGML_LOG_WARN("%s: cudaMalloc failed for repacked src0 scale (%zu bytes): %s\n",
+                        __func__, scale_nbytes, cudaGetErrorString(err));
+            }
+            cudaFree(data_repacked);
+            return false;
         }
-        cudaFree(data_repacked);
-        return false;
+    } else {
+        data_repacked = transient_data.alloc(ctx.pool(), data_nbytes);
+        scale_repacked = transient_scale.alloc(ctx.pool(), scale_nbytes);
     }
 
     int64_t scale_inner_padded = 0;
@@ -879,7 +887,12 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             stream);
 
     ggml_cuda_nvfp4_split_matrix src0_repacked = {};
-    if (!ggml_cuda_nvfp4_get_repacked_src0(ctx, src0, linear_scale_layout, stream, src0_repacked)) {
+    ggml_cuda_pool_alloc<uint8_t> src0_repacked_data_tmp(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src0_repacked_scale_tmp(ctx.pool());
+    if (!ggml_cuda_nvfp4_get_repacked_src0(
+                ctx, src0, linear_scale_layout, stream,
+                src0_repacked_data_tmp, src0_repacked_scale_tmp,
+                src0_repacked)) {
         static std::atomic<bool> logged(false);
         if (debug_enabled || !logged.exchange(true)) {
             GGML_LOG_WARN("%s: failed to prepare repacked src0 channels for %s\n", __func__, ggml_get_name(dst));
