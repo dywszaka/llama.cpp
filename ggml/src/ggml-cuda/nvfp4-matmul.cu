@@ -3,6 +3,8 @@
 #include "ggml-backend.h"
 #include "../ggml-quants.h"
 
+#include <cuda_fp8.h>
+
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
@@ -441,6 +443,15 @@ static __host__ __device__ __forceinline__ int64_t ggml_cuda_nvfp4_scale_tiled_i
     return tile_base + tile_offset;
 }
 
+static __device__ __forceinline__ uint8_t ggml_cuda_nvfp4_lt_scale_from_ggml_scale_byte(uint8_t ggml_e) {
+    const float scale_f = ggml_cuda_e4m3_to_fp32(ggml_e);
+    if (!(scale_f > 0.0f) || !isfinite(scale_f)) {
+        return 0;
+    }
+
+    return (uint8_t) __nv_cvt_float_to_fp8(scale_f, __NV_SATFINITE, __NV_E4M3);
+}
+
 static __global__ void ggml_cuda_nvfp4_split_blocks_kernel(
         const block_nvfp4 * __restrict__ in,
         uint8_t * __restrict__ out_data,
@@ -469,7 +480,7 @@ static __global__ void ggml_cuda_nvfp4_split_blocks_kernel(
     const int64_t scale_idx = linear_scale_layout ?
             (outer * n_inner_padded + inner) :
             ggml_cuda_nvfp4_scale_tiled_index(outer, inner, n_inner_padded);
-    out_scale[scale_idx] = v.e;
+    out_scale[scale_idx] = ggml_cuda_nvfp4_lt_scale_from_ggml_scale_byte(v.e);
 }
 
 static void ggml_cuda_nvfp4_split_blocks_cuda(
@@ -1137,6 +1148,11 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
     const char * stage = "matmul_desc_create";
     cublasStatus_t st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cudaDataType_t scale_type = CUDA_R_32F;
+        stage = "matmul_desc_set_scale_type";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_SCALE_TYPE, &scale_type, sizeof(scale_type));
+    }
 
     const cublasOperation_t op_t = CUBLAS_OP_T;
     const cublasOperation_t op_n = CUBLAS_OP_N;
@@ -1208,12 +1224,27 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne01, (int64_t) ne10);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        stage = "layout_set_order_a";
+        st = cublasLtMatrixLayoutSetAttribute(a_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_b";
         st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne11_padded, (int64_t) ne10);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        stage = "layout_set_order_b";
+        st = cublasLtMatrixLayoutSetAttribute(b_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_c";
         st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) ne01, (uint64_t) ne11_padded, (int64_t) ne01);
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        stage = "layout_set_order_c";
+        st = cublasLtMatrixLayoutSetAttribute(c_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
     }
 
     // cuBLASLt FP4 path applies the channel scale directly to packed FP4 values.
