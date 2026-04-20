@@ -735,6 +735,7 @@ static bool run_case_backend_batched_dynamic_rhs(
         int batch_k,
         int batch_q,
         float global_scale_a,
+        float k_amplitude,
         float q_amplitude,
         uint32_t seed) {
     GGML_ASSERT((m % 16) == 0);
@@ -743,7 +744,7 @@ static bool run_case_backend_batched_dynamic_rhs(
     GGML_ASSERT(batch_q % batch_k == 0);
 
     std::mt19937 rng(seed);
-    std::uniform_real_distribution<float> dist_k(-1.0f, 1.0f);
+    std::uniform_real_distribution<float> dist_k(-k_amplitude, k_amplitude);
     std::uniform_real_distribution<float> dist_q(-q_amplitude, q_amplitude);
 
     const int q_per_k = batch_q / batch_k;
@@ -900,8 +901,8 @@ static bool run_case_backend_batched_dynamic_rhs(
     const bool ok = max_abs_err <= tol_abs || max_rel_err <= tol_rel;
 
     std::printf(
-            "backend-batched case m=%d n=%d k=%d batch_k=%d batch_q=%d q_amp=%.1f | max_abs=%.6g max_rel=%.6g | %s\n",
-            m, n, k, batch_k, batch_q, q_amplitude, max_abs_err, max_rel_err, ok ? "PASS" : "FAIL");
+            "backend-batched case m=%d n=%d k=%d batch_k=%d batch_q=%d k_amp=%.4g q_amp=%.1f | max_abs=%.6g max_rel=%.6g | %s\n",
+            m, n, k, batch_k, batch_q, k_amplitude, q_amplitude, max_abs_err, max_rel_err, ok ? "PASS" : "FAIL");
     if (!ok) {
         std::printf("  worst idx=%zu ref=%.8f gpu=%.8f\n", worst_idx, c_ref[worst_idx], c_gpu[worst_idx]);
     }
@@ -1129,9 +1130,10 @@ int main() {
     ok = run_case_integration_style(64, 9, 128, 1.00f, 1.00f, 12u) && ok;
     ok = run_case_integration_style(96, 5, 192, 1.50f, 0.90f, 13u) && ok;
     ok = run_case_integration_style_dynamic_device_alpha(32, 16, 128, 1.0f, 96.0f, 20u) && ok;
-    ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 1, 1, 1.0f, 96.0f, 22u) && ok;
-    ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 8, 1.0f, 96.0f, 23u) && ok;
-    ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 32, 1.0f, 96.0f, 21u) && ok;
+    ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 1, 1, 1.0f, 1.0f, 96.0f, 22u) && ok;
+    ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 8, 1.0f, 1.0f, 96.0f, 23u) && ok;
+    ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 32, 1.0f, 1.0f, 96.0f, 21u) && ok;
+    ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 32, 1.0f, 1e-3f, 96.0f, 25u) && ok;
     ok = run_case_backend_batched_dynamic_rhs_permuted_lhs(32, 16, 128, 8, 32, 1.0f, 96.0f, 24u) && ok;
 
     if (!ok) {

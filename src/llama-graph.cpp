@@ -1262,6 +1262,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
 
+        if (v->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
+            const int32_t flags = 1;
+            memcpy((int32_t *) cur->op_params + 4, &flags, sizeof(flags));
+        }
+
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
 

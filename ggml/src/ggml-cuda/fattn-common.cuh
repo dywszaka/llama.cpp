@@ -25,6 +25,7 @@ typedef void (* fattn_kernel_t)(
         const float m1,
         const uint32_t n_head_log2,
         const float logit_softcap,
+        const int32_t flags,
         const int32_t ne00, const int32_t ne01, const int32_t ne02, const int32_t ne03,
                             const int32_t nb01, const int32_t nb02, const int32_t nb03,
         const int32_t ne10, const int32_t ne11, const int32_t ne12, const int32_t ne13,
@@ -460,6 +461,23 @@ static __device__ __forceinline__ T dequantize_1_f16(const void * __restrict__ v
     return x[i];
 }
 
+template <typename T>
+static __device__ __forceinline__ T dequantize_1_fp8_e4m3_e8m0_32(const void * __restrict__ vx, const int64_t i) {
+    const block_fp8_e4m3_e8m0_32 * x = (const block_fp8_e4m3_e8m0_32 *) vx;
+    const int64_t ib = i / QK_FP8_E4M3_E8M0_32;
+    const int64_t iq = i % QK_FP8_E4M3_E8M0_32;
+    const float scale = x[ib].e == 0 ? 0.0f : ggml_cuda_e8m0_to_fp32(x[ib].e);
+    const float v = ggml_cuda_e4m3_to_fp32(x[ib].qs[iq]) * scale;
+
+#ifdef FP16_AVAILABLE
+    if (std::is_same<T, half>::value) {
+        return __float2half(v);
+    }
+#endif // FP16_AVAILABLE
+
+    return v;
+}
+
 template <int D, int warp_size = WARP_SIZE>
 constexpr __device__ vec_dot_KQ_f16_t get_vec_dot_KQ_f16(ggml_type type_K) {
     return type_K == GGML_TYPE_Q4_0 ? vec_dot_fattn_vec_KQ_q4_0<half, D, warp_size> :
@@ -488,6 +506,7 @@ constexpr __device__ dequantize_1_f16_t get_dequantize_1_f16(ggml_type type_V) {
         type_V == GGML_TYPE_Q5_0 ? dequantize_1_q5_0<half> :
         type_V == GGML_TYPE_Q5_1 ? dequantize_1_q5_1<half> :
         type_V == GGML_TYPE_Q8_0 ? dequantize_1_q8_0<half> :
+        type_V == GGML_TYPE_FP8_E4M3_E8M0_32 ? dequantize_1_fp8_e4m3_e8m0_32<half> :
         type_V == GGML_TYPE_F16 ? dequantize_1_f16<half> :
         nullptr;
 }
@@ -498,6 +517,7 @@ constexpr __device__ dequantize_1_f32_t get_dequantize_1_f32(ggml_type type_V) {
         type_V == GGML_TYPE_Q5_0 ? dequantize_1_q5_0<float> :
         type_V == GGML_TYPE_Q5_1 ? dequantize_1_q5_1<float> :
         type_V == GGML_TYPE_Q8_0 ? dequantize_1_q8_0<float> :
+        type_V == GGML_TYPE_FP8_E4M3_E8M0_32 ? dequantize_1_fp8_e4m3_e8m0_32<float> :
         type_V == GGML_TYPE_F16 ? dequantize_1_f16<float> :
         nullptr;
 }
@@ -925,10 +945,12 @@ void launch_fattn(
     float scale         = 1.0f;
     float max_bias      = 0.0f;
     float logit_softcap = 0.0f;
+    int32_t flags       = 0;
 
     memcpy(&scale,         (const float *) KQV->op_params + 0, sizeof(float));
     memcpy(&max_bias,      (const float *) KQV->op_params + 1, sizeof(float));
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
+    memcpy(&flags,         (const int32_t *) KQV->op_params + 4, sizeof(int32_t));
 
     if (logit_softcap != 0.0f) {
         scale /= logit_softcap;
@@ -949,7 +971,7 @@ void launch_fattn(
         sinks ? ((const char *) sinks->data) : nullptr,
         KV_max.ptr,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, dst_tmp_meta.ptr,
-        scale, max_bias, m0, m1, n_head_log2, logit_softcap,
+        scale, max_bias, m0, m1, n_head_log2, logit_softcap, flags,
         Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],
         K->ne[0], K->ne[1], K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,

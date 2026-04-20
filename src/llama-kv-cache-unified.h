@@ -145,6 +145,7 @@ public:
 
     uint32_t get_size()     const;
     uint32_t get_n_stream() const;
+    uint32_t get_n_kv_tensor(uint32_t n_kv) const;
 
     bool get_has_shift() const;
 
@@ -218,6 +219,7 @@ private:
 
     bool v_trans = true;  // the value tensor is transposed
     bool has_k_scale = false;
+    bool non_flash_fp8_e8m0 = false;
 
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;

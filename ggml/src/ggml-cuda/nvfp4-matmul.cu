@@ -3,6 +3,8 @@
 #include "ggml-backend.h"
 #include "../ggml-quants.h"
 
+#include <cuda_fp8.h>
+
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
@@ -441,6 +443,15 @@ static __host__ __device__ __forceinline__ int64_t ggml_cuda_nvfp4_scale_tiled_i
     return tile_base + tile_offset;
 }
 
+static __device__ __forceinline__ uint8_t ggml_cuda_nvfp4_lt_scale_from_ggml_scale_byte(uint8_t ggml_e) {
+    const float scale_f = ggml_cuda_e4m3_to_fp32(ggml_e);
+    if (!(scale_f > 0.0f) || !isfinite(scale_f)) {
+        return 0;
+    }
+
+    return (uint8_t) __nv_cvt_float_to_fp8(scale_f, __NV_SATFINITE, __NV_E4M3);
+}
+
 static __global__ void ggml_cuda_nvfp4_split_blocks_kernel(
         const block_nvfp4 * __restrict__ in,
         uint8_t * __restrict__ out_data,
@@ -469,7 +480,7 @@ static __global__ void ggml_cuda_nvfp4_split_blocks_kernel(
     const int64_t scale_idx = linear_scale_layout ?
             (outer * n_inner_padded + inner) :
             ggml_cuda_nvfp4_scale_tiled_index(outer, inner, n_inner_padded);
-    out_scale[scale_idx] = v.e;
+    out_scale[scale_idx] = ggml_cuda_nvfp4_lt_scale_from_ggml_scale_byte(v.e);
 }
 
 static void ggml_cuda_nvfp4_split_blocks_cuda(
@@ -545,8 +556,11 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
         const ggml_tensor * src0,
         bool linear_scale_layout,
         cudaStream_t stream,
+        ggml_cuda_pool_alloc<uint8_t> & transient_data,
+        ggml_cuda_pool_alloc<uint8_t> & transient_scale,
         ggml_cuda_nvfp4_split_matrix & out) {
-    const bool cacheable = src0->buffer != nullptr;
+    const bool cacheable = src0->buffer != nullptr &&
+            ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS;
     auto & cache = ctx.nvfp4_repack_cache[ctx.device];
     if (cacheable) {
         for (const ggml_cuda_nvfp4_cache_entry & entry : cache) {
@@ -576,25 +590,30 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
     void * data_repacked = nullptr;
     void * scale_repacked = nullptr;
 
-    cudaError_t err = cudaMalloc(&data_repacked, data_nbytes);
-    if (err != cudaSuccess) {
-        static std::atomic<bool> logged(false);
-        if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
-            GGML_LOG_WARN("%s: cudaMalloc failed for repacked src0 data (%zu bytes): %s\n",
-                    __func__, data_nbytes, cudaGetErrorString(err));
+    if (cacheable) {
+        cudaError_t err = cudaMalloc(&data_repacked, data_nbytes);
+        if (err != cudaSuccess) {
+            static std::atomic<bool> logged(false);
+            if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
+                GGML_LOG_WARN("%s: cudaMalloc failed for repacked src0 data (%zu bytes): %s\n",
+                        __func__, data_nbytes, cudaGetErrorString(err));
+            }
+            return false;
         }
-        return false;
-    }
 
-    err = cudaMalloc(&scale_repacked, scale_nbytes);
-    if (err != cudaSuccess) {
-        static std::atomic<bool> logged(false);
-        if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
-            GGML_LOG_WARN("%s: cudaMalloc failed for repacked src0 scale (%zu bytes): %s\n",
-                    __func__, scale_nbytes, cudaGetErrorString(err));
+        err = cudaMalloc(&scale_repacked, scale_nbytes);
+        if (err != cudaSuccess) {
+            static std::atomic<bool> logged(false);
+            if (ggml_cuda_nvfp4_native_debug_enabled() || !logged.exchange(true)) {
+                GGML_LOG_WARN("%s: cudaMalloc failed for repacked src0 scale (%zu bytes): %s\n",
+                        __func__, scale_nbytes, cudaGetErrorString(err));
+            }
+            cudaFree(data_repacked);
+            return false;
         }
-        cudaFree(data_repacked);
-        return false;
+    } else {
+        data_repacked = transient_data.alloc(ctx.pool(), data_nbytes);
+        scale_repacked = transient_scale.alloc(ctx.pool(), scale_nbytes);
     }
 
     int64_t scale_inner_padded = 0;
@@ -868,7 +887,12 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             stream);
 
     ggml_cuda_nvfp4_split_matrix src0_repacked = {};
-    if (!ggml_cuda_nvfp4_get_repacked_src0(ctx, src0, linear_scale_layout, stream, src0_repacked)) {
+    ggml_cuda_pool_alloc<uint8_t> src0_repacked_data_tmp(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src0_repacked_scale_tmp(ctx.pool());
+    if (!ggml_cuda_nvfp4_get_repacked_src0(
+                ctx, src0, linear_scale_layout, stream,
+                src0_repacked_data_tmp, src0_repacked_scale_tmp,
+                src0_repacked)) {
         static std::atomic<bool> logged(false);
         if (debug_enabled || !logged.exchange(true)) {
             GGML_LOG_WARN("%s: failed to prepare repacked src0 channels for %s\n", __func__, ggml_get_name(dst));
@@ -1137,6 +1161,11 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
     const char * stage = "matmul_desc_create";
     cublasStatus_t st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cudaDataType_t scale_type = CUDA_R_32F;
+        stage = "matmul_desc_set_scale_type";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_SCALE_TYPE, &scale_type, sizeof(scale_type));
+    }
 
     const cublasOperation_t op_t = CUBLAS_OP_T;
     const cublasOperation_t op_n = CUBLAS_OP_N;
@@ -1208,12 +1237,27 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne01, (int64_t) ne10);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        stage = "layout_set_order_a";
+        st = cublasLtMatrixLayoutSetAttribute(a_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_b";
         st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne11_padded, (int64_t) ne10);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        stage = "layout_set_order_b";
+        st = cublasLtMatrixLayoutSetAttribute(b_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_c";
         st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) ne01, (uint64_t) ne11_padded, (int64_t) ne01);
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        stage = "layout_set_order_c";
+        st = cublasLtMatrixLayoutSetAttribute(c_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
     }
 
     // cuBLASLt FP4 path applies the channel scale directly to packed FP4 values.

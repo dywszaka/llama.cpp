@@ -409,7 +409,8 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4   = 40,
-        GGML_TYPE_COUNT   = 41,
+        GGML_TYPE_FP8_E4M3_E8M0_32 = 41,
+        GGML_TYPE_COUNT   = 42,
     };
 
     // precision
