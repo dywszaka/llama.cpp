@@ -105,6 +105,9 @@ typedef sycl::half2 ggml_half2;
 #define QI_NVFP4 (QK_NVFP4 / (4 * QR_NVFP4))
 #define QR_NVFP4 2
 
+#define QI_NVFP4_8 (QK_NVFP4_8 / (4 * QR_NVFP4_8))
+#define QR_NVFP4_8 2
+
 #define QI5_0 (QK5_0 / (4 * QR5_0))
 #define QR5_0 2
 
@@ -203,6 +206,13 @@ typedef struct {
     uint8_t qs[QK_NVFP4/2];
 } block_nvfp4;
 static_assert(sizeof(block_nvfp4) == sizeof(uint8_t) + QK_NVFP4/2, "wrong nvfp4 block size/padding");
+
+#define QK_NVFP4_8 8
+typedef struct {
+    uint8_t e; // E4M3
+    uint8_t qs[QK_NVFP4_8/2];
+} block_nvfp4_8;
+static_assert(sizeof(block_nvfp4_8) == sizeof(uint8_t) + QK_NVFP4_8/2, "wrong nvfp4_8 block size/padding");
 
 #define QK_FP8_E4M3_E8M0_32 32
 typedef struct {

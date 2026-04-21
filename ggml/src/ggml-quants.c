@@ -429,6 +429,49 @@ void quantize_row_nvfp4_ref_default(const float * GGML_RESTRICT x, block_nvfp4 *
     abort();
 }
 
+void quantize_row_nvfp4_8_ref(const float * GGML_RESTRICT x, block_nvfp4_8 * GGML_RESTRICT y, int64_t k, float global_scale) {
+    static const int qk = QK_NVFP4_8;
+    static const float k_fp4_max = 6.0f;
+
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        float vmax = 0.0f;
+
+        for (int j = 0; j < qk; ++j) {
+            const float v = x[ib*qk + j];
+            const float av = fabsf(v);
+            if (av > vmax) {
+                vmax = av;
+            }
+        }
+
+        const float scale = global_scale * (vmax / k_fp4_max);
+        const uint8_t scale_q = best_index_e4m3(scale);
+        y[ib].e = scale_q;
+
+        const float scale_f = GGML_E4M3_TO_FP32_HALF(scale_q);
+        const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
+
+        for (int j = 0; j < qk/2; ++j) {
+            const float v0 = x[ib*qk + 2*j + 0] * inv_scale;
+            const float v1 = x[ib*qk + 2*j + 1] * inv_scale;
+
+            const uint8_t q0 = best_index_nvfp4(v0);
+            const uint8_t q1 = best_index_nvfp4(v1);
+
+            y[ib].qs[j] = q0 | (q1 << 4);
+        }
+    }
+}
+
+void quantize_row_nvfp4_8_ref_default(const float * GGML_RESTRICT x, block_nvfp4_8 * GGML_RESTRICT y, int64_t k) {
+    fprintf(stderr, "%s: NVFP4_8 quantization without global scale is not supported", __func__);
+    abort();
+}
+
 void dequantize_row_q4_0(const block_q4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK4_0;
 
@@ -583,6 +626,32 @@ void dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_REST
 
 void dequantize_row_nvfp4_default(const block_nvfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     fprintf(stderr, "%s: NVFP4 dequantization without global scale is not supported", __func__);
+    abort();
+}
+
+void dequantize_row_nvfp4_8(const block_nvfp4_8 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k, float global_scale) {
+    static const int qk = QK_NVFP4_8;
+
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_E4M3_TO_FP32_HALF(x[i].e);
+        const float out_scale = (global_scale != 0.0f) ? (d / global_scale) : 0.0f;
+
+        for (int j = 0; j < qk/2; ++j) {
+            const int8_t x0 = kvalues_nvfp4[x[i].qs[j] & 0x0F];
+            const int8_t x1 = kvalues_nvfp4[x[i].qs[j] >>   4];
+
+            y[i*qk + 2*j + 0] = x0*out_scale;
+            y[i*qk + 2*j + 1] = x1*out_scale;
+        }
+    }
+}
+
+void dequantize_row_nvfp4_8_default(const block_nvfp4_8 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    fprintf(stderr, "%s: NVFP4_8 dequantization without global scale is not supported", __func__);
     abort();
 }
 

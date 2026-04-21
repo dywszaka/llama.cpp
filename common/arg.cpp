@@ -861,6 +861,7 @@ const std::vector<ggml_type> kv_cache_types_k = {
     GGML_TYPE_Q5_0,
     GGML_TYPE_Q5_1,
     GGML_TYPE_NVFP4,
+    GGML_TYPE_NVFP4_8,
 };
 
 const std::vector<ggml_type> kv_cache_types_v = {

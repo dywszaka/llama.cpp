@@ -2326,13 +2326,18 @@ llama_context * llama_init_from_model(
         params.flash_attn = false;
     }
 
-    if (params.type_v == GGML_TYPE_NVFP4) {
+    if (params.type_v == GGML_TYPE_NVFP4 || params.type_v == GGML_TYPE_NVFP4_8) {
         LLAMA_LOG_ERROR("%s: NVFP4 V cache is disabled\n", __func__);
         return nullptr;
     }
 
-    if (params.flash_attn && params.type_k == GGML_TYPE_NVFP4) {
+    if (params.flash_attn && (params.type_k == GGML_TYPE_NVFP4 || params.type_k == GGML_TYPE_NVFP4_8)) {
         LLAMA_LOG_ERROR("%s: NVFP4 K cache does not support flash_attn yet\n", __func__);
+        return nullptr;
+    }
+
+    if (params.type_k == GGML_TYPE_NVFP4_8 && !params.offload_kqv) {
+        LLAMA_LOG_ERROR("%s: NVFP4_8 K cache requires offload_kqv\n", __func__);
         return nullptr;
     }
 

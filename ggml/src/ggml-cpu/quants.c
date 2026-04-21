@@ -59,6 +59,11 @@ void quantize_row_nvfp4(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, i
     abort();
 }
 
+void quantize_row_nvfp4_8(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    fprintf(stderr, "%s: NVFP4_8 quantization without global scale is not supported", __func__);
+    abort();
+}
+
 //
 // 2-6 bit quantization in super-blocks
 //

@@ -139,6 +139,52 @@ static __global__ void k_set_rows_nvfp4(
     }
 }
 
+static __global__ void k_set_rows_nvfp4_8(
+        const float * __restrict__ src0, const int64_t * __restrict__ src1, block_nvfp4_8 * __restrict__ dst,
+        const int64_t ne00, const int64_t ne01,
+        const int64_t s01,
+        const int64_t s10,
+        const int64_t s1,
+        const float * __restrict__ amax_rows) {
+    const int lane = threadIdx.x;
+    const bool lane_active = lane < QK_NVFP4_8;
+
+    const int ib = blockIdx.x;
+    const int i1 = blockIdx.y;
+    const int64_t k0 = (int64_t) ib * QK_NVFP4_8 + lane;
+
+    const int64_t row_off = (int64_t) i1 * s01;
+    const float xi = (lane_active && k0 < ne00) ? src0[row_off + k0] : 0.0f;
+
+    float vmax = fabsf(xi);
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 4, WARP_SIZE));
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 2, WARP_SIZE));
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 1, WARP_SIZE));
+    vmax = __shfl_sync(0xFFFFFFFF, vmax, 0, WARP_SIZE);
+
+    const int64_t dst_row = *(src1 + i1*s10);
+    block_nvfp4_8 * dst_row_ptr = dst + dst_row*s1 / sizeof(block_nvfp4_8);
+
+    float scale_f = 0.0f;
+    const float amax_f = amax_rows[i1];
+    const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
+    if (lane == 0) {
+        const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
+        const uint8_t scale_q = ggml_cuda_best_index_e4m3_set_rows(scale);
+        dst_row_ptr[ib].e = scale_q;
+        scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
+    }
+    scale_f = __shfl_sync(0xFFFFFFFF, scale_f, 0, WARP_SIZE);
+
+    const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
+    const uint8_t q = ggml_cuda_best_index_nvfp4_set_rows(xi * inv_scale);
+    const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
+
+    if (lane_active && (lane & 1) == 0) {
+        dst_row_ptr[ib].qs[lane/2] = q | (q_peer << 4);
+    }
+}
+
 static __global__ void k_set_rows_scale(
         const int64_t * __restrict__ src1,
         float * __restrict__ scale,
@@ -449,6 +495,45 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
             const dim3 grid_size((uint32_t) (ne00 / QK_NVFP4), (uint32_t) ne01, 1);
             k_set_rows_nvfp4<<<grid_size, block_size, 0, stream>>>(
                     src0_d, src1_d, (block_nvfp4 *) dst->data,
+                    ne00, ne01,
+                    nb01/sizeof(float),
+                    nb10/sizeof(int64_t),
+                    nb1,
+                    amax_d.get());
+            CUDA_CHECK(cudaGetLastError());
+
+            const int scale_blocks = (int) ((ne10 + CUDA_SET_ROWS_BLOCK_SIZE - 1) / CUDA_SET_ROWS_BLOCK_SIZE);
+            k_set_rows_scale<<<scale_blocks, CUDA_SET_ROWS_BLOCK_SIZE, 0, stream>>>(
+                    src1_d,
+                    (float *) scale_tensor->data,
+                    ne10,
+                    nb10/sizeof(int64_t),
+                    amax_d.get());
+            CUDA_CHECK(cudaGetLastError());
+        }
+    } else if (dst->type == GGML_TYPE_NVFP4_8) {
+        GGML_ASSERT(ne02 == 1 && ne03 == 1);
+        GGML_ASSERT(ne10 == ne01 && ne11 == 1 && ne12 == 1 && ne13 == 1);
+        GGML_ASSERT(ne00 % QK_NVFP4_8 == 0);
+
+        const ggml_tensor * scale_tensor = ggml_tensor_get_nvfp4_scale(dst);
+        GGML_ASSERT(scale_tensor != nullptr);
+        GGML_ASSERT(scale_tensor->type == GGML_TYPE_F32);
+        GGML_ASSERT(scale_tensor->data != nullptr);
+        ggml_cuda_pool_alloc<float> amax_d(ctx.pool(), (size_t) ne01);
+        if (ne01 > 0) {
+            k_abs_max_f32_rows<<<(int) ne01, CUDA_SET_ROWS_BLOCK_SIZE, 0, stream>>>(
+                    src0_d, amax_d.get(),
+                    ne00, ne01,
+                    nb01/sizeof(float));
+            CUDA_CHECK(cudaGetLastError());
+        }
+
+        if (ne01 > 0) {
+            const dim3 block_size(WARP_SIZE);
+            const dim3 grid_size((uint32_t) (ne00 / QK_NVFP4_8), (uint32_t) ne01, 1);
+            k_set_rows_nvfp4_8<<<grid_size, block_size, 0, stream>>>(
+                    src0_d, src1_d, (block_nvfp4_8 *) dst->data,
                     ne00, ne01,
                     nb01/sizeof(float),
                     nb10/sizeof(int64_t),

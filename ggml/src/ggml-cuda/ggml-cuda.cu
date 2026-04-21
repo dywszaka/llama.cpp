@@ -27,6 +27,7 @@
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
+#include "ggml-cuda/nvfp4-kq.cuh"
 #include "ggml-cuda/nvfp4-matmul.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
@@ -2180,6 +2181,23 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         }
     }
 
+    if (!split &&
+        src0->type == GGML_TYPE_NVFP4_8 &&
+        src1->type == GGML_TYPE_F32 &&
+        dst->type == GGML_TYPE_F32) {
+        if (ggml_cuda_mul_mat_nvfp4_8_kq(ctx, src0, src1, dst)) {
+            return;
+        }
+        GGML_ABORT(
+                "%s: NVFP4_8 KQ path failed for dst=%s | "
+                "src0_ne=[%lld,%lld,%lld,%lld] src1_ne=[%lld,%lld,%lld,%lld] dst_ne=[%lld,%lld,%lld,%lld]",
+                __func__,
+                ggml_get_name(dst),
+                (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2], (long long) src0->ne[3],
+                (long long) src1->ne[0], (long long) src1->ne[1], (long long) src1->ne[2], (long long) src1->ne[3],
+                (long long) dst->ne[0], (long long) dst->ne[1], (long long) dst->ne[2], (long long) dst->ne[3]);
+    }
+
     bool use_mul_mat_vec_f = (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_BF16)
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
     bool use_mul_mat_f     = !ggml_is_quantized(src0->type)
@@ -3599,6 +3617,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_FP8_E4M3_E8M0_32:
                     case GGML_TYPE_MXFP4:
                     case GGML_TYPE_NVFP4:
+                    case GGML_TYPE_NVFP4_8:
                     case GGML_TYPE_Q2_K:
                     case GGML_TYPE_Q3_K:
                     case GGML_TYPE_Q4_K:
@@ -3651,7 +3670,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                        op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 ||
                        op->type == GGML_TYPE_FP8_E4M3_E8M0_32 ||
                        op->type == GGML_TYPE_IQ4_NL ||
-                       op->type == GGML_TYPE_NVFP4) &&
+                       op->type == GGML_TYPE_NVFP4 ||
+                       op->type == GGML_TYPE_NVFP4_8) &&
                        op->src[0]->type == GGML_TYPE_F32 &&
                        op->src[1]->type == GGML_TYPE_I64;
             } break;
@@ -3701,6 +3721,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return true;
                 }
                 if (src0_type == GGML_TYPE_NVFP4 && src1_type == GGML_TYPE_F32) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_NVFP4_8 && src1_type == GGML_TYPE_F32) {
                     return true;
                 }
                 if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_IQ4_NL) {
