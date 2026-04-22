@@ -531,7 +531,8 @@ static inline float ggml_e4m3_to_fp32_half(uint8_t x) {
 #define GGML_E4M3_TO_FP32_HALF(x) ggml_e4m3_to_fp32_half(x)
 
 static inline bool ggml_is_fp8_e4m3(enum ggml_type type) {
-    return type == GGML_TYPE_FP8_E4M3_E8M0_32;
+    return type == GGML_TYPE_FP8_E4M3_E8M0_32 ||
+           type == GGML_TYPE_FP8_E4M3_E8M0_16;
 }
 
 /**

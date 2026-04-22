@@ -221,6 +221,13 @@ typedef struct {
 } block_fp8_e4m3_e8m0_32;
 static_assert(sizeof(block_fp8_e4m3_e8m0_32) == sizeof(uint8_t) + QK_FP8_E4M3_E8M0_32, "wrong fp8_e4m3_e8m0_32 block size/padding");
 
+#define QK_FP8_E4M3_E8M0_16 16
+typedef struct {
+    uint8_t e; // E8M0
+    uint8_t qs[QK_FP8_E4M3_E8M0_16];
+} block_fp8_e4m3_e8m0_16;
+static_assert(sizeof(block_fp8_e4m3_e8m0_16) == sizeof(uint8_t) + QK_FP8_E4M3_E8M0_16, "wrong fp8_e4m3_e8m0_16 block size/padding");
+
 #define QK5_0 32
 typedef struct {
     ggml_half d;           // delta

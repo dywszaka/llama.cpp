@@ -336,6 +336,137 @@ static bool run_kq_case(int64_t k, int64_t n_kv, int64_t n_tokens) {
     return ok;
 }
 
+static bool run_kq_case_4d(
+        int64_t k,
+        int64_t n_kv,
+        int64_t n_tokens,
+        int64_t k_ne2,
+        int64_t k_ne3,
+        int64_t q_ne2,
+        int64_t q_ne3) {
+    ggml_init_params params = {
+        /* .mem_size   = */ 16 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context for 4D KQ\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend for 4D KQ\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_tensor * k_cache = ggml_new_tensor_4d(ctx, GGML_TYPE_NVFP4_8, k, n_kv, k_ne2, k_ne3);
+    ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, k, n_tokens, q_ne2, q_ne3);
+    ggml_tensor * kq = ggml_mul_mat(ctx, k_cache, q);
+    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(gf, kq);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate 4D KQ backend tensors\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    const int64_t nblk = k / QK_NVFP4_8;
+    const int64_t r2 = q_ne2 / k_ne2;
+    const int64_t r3 = q_ne3 / k_ne3;
+    const std::vector<float> k_src = make_signal((size_t) k * (size_t) n_kv * (size_t) k_ne2 * (size_t) k_ne3,
+            3.2f, 0.03f, 0.21f);
+    const std::vector<float> q_src = make_signal((size_t) k * (size_t) n_tokens * (size_t) q_ne2 * (size_t) q_ne3,
+            1.1f, -0.02f, 0.73f);
+    std::vector<block_nvfp4_8> k_q((size_t) n_kv * (size_t) k_ne2 * (size_t) k_ne3 * (size_t) nblk);
+    std::vector<float> k_deq(k_src.size(), 0.0f);
+    std::vector<float> q_deq(q_src.size(), 0.0f);
+
+    for (int64_t i3 = 0; i3 < k_ne3; ++i3) {
+        for (int64_t i2 = 0; i2 < k_ne2; ++i2) {
+            for (int64_t row = 0; row < n_kv; ++row) {
+                const size_t row_idx = (size_t) (((i3 * k_ne2 + i2) * n_kv + row) * k);
+                const size_t block_idx = (size_t) (((i3 * k_ne2 + i2) * n_kv + row) * nblk);
+                const float global_scale = 1.0f;
+                quantize_row_nvfp4_8_test_ref(k_src.data() + row_idx, k_q.data() + block_idx, k, global_scale);
+                dequantize_row_nvfp4_8_test_ref(k_q.data() + block_idx, k_deq.data() + row_idx, k, global_scale);
+            }
+        }
+    }
+
+    for (int64_t i3 = 0; i3 < q_ne3; ++i3) {
+        for (int64_t i2 = 0; i2 < q_ne2; ++i2) {
+            for (int64_t col = 0; col < n_tokens; ++col) {
+                const size_t col_idx = (size_t) (((i3 * q_ne2 + i2) * n_tokens + col) * k);
+                float amax = 0.0f;
+                for (int64_t i = 0; i < k; ++i) {
+                    amax = fmaxf(amax, fabsf(q_src[col_idx + (size_t) i]));
+                }
+                const float global_scale = amax > 0.0f ? NVFP4_GLOBAL_SCALE_MAX / amax : 0.0f;
+                std::vector<block_nvfp4_8> q_tmp((size_t) nblk);
+                quantize_row_nvfp4_8_test_ref(q_src.data() + col_idx, q_tmp.data(), k, global_scale);
+                dequantize_row_nvfp4_8_test_ref(q_tmp.data(), q_deq.data() + col_idx, k, global_scale);
+            }
+        }
+    }
+
+    ggml_backend_tensor_set(k_cache, k_q.data(), 0, k_q.size() * sizeof(block_nvfp4_8));
+    ggml_backend_tensor_set(q, q_src.data(), 0, q_src.size() * sizeof(float));
+
+    const ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "4D KQ graph failed: %s\n", ggml_status_to_string(status));
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> got((size_t) n_kv * (size_t) n_tokens * (size_t) q_ne2 * (size_t) q_ne3, 0.0f);
+    std::vector<float> ref(got.size(), 0.0f);
+    ggml_backend_tensor_get(kq, got.data(), 0, got.size() * sizeof(float));
+
+    for (int64_t i3 = 0; i3 < q_ne3; ++i3) {
+        for (int64_t i2 = 0; i2 < q_ne2; ++i2) {
+            const int64_t k_i2 = i2 / r2;
+            const int64_t k_i3 = i3 / r3;
+            for (int64_t col = 0; col < n_tokens; ++col) {
+                for (int64_t row = 0; row < n_kv; ++row) {
+                    float acc = 0.0f;
+                    const size_t k_row_idx = (size_t) (((k_i3 * k_ne2 + k_i2) * n_kv + row) * k);
+                    const size_t q_col_idx = (size_t) (((i3 * q_ne2 + i2) * n_tokens + col) * k);
+                    for (int64_t i = 0; i < k; ++i) {
+                        acc += k_deq[k_row_idx + (size_t) i] * q_deq[q_col_idx + (size_t) i];
+                    }
+                    const size_t out_idx = (size_t) (((i3 * q_ne2 + i2) * n_tokens + col) * n_kv + row);
+                    ref[out_idx] = acc;
+                }
+            }
+        }
+    }
+
+    const double err_nmse = nmse(ref, got);
+    const float err_max_abs = max_abs_diff(ref, got);
+    std::fprintf(stderr,
+            "KQ nvfp4_8 4D k=%lld n_kv=%lld n_tokens=%lld k_ne23=%lldx%lld q_ne23=%lldx%lld nmse=%g max_abs=%g\n",
+            (long long) k, (long long) n_kv, (long long) n_tokens,
+            (long long) k_ne2, (long long) k_ne3, (long long) q_ne2, (long long) q_ne3,
+            err_nmse, err_max_abs);
+    const bool ok = err_nmse <= 1e-6 || err_max_abs <= 2e-4f;
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+    return ok;
+}
+
 int main() {
     disable_cuda_truncation();
 
@@ -358,6 +489,9 @@ int main() {
         return 1;
     }
     if (!run_kq_case(128, 33, 5)) {
+        return 1;
+    }
+    if (!run_kq_case_4d(64, 19, 3, 2, 2, 4, 4)) {
         return 1;
     }
 

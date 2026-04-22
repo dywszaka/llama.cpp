@@ -268,78 +268,102 @@ static __global__ void nvfp4_8_kq_kernel(
     }
 }
 
-static __global__ void nvfp4_8_k_repack_lt_vec16_kernel(
+static __global__ void nvfp4_8_k_repack_lt_vec16_batched_kernel(
         const char * __restrict__ k,
         uint8_t * __restrict__ out_data,
         uint8_t * __restrict__ out_scale,
         const int64_t ne01,
+        const int64_t ne02,
         const int64_t nb00,
         const int64_t nb01,
+        const int64_t nb02,
+        const int64_t nb03,
         const int64_t nblk8,
         const int64_t row_data_bytes,
-        const int64_t scale_inner_padded) {
+        const int64_t scale_inner_padded,
+        const int64_t data_slice_bytes,
+        const int64_t scale_slice_bytes) {
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    const int64_t total = ne01 * nblk8;
-    if (idx >= total) {
+    const int64_t slice_elems = ne01 * nblk8;
+    if (idx >= slice_elems) {
         return;
     }
 
-    const int64_t outer = idx / nblk8;
-    const int64_t inner = idx - outer * nblk8;
-    const block_nvfp4_8 * b = (const block_nvfp4_8 *) (k + outer * nb01 + inner * nb00);
-    uint8_t * data_dst = out_data + outer * row_data_bytes + inner * 8;
+    const int64_t slice = blockIdx.y;
+    const int64_t rem = idx;
+    const int64_t outer = rem / nblk8;
+    const int64_t inner = rem - outer * nblk8;
+    const int64_t i3 = slice / ne02;
+    const int64_t i2 = slice - i3 * ne02;
+
+    const block_nvfp4_8 * b = (const block_nvfp4_8 *) (k + outer * nb01 + i2 * nb02 + i3 * nb03 + inner * nb00);
+    uint8_t * data_dst = out_data + slice * data_slice_bytes + outer * row_data_bytes + inner * 8;
 #pragma unroll
     for (int j = 0; j < QK_NVFP4_8 / 2; ++j) {
         data_dst[j] = b->qs[j];
     }
     const int64_t scale_idx = ggml_cuda_nvfp4_8_kq_scale_tiled_index(outer, inner, scale_inner_padded);
-    out_scale[scale_idx] = ggml_cuda_nvfp4_8_kq_lt_scale_from_ggml_scale_byte(b->e);
+    out_scale[slice * scale_slice_bytes + scale_idx] = ggml_cuda_nvfp4_8_kq_lt_scale_from_ggml_scale_byte(b->e);
 }
 
-static __global__ void nvfp4_8_split_blocks_lt_vec16_kernel(
+static __global__ void nvfp4_8_split_blocks_lt_vec16_batched_kernel(
         const block_nvfp4_8 * __restrict__ blocks,
         uint8_t * __restrict__ out_data,
         uint8_t * __restrict__ out_scale,
         const int64_t nblk8,
         const int64_t n_outer_valid,
         const int64_t row_data_bytes,
-        const int64_t scale_inner_padded) {
+        const int64_t scale_inner_padded,
+        const int64_t data_slice_bytes,
+        const int64_t scale_slice_bytes) {
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    const int64_t total = n_outer_valid * nblk8;
-    if (idx >= total) {
+    const int64_t slice_elems = n_outer_valid * nblk8;
+    if (idx >= slice_elems) {
         return;
     }
 
-    const int64_t outer = idx / nblk8;
-    const int64_t inner = idx - outer * nblk8;
-    const block_nvfp4_8 b = blocks[idx];
-    uint8_t * data_dst = out_data + outer * row_data_bytes + inner * 8;
+    const int64_t slice = blockIdx.y;
+    const int64_t rem = idx;
+    const int64_t outer = rem / nblk8;
+    const int64_t inner = rem - outer * nblk8;
+    const block_nvfp4_8 b = blocks[slice * slice_elems + idx];
+    uint8_t * data_dst = out_data + slice * data_slice_bytes + outer * row_data_bytes + inner * 8;
 #pragma unroll
     for (int j = 0; j < QK_NVFP4_8 / 2; ++j) {
         data_dst[j] = b.qs[j];
     }
     const int64_t scale_idx = ggml_cuda_nvfp4_8_kq_scale_tiled_index(outer, inner, scale_inner_padded);
-    out_scale[scale_idx] = ggml_cuda_nvfp4_8_kq_lt_scale_from_ggml_scale_byte(b.e);
+    out_scale[slice * scale_slice_bytes + scale_idx] = ggml_cuda_nvfp4_8_kq_lt_scale_from_ggml_scale_byte(b.e);
 }
 
-static __global__ void nvfp4_8_kq_store_scaled_kernel(
+static __global__ void nvfp4_8_kq_store_scaled_batched_kernel(
         const float * __restrict__ src,
         const float * __restrict__ column_scales,
         char * __restrict__ dst,
         const int64_t m,
         const int64_t n,
+        const int64_t ne12,
         const int64_t src_ld,
+        const int64_t src_slice_stride,
         const int64_t dst_nb0,
-        const int64_t dst_nb1) {
+        const int64_t dst_nb1,
+        const int64_t dst_nb2,
+        const int64_t dst_nb3) {
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    const int64_t total = m * n;
-    if (idx >= total) {
+    const int64_t slice_elems = m * n;
+    if (idx >= slice_elems) {
         return;
     }
 
-    const int64_t col = idx / m;
-    const int64_t row = idx - col * m;
-    *(float *) (dst + row * dst_nb0 + col * dst_nb1) = src[col * src_ld + row] * column_scales[col];
+    const int64_t slice = blockIdx.y;
+    const int64_t rem = idx;
+    const int64_t col = rem / m;
+    const int64_t row = rem - col * m;
+    const int64_t i3 = slice / ne12;
+    const int64_t i2 = slice - i3 * ne12;
+
+    const float v = src[slice * src_slice_stride + col * src_ld + row] * column_scales[slice * n + col];
+    *(float *) (dst + row * dst_nb0 + col * dst_nb1 + i2 * dst_nb2 + i3 * dst_nb3) = v;
 }
 
 }
@@ -463,15 +487,19 @@ bool ggml_cuda_mul_mat_nvfp4_8_kq_cublaslt(
     const size_t q_data_nbytes = (size_t) lt_n * (size_t) row_data_bytes;
     const size_t k_scale_nbytes = (size_t) k_scale_outer_padded * (size_t) scale_inner_padded;
     const size_t q_scale_nbytes = (size_t) q_scale_outer_padded * (size_t) scale_inner_padded;
+    const int64_t nrows_q = ne11 * ne12 * ne13;
+    const int64_t k_slice_count = src0->ne[2] * src0->ne[3];
+    const int64_t q_slice_count = ne12 * ne13;
+    const size_t dst_tmp_slice_elems = (size_t) lt_m * (size_t) lt_n;
 
-    ggml_cuda_pool_alloc<float> q_amax(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
-    ggml_cuda_pool_alloc<float> q_input_scales(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
-    ggml_cuda_pool_alloc<block_nvfp4_8> q_blocks(ctx.pool(), (size_t) std::max<int64_t>(ne11 * nblk8, 1));
-    ggml_cuda_pool_alloc<uint8_t> k_data(ctx.pool(), k_data_nbytes);
-    ggml_cuda_pool_alloc<uint8_t> k_scale(ctx.pool(), k_scale_nbytes);
-    ggml_cuda_pool_alloc<uint8_t> q_data(ctx.pool(), q_data_nbytes);
-    ggml_cuda_pool_alloc<uint8_t> q_scale(ctx.pool(), q_scale_nbytes);
-    ggml_cuda_pool_alloc<float> dst_tmp(ctx.pool(), (size_t) lt_m * (size_t) lt_n);
+    ggml_cuda_pool_alloc<float> q_amax(ctx.pool(), (size_t) std::max<int64_t>(nrows_q, 1));
+    ggml_cuda_pool_alloc<float> q_input_scales(ctx.pool(), (size_t) std::max<int64_t>(nrows_q, 1));
+    ggml_cuda_pool_alloc<block_nvfp4_8> q_blocks(ctx.pool(), (size_t) std::max<int64_t>(nrows_q * nblk8, 1));
+    ggml_cuda_pool_alloc<uint8_t> k_data(ctx.pool(), (size_t) std::max<int64_t>(k_slice_count, 1) * k_data_nbytes);
+    ggml_cuda_pool_alloc<uint8_t> k_scale(ctx.pool(), (size_t) std::max<int64_t>(k_slice_count, 1) * k_scale_nbytes);
+    ggml_cuda_pool_alloc<uint8_t> q_data(ctx.pool(), (size_t) std::max<int64_t>(q_slice_count, 1) * q_data_nbytes);
+    ggml_cuda_pool_alloc<uint8_t> q_scale(ctx.pool(), (size_t) std::max<int64_t>(q_slice_count, 1) * q_scale_nbytes);
+    ggml_cuda_pool_alloc<float> dst_tmp(ctx.pool(), (size_t) std::max<int64_t>(q_slice_count, 1) * dst_tmp_slice_elems);
 
     cublasLtMatmulDesc_t op_desc = nullptr;
     cublasLtMatrixLayout_t a_desc = nullptr;
@@ -524,68 +552,85 @@ bool ggml_cuda_mul_mat_nvfp4_8_kq_cublaslt(
     const int64_t r2 = src1->ne[2] / src0->ne[2];
     const int64_t r3 = src1->ne[3] / src0->ne[3];
 
-    for (int64_t i3 = 0; i3 < ne13 && st == CUBLAS_STATUS_SUCCESS; ++i3) {
-        for (int64_t i2 = 0; i2 < ne12 && st == CUBLAS_STATUS_SUCCESS; ++i2) {
-            const int64_t k_i2 = i2 / r2;
-            const int64_t k_i3 = i3 / r3;
-            const char * k_slice = (const char *) src0->data + k_i2 * src0->nb[2] + k_i3 * src0->nb[3];
-            const char * q_slice = (const char *) src1->data + i2 * src1->nb[2] + i3 * src1->nb[3];
-            char * dst_slice = (char *) dst->data + i2 * dst->nb[2] + i3 * dst->nb[3];
+    const int block_size = 256;
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        CUDA_CHECK(cudaMemsetAsync(k_data.get(), 0, (size_t) std::max<int64_t>(k_slice_count, 1) * k_data_nbytes, stream));
+        CUDA_CHECK(cudaMemsetAsync(k_scale.get(), 0, (size_t) std::max<int64_t>(k_slice_count, 1) * k_scale_nbytes, stream));
+        CUDA_CHECK(cudaMemsetAsync(q_data.get(), 0, (size_t) std::max<int64_t>(q_slice_count, 1) * q_data_nbytes, stream));
+        CUDA_CHECK(cudaMemsetAsync(q_scale.get(), 0, (size_t) std::max<int64_t>(q_slice_count, 1) * q_scale_nbytes, stream));
+        CUDA_CHECK(cudaMemsetAsync(dst_tmp.get(), 0, (size_t) std::max<int64_t>(q_slice_count, 1) * dst_tmp_slice_elems * sizeof(float), stream));
 
-            CUDA_CHECK(cudaMemsetAsync(k_data.get(), 0, k_data_nbytes, stream));
-            CUDA_CHECK(cudaMemsetAsync(k_scale.get(), 0, k_scale_nbytes, stream));
-            CUDA_CHECK(cudaMemsetAsync(q_data.get(), 0, q_data_nbytes, stream));
-            CUDA_CHECK(cudaMemsetAsync(q_scale.get(), 0, q_scale_nbytes, stream));
-            CUDA_CHECK(cudaMemsetAsync(dst_tmp.get(), 0, (size_t) lt_m * (size_t) lt_n * sizeof(float), stream));
-
-            const int block_size = 256;
-            const int k_grid = (int) ((ne01 * nblk8 + block_size - 1) / block_size);
-            nvfp4_8_k_repack_lt_vec16_kernel<<<k_grid, block_size, 0, stream>>>(
-                    k_slice,
+        if (k_slice_count > 0 && ne01 > 0 && nblk8 > 0) {
+            const int64_t slice_elems = ne01 * nblk8;
+            const dim3 k_grid(
+                    (uint32_t) ((slice_elems + block_size - 1) / block_size),
+                    (uint32_t) k_slice_count,
+                    1);
+            nvfp4_8_k_repack_lt_vec16_batched_kernel<<<k_grid, block_size, 0, stream>>>(
+                    (const char *) src0->data,
                     k_data.get(),
                     k_scale.get(),
-                    src0->ne[1],
-                    src0->nb[0], src0->nb[1],
+                    src0->ne[1], src0->ne[2],
+                    src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
                     nblk8,
                     row_data_bytes,
-                    scale_inner_padded);
+                    scale_inner_padded,
+                    (int64_t) k_data_nbytes,
+                    (int64_t) k_scale_nbytes);
             CUDA_CHECK(cudaGetLastError());
+        }
 
-            nvfp4_8_q_abs_max_kernel<<<(uint32_t) ne11, block_size, 0, stream>>>(
-                    (const float *) q_slice,
+        if (nrows_q > 0) {
+            nvfp4_8_q_abs_max_kernel<<<(uint32_t) nrows_q, block_size, 0, stream>>>(
+                    (const float *) src1->data,
                     q_amax.get(),
-                    ne10, ne11, 1, 1,
-                    src1->nb[0], src1->nb[1], 0, 0);
+                    ne10, ne11, ne12, ne13,
+                    src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3]);
             CUDA_CHECK(cudaGetLastError());
 
-            const dim3 quant_grid((uint32_t) nblk8, (uint32_t) ne11, 1);
+            const dim3 quant_grid((uint32_t) nblk8, (uint32_t) nrows_q, 1);
             nvfp4_8_q_quantize_kernel<<<quant_grid, WARP_SIZE, 0, stream>>>(
-                    (const float *) q_slice,
+                    (const float *) src1->data,
                     q_amax.get(),
                     q_blocks.get(),
                     q_input_scales.get(),
-                    ne10, ne11, 1, 1,
-                    src1->nb[0], src1->nb[1], 0, 0,
+                    ne10, ne11, ne12, ne13,
+                    src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3],
                     nblk8);
             CUDA_CHECK(cudaGetLastError());
 
-            const int q_grid = (int) ((ne11 * nblk8 + block_size - 1) / block_size);
-            nvfp4_8_split_blocks_lt_vec16_kernel<<<q_grid, block_size, 0, stream>>>(
+            const int64_t slice_elems = ne11 * nblk8;
+            const dim3 q_grid(
+                    (uint32_t) ((slice_elems + block_size - 1) / block_size),
+                    (uint32_t) q_slice_count,
+                    1);
+            nvfp4_8_split_blocks_lt_vec16_batched_kernel<<<q_grid, block_size, 0, stream>>>(
                     q_blocks.get(),
                     q_data.get(),
                     q_scale.get(),
                     nblk8,
                     ne11,
                     row_data_bytes,
-                    scale_inner_padded);
+                    scale_inner_padded,
+                    (int64_t) q_data_nbytes,
+                    (int64_t) q_scale_nbytes);
             CUDA_CHECK(cudaGetLastError());
+        }
+    }
+
+    for (int64_t i3 = 0; i3 < ne13 && st == CUBLAS_STATUS_SUCCESS; ++i3) {
+        for (int64_t i2 = 0; i2 < ne12 && st == CUBLAS_STATUS_SUCCESS; ++i2) {
+            const int64_t k_i2 = i2 / r2;
+            const int64_t k_i3 = i3 / r3;
+            const int64_t k_slice = k_i2 + k_i3 * src0->ne[2];
+            const int64_t q_slice = i2 + i3 * ne12;
 
             if (st == CUBLAS_STATUS_SUCCESS) {
-                const void * a_scale_ptr = (const void *) k_scale.get();
+                const void * a_scale_ptr = (const void *) (k_scale.get() + (size_t) k_slice * k_scale_nbytes);
                 st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_ptr, sizeof(a_scale_ptr));
             }
             if (st == CUBLAS_STATUS_SUCCESS) {
-                const void * b_scale_ptr = (const void *) q_scale.get();
+                const void * b_scale_ptr = (const void *) (q_scale.get() + (size_t) q_slice * q_scale_nbytes);
                 st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr));
             }
             if (st == CUBLAS_STATUS_SUCCESS) {
@@ -595,30 +640,38 @@ bool ggml_cuda_mul_mat_nvfp4_8_kq_cublaslt(
                         ctx.cublaslt_handle(),
                         op_desc,
                         &alpha,
-                        k_data.get(), a_desc,
-                        q_data.get(), b_desc,
+                        k_data.get() + (size_t) k_slice * k_data_nbytes, a_desc,
+                        q_data.get() + (size_t) q_slice * q_data_nbytes, b_desc,
                         &beta,
-                        dst_tmp.get(), c_desc,
-                        dst_tmp.get(), c_desc,
+                        dst_tmp.get() + (size_t) q_slice * dst_tmp_slice_elems, c_desc,
+                        dst_tmp.get() + (size_t) q_slice * dst_tmp_slice_elems, c_desc,
                         nullptr,
                         nullptr, 0,
                         stream);
             }
-            if (st == CUBLAS_STATUS_SUCCESS) {
-                const int64_t total = ne01 * ne11;
-                const int store_grid = (int) ((total + block_size - 1) / block_size);
-                nvfp4_8_kq_store_scaled_kernel<<<store_grid, block_size, 0, stream>>>(
-                        dst_tmp.get(),
-                        q_input_scales.get(),
-                        dst_slice,
-                        ne01,
-                        ne11,
-                        lt_m,
-                        dst->nb[0],
-                        dst->nb[1]);
-                CUDA_CHECK(cudaGetLastError());
-            }
         }
+    }
+
+    if (st == CUBLAS_STATUS_SUCCESS && q_slice_count > 0) {
+        const int64_t slice_elems = ne01 * ne11;
+        const dim3 store_grid(
+                (uint32_t) ((slice_elems + block_size - 1) / block_size),
+                (uint32_t) q_slice_count,
+                1);
+        nvfp4_8_kq_store_scaled_batched_kernel<<<store_grid, block_size, 0, stream>>>(
+                dst_tmp.get(),
+                q_input_scales.get(),
+                (char *) dst->data,
+                ne01,
+                ne11,
+                ne12,
+                lt_m,
+                (int64_t) dst_tmp_slice_elems,
+                dst->nb[0],
+                dst->nb[1],
+                dst->nb[2],
+                dst->nb[3]);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     if (c_desc != nullptr) {

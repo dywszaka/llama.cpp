@@ -629,7 +629,8 @@ static __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32_half(uint8_t x) {
 }
 
 static __host__ __device__ __forceinline__ bool ggml_cuda_is_fp8_e4m3(ggml_type type) {
-    return type == GGML_TYPE_FP8_E4M3_E8M0_32;
+    return type == GGML_TYPE_FP8_E4M3_E8M0_32 ||
+           type == GGML_TYPE_FP8_E4M3_E8M0_16;
 }
 
 static __host__ __device__ __forceinline__ float ggml_cuda_quantize_dequantize_fp8_e4m3_prob(float x) {
@@ -710,6 +711,13 @@ struct ggml_cuda_type_traits<GGML_TYPE_Q8_0> {
 template<>
 struct ggml_cuda_type_traits<GGML_TYPE_FP8_E4M3_E8M0_32> {
     static constexpr int qk = QK_FP8_E4M3_E8M0_32;
+    static constexpr int qr = 1;
+    static constexpr int qi = 1;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_FP8_E4M3_E8M0_16> {
+    static constexpr int qk = QK_FP8_E4M3_E8M0_16;
     static constexpr int qr = 1;
     static constexpr int qi = 1;
 };

@@ -35,7 +35,8 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     GGML_ASSERT(kv_size % n_pad == 0);
 
     has_k_scale = type_k == GGML_TYPE_NVFP4 || type_k == GGML_TYPE_NVFP4_8;
-    non_flash_fp8_e8m0 = type_v == GGML_TYPE_FP8_E4M3_E8M0_32 && !v_trans;
+    non_flash_fp8_e8m0 = (type_v == GGML_TYPE_FP8_E4M3_E8M0_32 ||
+                          type_v == GGML_TYPE_FP8_E4M3_E8M0_16) && !v_trans;
 
     // TODO: this is temporary until we support passing reuse layer filters [KV_REUSE]
     auto n_layer_cache = hparams.n_layer;

@@ -175,6 +175,140 @@ static ggml_tensor ggml_cuda_fp8_make_matrix_slice(
 
 } // namespace
 
+static __global__ void mul_mat_fp8_e8m0_16_f32_direct_kernel(
+        const char * __restrict__ src0,
+        const float * __restrict__ src1,
+        char * __restrict__ dst,
+        int64_t k,
+        int64_t m,
+        int64_t n,
+        int64_t nb01,
+        int64_t nb11,
+        int64_t nb1) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t total = m * n;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t im = idx % m;
+    const int64_t in = idx / m;
+    const int64_t nblk = k / QK_FP8_E4M3_E8M0_16;
+
+    const block_fp8_e4m3_e8m0_16 * v_row = (const block_fp8_e4m3_e8m0_16 *) (src0 + im * nb01);
+    const float * p_col = (const float *) ((const char *) src1 + in * nb11);
+
+    float sum = 0.0f;
+    for (int64_t ib = 0; ib < nblk; ++ib) {
+        const block_fp8_e4m3_e8m0_16 vb = v_row[ib];
+        float p_amax = 0.0f;
+#pragma unroll
+        for (int j = 0; j < QK_FP8_E4M3_E8M0_16; ++j) {
+            p_amax = fmaxf(p_amax, fabsf(p_col[ib * QK_FP8_E4M3_E8M0_16 + j]));
+        }
+
+        const uint8_t p_scale_q = p_amax == 0.0f ? 0 : ggml_cuda_fp32_to_e8m0_ceil_scale(p_amax / 448.0f);
+        const float p_scale = p_scale_q == 0 ? 0.0f : ggml_cuda_e8m0_to_fp32(p_scale_q);
+        const float p_inv_scale = p_scale > 0.0f ? 1.0f / p_scale : 0.0f;
+        const float v_scale = vb.e == 0 ? 0.0f : ggml_cuda_e8m0_to_fp32(vb.e);
+
+#pragma unroll
+        for (int j = 0; j < QK_FP8_E4M3_E8M0_16; ++j) {
+            const float p = p_col[ib * QK_FP8_E4M3_E8M0_16 + j];
+            const uint8_t p_q = p_scale > 0.0f ? __nv_cvt_float_to_fp8(p * p_inv_scale, __NV_SATFINITE, __NV_E4M3) : 0;
+            const float p_d = ggml_cuda_e4m3_to_fp32(p_q) * p_scale;
+            const float v_d = ggml_cuda_e4m3_to_fp32(vb.qs[j]) * v_scale;
+            sum += v_d * p_d;
+        }
+    }
+
+    *(float *) (dst + in * nb1 + im * sizeof(float)) = sum;
+}
+
+static bool ggml_cuda_mul_mat_fp8_e8m0_16_direct_2d(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst) {
+    if (src0->type != GGML_TYPE_FP8_E4M3_E8M0_16 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (ggml_is_transposed(src0) || ggml_is_transposed(src1) || !ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    const int64_t k = src1->ne[0];
+    const int64_t n = src1->ne[1];
+    const int64_t m = src0->ne[1];
+    if (src0->ne[0] != k || dst->ne[0] != m || dst->ne[1] != n) {
+        return false;
+    }
+
+    if ((k % QK_FP8_E4M3_E8M0_16) != 0) {
+        return false;
+    }
+
+    const int block_size = 256;
+    const int64_t total = m * n;
+    const int grid_size = (int) ((total + block_size - 1) / block_size);
+    if (grid_size > 0) {
+        mul_mat_fp8_e8m0_16_f32_direct_kernel<<<grid_size, block_size, 0, ctx.stream()>>>(
+                (const char *) src0->data,
+                (const float *) src1->data,
+                (char *) dst->data,
+                k, m, n,
+                src0->nb[1],
+                src1->nb[1],
+                dst->nb[1]);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    return true;
+}
+
+bool ggml_cuda_mul_mat_fp8_e8m0_16_direct(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst) {
+    GGML_ASSERT(src0 != nullptr);
+    GGML_ASSERT(src1 != nullptr);
+    GGML_ASSERT(dst  != nullptr);
+
+    if (src0->type != GGML_TYPE_FP8_E4M3_E8M0_16 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (src0->ne[2] != 1 || src0->ne[3] != 1 || src1->ne[2] != 1 || src1->ne[3] != 1 || dst->ne[2] != 1 || dst->ne[3] != 1) {
+        if (!ggml_is_contiguous(dst)) {
+            return false;
+        }
+
+        if (src1->ne[2] % src0->ne[2] != 0 || src1->ne[3] % src0->ne[3] != 0) {
+            return false;
+        }
+
+        const int64_t r2 = src1->ne[2] / src0->ne[2];
+        const int64_t r3 = src1->ne[3] / src0->ne[3];
+        for (int64_t i3 = 0; i3 < src1->ne[3]; ++i3) {
+            for (int64_t i2 = 0; i2 < src1->ne[2]; ++i2) {
+                ggml_tensor src0_slice = ggml_cuda_fp8_make_matrix_slice(src0, i2 / r2, i3 / r3);
+                ggml_tensor src1_slice = ggml_cuda_fp8_make_matrix_slice(src1, i2, i3);
+                ggml_tensor dst_slice  = ggml_cuda_fp8_make_matrix_slice(dst,  i2, i3);
+
+                if (!ggml_cuda_mul_mat_fp8_e8m0_16_direct_2d(ctx, &src0_slice, &src1_slice, &dst_slice)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    return ggml_cuda_mul_mat_fp8_e8m0_16_direct_2d(ctx, src0, src1, dst);
+}
+
 bool ggml_cuda_mul_mat_fp8_e8m0_native(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,

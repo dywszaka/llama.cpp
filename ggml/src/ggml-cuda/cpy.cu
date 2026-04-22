@@ -73,6 +73,23 @@ static __device__ void cpy_blck_fp8_e4m3_e8m0_32_f32(const char * cxi, char * cd
     }
 }
 
+static __device__ void cpy_blck_fp8_e4m3_e8m0_16_f32(const char * cxi, char * cdsti) {
+    const block_fp8_e4m3_e8m0_16 * x = (const block_fp8_e4m3_e8m0_16 *) cxi;
+    float * y = (float *) cdsti;
+    const float scale = ggml_cuda_e8m0_to_fp32(x->e);
+
+#pragma unroll
+    for (int j = 0; j < QK_FP8_E4M3_E8M0_16; ++j) {
+        y[j] = ggml_cuda_e4m3_to_fp32(x->qs[j]) * scale;
+    }
+}
+
+static __device__ void cpy_blck_fp8_e4m3_e8m0_16_fp8_e4m3_e8m0_16(const char * cxi, char * cdsti) {
+    const block_fp8_e4m3_e8m0_16 * x = (const block_fp8_e4m3_e8m0_16 *) cxi;
+    block_fp8_e4m3_e8m0_16 * y = (block_fp8_e4m3_e8m0_16 *) cdsti;
+    *y = *x;
+}
+
 static bool ggml_cuda_is_fp8_e8m0_transpose_permute_repack(const ggml_tensor * src0, const ggml_tensor * src1) {
     if (src0->type != GGML_TYPE_FP8_E4M3_E8M0_32 || src1->type != GGML_TYPE_FP8_E4M3_E8M0_32) {
         return false;
@@ -239,6 +256,34 @@ static __global__ void cpy_q_f32(const char * cx, char * cdst_direct, const int 
     cpy_blck(cx + x_offset, cdst + dst_offset);
 }
 
+template <cpy_kernel_t cpy_blck, int qk>
+static __global__ void cpy_q_q(const char * cx, char * cdst_direct, const int ne,
+                               const int ne00, const int ne01, const int ne02, const int nb00, const int nb01, const int nb02,
+                               const int nb03, const int ne10, const int ne11, const int ne12, const int nb10, const int nb11,
+                               const int nb12, const int nb13, char ** cdst_indirect, int graph_cpynode_index) {
+    const int i = (blockDim.x*blockIdx.x + threadIdx.x)*qk;
+
+    if (i >= ne) {
+        return;
+    }
+
+    char * cdst = (cdst_indirect != nullptr) ? cdst_indirect[graph_cpynode_index]: cdst_direct;
+
+    const int i03 = i/(ne00 * ne01 * ne02);
+    const int i02 = (i - i03*ne00*ne01*ne02 )/ (ne00*ne01);
+    const int i01 = (i - i03*ne00*ne01*ne02  -  i02*ne01*ne00) / ne00;
+    const int i00 = i - i03*ne00*ne01*ne02 - i02*ne01*ne00 - i01*ne00;
+    const int x_offset = (i00/qk)*nb00 + i01*nb01 + i02*nb02 + i03 * nb03;
+
+    const int i13 = i/(ne10 * ne11 * ne12);
+    const int i12 = (i - i13*ne10*ne11*ne12) / (ne10*ne11);
+    const int i11 = (i - i13*ne10*ne11*ne12 - i12*ne10*ne11) / ne10;
+    const int i10 = i - i13*ne10*ne11*ne12 - i12*ne10*ne11 - i11*ne10;
+    const int dst_offset = (i10/qk)*nb10 + i11*nb11 + i12*nb12 + i13*nb13;
+
+    cpy_blck(cx + x_offset, cdst + dst_offset);
+}
+
 // Copy destination pointers to GPU to be available when pointer indirection is in use
 
 void ggml_cuda_cpy_dest_ptrs_copy(ggml_cuda_graph * cuda_graph, char ** host_dest_ptrs, const int host_dest_ptrs_size, cudaStream_t stream) {
@@ -312,6 +357,20 @@ static void ggml_cpy_q_f32_cuda(
 
     const int num_blocks = ne;
     cpy_q_f32<cpy_blck, qk><<<num_blocks, 1, 0, stream>>>
+        (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, cdst_indirect, graph_cpynode_index++);
+}
+
+template <cpy_kernel_t cpy_blck, int qk>
+static void ggml_cpy_q_q_cuda(
+    const char * cx, char * cdst, const int ne,
+    const int ne00, const int ne01, const int ne02, const int nb00, const int nb01, const int nb02,
+    const int nb03, const int ne10, const int ne11, const int ne12, const int nb10, const int nb11, const int nb12, const int nb13, cudaStream_t stream, char ** cdst_indirect, int & graph_cpynode_index) {
+
+    GGML_ASSERT(ne % qk == 0);
+    GGML_ASSERT(ne00 % qk == 0);
+    GGML_ASSERT(ne10 % qk == 0);
+    const int num_blocks = ne / qk;
+    cpy_q_q<cpy_blck, qk><<<num_blocks, 1, 0, stream>>>
         (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, cdst_indirect, graph_cpynode_index++);
 }
 
@@ -613,6 +672,12 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
         ggml_cpy_f32_q_cuda<cpy_blck_f32_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_32 && src1->type == GGML_TYPE_F32) {
         ggml_cpy_q_f32_cuda<cpy_blck_fp8_e4m3_e8m0_32_f32, QK_FP8_E4M3_E8M0_32>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
+    } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_FP8_E4M3_E8M0_16) {
+        ggml_cpy_f32_q_cuda<cpy_blck_f32_fp8_e4m3_e8m0_16, QK_FP8_E4M3_E8M0_16>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
+    } else if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_16 && src1->type == GGML_TYPE_F32) {
+        ggml_cpy_q_f32_cuda<cpy_blck_fp8_e4m3_e8m0_16_f32, QK_FP8_E4M3_E8M0_16>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
+    } else if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_16 && src1->type == GGML_TYPE_FP8_E4M3_E8M0_16) {
+        ggml_cpy_q_q_cuda<cpy_blck_fp8_e4m3_e8m0_16_fp8_e4m3_e8m0_16, QK_FP8_E4M3_E8M0_16>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_Q4_0) {
         ggml_cpy_f32_q4_0_cuda(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_Q4_0 && src1->type == GGML_TYPE_F32) {
@@ -696,6 +761,12 @@ void* ggml_cuda_cpy_fn(const ggml_tensor * src0, ggml_tensor * src1) {
         return (void*) cpy_f32_q<cpy_blck_f32_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32>;
     } else if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_32 && src1->type == GGML_TYPE_F32) {
         return (void*) cpy_q_f32<cpy_blck_fp8_e4m3_e8m0_32_f32, QK_FP8_E4M3_E8M0_32>;
+    } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_FP8_E4M3_E8M0_16) {
+        return (void*) cpy_f32_q<cpy_blck_f32_fp8_e4m3_e8m0_16, QK_FP8_E4M3_E8M0_16>;
+    } else if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_16 && src1->type == GGML_TYPE_F32) {
+        return (void*) cpy_q_f32<cpy_blck_fp8_e4m3_e8m0_16_f32, QK_FP8_E4M3_E8M0_16>;
+    } else if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_16 && src1->type == GGML_TYPE_FP8_E4M3_E8M0_16) {
+        return (void*) cpy_q_q<cpy_blck_fp8_e4m3_e8m0_16_fp8_e4m3_e8m0_16, QK_FP8_E4M3_E8M0_16>;
     } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_Q4_0) {
         return (void*) cpy_f32_q<cpy_blck_f32_q4_0, QK4_0>;
     } else if (src0->type == GGML_TYPE_Q4_0 && src1->type == GGML_TYPE_F32) {

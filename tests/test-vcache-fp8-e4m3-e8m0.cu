@@ -87,6 +87,30 @@ static bool test_block32_roundtrip() {
     return true;
 }
 
+static bool test_block16_roundtrip() {
+    std::vector<float> src = {
+        -30.0f, -12.0f, -8.0f, -3.5f, -1.25f, -0.75f, -0.25f, -0.03125f,
+          0.0f,   0.03125f, 0.125f, 0.25f, 0.75f, 1.50f, 3.00f, 6.00f,
+        -28.0f, -16.0f, -4.5f, -2.0f, -1.0f, -0.5f, -0.125f, -0.0625f,
+          0.0625f, 0.125f, 0.5f, 1.0f, 2.0f, 4.5f, 16.0f, 28.0f,
+    };
+
+    std::vector<block_fp8_e4m3_e8m0_16> q(src.size() / QK_FP8_E4M3_E8M0_16);
+    std::vector<float> dst(src.size(), 0.0f);
+
+    quantize_row_fp8_e4m3_e8m0_16_ref(src.data(), q.data(), (int64_t) src.size());
+    dequantize_row_fp8_e4m3_e8m0_16(q.data(), dst.data(), (int64_t) src.size());
+
+    for (size_t i = 0; i < src.size(); ++i) {
+        if (!almost_equal(src[i], dst[i], 0.45f, 0.18f)) {
+            std::fprintf(stderr, "block16 roundtrip mismatch i=%zu src=%f dst=%f\n", i, src[i], dst[i]);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static bool set_tensor_from_fp32(ggml_tensor * tensor, const std::vector<float> & src) {
     if ((int64_t) src.size() != ggml_nelements(tensor)) {
         std::fprintf(stderr, "size mismatch for tensor type=%s expected=%lld got=%zu\n",
@@ -304,26 +328,118 @@ static bool run_mul_mat_case(const mul_mat_case & tc, ggml_type src0_type, std::
     return true;
 }
 
-static bool test_mul_mat_variant(const mul_mat_case & tc, double tol_nmse, float tol_max_abs) {
+static bool test_mul_mat_variant(const mul_mat_case & tc, ggml_type src0_type, double tol_nmse, float tol_max_abs) {
     std::vector<float> ref;
     std::vector<float> got;
 
     if (!run_mul_mat_case(tc, GGML_TYPE_F32, ref)) {
         return false;
     }
-    if (!run_mul_mat_case(tc, GGML_TYPE_FP8_E4M3_E8M0_32, got)) {
+    if (!run_mul_mat_case(tc, src0_type, got)) {
         return false;
     }
 
     const double err_nmse = nmse(ref, got);
     const float err_max_abs = max_abs_diff(ref, got);
-    std::fprintf(stderr, "mul_mat case=%s nmse=%g max_abs=%g\n", tc.name, err_nmse, err_max_abs);
+    std::fprintf(stderr, "mul_mat case=%s type=%s nmse=%g max_abs=%g\n",
+            tc.name, ggml_type_name(src0_type), err_nmse, err_max_abs);
 
     if (err_nmse > tol_nmse && err_max_abs > tol_max_abs) {
-        std::fprintf(stderr, "mul_mat mismatch case=%s nmse=%g max_abs=%g\n", tc.name, err_nmse, err_max_abs);
+        std::fprintf(stderr, "mul_mat mismatch case=%s type=%s nmse=%g max_abs=%g\n",
+                tc.name, ggml_type_name(src0_type), err_nmse, err_max_abs);
         return false;
     }
 
+    return true;
+}
+
+static bool run_block16_same_type_view_copy_case() {
+    ggml_init_params params = {
+        /* .mem_size   = */ 16 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context for block16 view copy\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend for block16 view copy\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_tensor * src_base = ggml_new_tensor_2d(ctx, GGML_TYPE_FP8_E4M3_E8M0_16, 64, 4);
+    ggml_tensor * dst_base = ggml_new_tensor_2d(ctx, GGML_TYPE_FP8_E4M3_E8M0_16, 64, 4);
+
+    const size_t row_size = ggml_row_size(GGML_TYPE_FP8_E4M3_E8M0_16, 64);
+    const size_t view_offset = ggml_row_size(GGML_TYPE_FP8_E4M3_E8M0_16, 16);
+    ggml_tensor * src_view = ggml_view_2d(ctx, src_base, 32, 2, row_size, view_offset);
+    ggml_tensor * dst_view = ggml_view_2d(ctx, dst_base, 32, 2, row_size, view_offset);
+    ggml_tensor * cpy = ggml_cpy(ctx, src_view, dst_view);
+    ggml_tensor * dst_f32 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 4);
+    ggml_tensor * out = ggml_cpy(ctx, dst_base, dst_f32);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, cpy);
+    ggml_build_forward_expand(gf, out);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors for block16 view copy\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    const std::vector<float> src_data = make_signal((size_t) ggml_nelements(src_base), 5.0f, 0.0f, 0.17f);
+    std::vector<float> dst_data((size_t) ggml_nelements(dst_base), -3.0f);
+
+    if (!set_tensor_from_fp32(src_base, src_data) || !set_tensor_from_fp32(dst_base, dst_data)) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    const ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "block16 same-type view copy compute failed: %s\n", ggml_status_to_string(status));
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> got((size_t) ggml_nelements(dst_f32), 0.0f);
+    ggml_backend_tensor_get(dst_f32, got.data(), 0, got.size() * sizeof(float));
+
+    std::vector<float> expected = dst_data;
+    for (int64_t row = 0; row < 2; ++row) {
+        for (int64_t col = 0; col < 32; ++col) {
+            const int64_t src_i = row * 64 + 16 + col;
+            const int64_t dst_i = row * 64 + 16 + col;
+            expected[(size_t) dst_i] = src_data[(size_t) src_i];
+        }
+    }
+
+    const double err_nmse = nmse(expected, got);
+    const float err_max_abs = max_abs_diff(expected, got);
+    std::fprintf(stderr, "block16 same-type view copy nmse=%g max_abs=%g\n", err_nmse, err_max_abs);
+    if (err_nmse > 8e-2 && err_max_abs > 1.5f) {
+        std::fprintf(stderr, "block16 same-type view copy mismatch nmse=%g max_abs=%g\n", err_nmse, err_max_abs);
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
     return true;
 }
 
@@ -343,6 +459,9 @@ int main() {
     disable_cuda_truncation();
 
     if (!test_block32_roundtrip()) {
+        return 1;
+    }
+    if (!test_block16_roundtrip()) {
         return 1;
     }
 
@@ -371,7 +490,10 @@ int main() {
         /* .name = */ "non-flash-decode-k256-m128-n1",
     };
 
-    if (!test_mul_mat_variant(non_flash_decode_case, 1e-1, 2.0f)) {
+    if (!test_mul_mat_variant(non_flash_decode_case, GGML_TYPE_FP8_E4M3_E8M0_32, 1e-1, 2.0f)) {
+        return 1;
+    }
+    if (!test_mul_mat_variant(non_flash_decode_case, GGML_TYPE_FP8_E4M3_E8M0_16, 1e-1, 2.0f)) {
         return 1;
     }
 
@@ -382,7 +504,13 @@ int main() {
         /* .name = */ "non-flash-prefill-k256-m128-n17",
     };
 
-    if (!test_mul_mat_variant(non_flash_prefill_case, 1e-1, 2.0f)) {
+    if (!test_mul_mat_variant(non_flash_prefill_case, GGML_TYPE_FP8_E4M3_E8M0_32, 1e-1, 2.0f)) {
+        return 1;
+    }
+    if (!test_mul_mat_variant(non_flash_prefill_case, GGML_TYPE_FP8_E4M3_E8M0_16, 1e-1, 2.0f)) {
+        return 1;
+    }
+    if (!run_block16_same_type_view_copy_case()) {
         return 1;
     }
 

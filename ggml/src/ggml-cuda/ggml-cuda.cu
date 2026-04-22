@@ -2148,6 +2148,25 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         && ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) && src0->view_src;
 
     if (!split &&
+        src0->type == GGML_TYPE_FP8_E4M3_E8M0_16 &&
+        src1->type == GGML_TYPE_F32 &&
+        dst->type == GGML_TYPE_F32) {
+        if (ggml_cuda_mul_mat_fp8_e8m0_16_direct(ctx, src0, src1, dst)) {
+            return;
+        }
+        GGML_ABORT(
+                "%s: direct FP8(E4M3+E8M0 block16) path failed for dst=%s | "
+                "src0_type=%s src1_type=%s dst_type=%s "
+                "src0_ne=[%lld,%lld,%lld,%lld] src1_ne=[%lld,%lld,%lld,%lld] dst_ne=[%lld,%lld,%lld,%lld]",
+                __func__,
+                ggml_get_name(dst),
+                ggml_type_name(src0->type), ggml_type_name(src1->type), ggml_type_name(dst->type),
+                (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2], (long long) src0->ne[3],
+                (long long) src1->ne[0], (long long) src1->ne[1], (long long) src1->ne[2], (long long) src1->ne[3],
+                (long long) dst->ne[0], (long long) dst->ne[1], (long long) dst->ne[2], (long long) dst->ne[3]);
+    }
+
+    if (!split &&
         src0->type == GGML_TYPE_FP8_E4M3_E8M0_32 &&
         src1->type == GGML_TYPE_F32 &&
         dst->type == GGML_TYPE_F32) {
@@ -2231,6 +2250,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
 
     if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
+        use_mul_mat_vec_q = false;
+        use_mul_mat_q = false;
+    }
+    if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_16) {
         use_mul_mat_vec_q = false;
         use_mul_mat_q = false;
     }
@@ -3637,6 +3660,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_Q8_0:
                     case GGML_TYPE_FP8_E4M3_E8M0_32:
+                    case GGML_TYPE_FP8_E4M3_E8M0_16:
                     case GGML_TYPE_MXFP4:
                     case GGML_TYPE_NVFP4:
                     case GGML_TYPE_NVFP4_8:
@@ -3676,6 +3700,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_Q8_0:
                     case GGML_TYPE_FP8_E4M3_E8M0_32:
+                    case GGML_TYPE_FP8_E4M3_E8M0_16:
                         return true;
                     default:
                         return false;
@@ -3691,6 +3716,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                        op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
                        op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 ||
                        op->type == GGML_TYPE_FP8_E4M3_E8M0_32 ||
+                       op->type == GGML_TYPE_FP8_E4M3_E8M0_16 ||
                        op->type == GGML_TYPE_IQ4_NL ||
                        op->type == GGML_TYPE_NVFP4 ||
                        op->type == GGML_TYPE_NVFP4_8) &&
@@ -3716,6 +3742,15 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return true;
                 }
                 if (src0_type == GGML_TYPE_FP8_E4M3_E8M0_32 && src1_type == GGML_TYPE_F32) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_FP8_E4M3_E8M0_16) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_FP8_E4M3_E8M0_16 && src1_type == GGML_TYPE_F32) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_FP8_E4M3_E8M0_16 && src1_type == GGML_TYPE_FP8_E4M3_E8M0_16) {
                     return true;
                 }
                 if (src0_type == GGML_TYPE_F32 && src1_type == GGML_TYPE_Q4_0) {

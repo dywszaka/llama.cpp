@@ -2341,7 +2341,8 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
-    if (params.type_v == GGML_TYPE_FP8_E4M3_E8M0_32 && !params.flash_attn && !params.offload_kqv) {
+    if ((params.type_v == GGML_TYPE_FP8_E4M3_E8M0_32 ||
+         params.type_v == GGML_TYPE_FP8_E4M3_E8M0_16) && !params.flash_attn && !params.offload_kqv) {
         LLAMA_LOG_ERROR("%s: FP8(E4M3+E8M0) non-flash V cache requires offload_kqv\n", __func__);
         return nullptr;
     }
