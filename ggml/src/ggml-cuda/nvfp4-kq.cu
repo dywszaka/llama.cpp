@@ -2,13 +2,52 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace {
 
+static constexpr const char * GGML_CUDA_NVFP4_8_KQ_CUBLASLT_ENV = "GGML_CUDA_NVFP4_8_KQ_CUBLASLT";
 static constexpr float GGML_CUDA_NVFP4_8_FP4_MAX = 6.0f;
 static constexpr float GGML_CUDA_NVFP4_8_E4M3_HALF_MAX = 224.0f;
 static constexpr float GGML_CUDA_NVFP4_8_GLOBAL_SCALE_MAX =
         GGML_CUDA_NVFP4_8_FP4_MAX * GGML_CUDA_NVFP4_8_E4M3_HALF_MAX;
+
+#if defined(CUBLAS_VERSION)
+#define GGML_CUDA_NVFP4_8_KQ_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
+#elif defined(CUBLAS_VER_MAJOR)
+#define GGML_CUDA_NVFP4_8_KQ_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VER_MAJOR >= 13)
+#else
+#define GGML_CUDA_NVFP4_8_KQ_HAS_LT_SCALE_CHANNEL_ATTRS 0
+#endif
+
+static inline int64_t ggml_cuda_nvfp4_8_kq_pad_i64(int64_t x, int64_t a) {
+    GGML_ASSERT(a > 0);
+    return ((x + a - 1) / a) * a;
+}
+
+static __host__ __device__ __forceinline__ int64_t ggml_cuda_nvfp4_8_kq_scale_tiled_index(
+        int64_t outer,
+        int64_t inner,
+        int64_t n_inner_padded) {
+    const int64_t outer_tile = outer / 128;
+    const int64_t outer_in_tile = outer % 128;
+    const int64_t inner_tile = inner / 4;
+    const int64_t inner_in_tile = inner % 4;
+
+    const int64_t tiles_per_outer_block = n_inner_padded / 4;
+    const int64_t tile_base = (outer_tile * tiles_per_outer_block + inner_tile) * 512;
+    const int64_t tile_offset = (outer_in_tile % 32) * 16 + (outer_in_tile / 32) * 4 + inner_in_tile;
+    return tile_base + tile_offset;
+}
+
+static __device__ __forceinline__ uint8_t ggml_cuda_nvfp4_8_kq_lt_scale_from_ggml_scale_byte(uint8_t ggml_e) {
+    const float scale_f = ggml_cuda_e4m3_to_fp32(ggml_e);
+    if (!(scale_f > 0.0f) || !isfinite(scale_f)) {
+        return 0;
+    }
+
+    return (uint8_t) __nv_cvt_float_to_fp8(scale_f, __NV_SATFINITE, __NV_E4M3);
+}
 
 static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_8(float x) {
     uint8_t best_index = 0;
@@ -229,6 +268,80 @@ static __global__ void nvfp4_8_kq_kernel(
     }
 }
 
+static __global__ void nvfp4_8_k_repack_lt_vec16_kernel(
+        const char * __restrict__ k,
+        uint8_t * __restrict__ out_data,
+        uint8_t * __restrict__ out_scale,
+        const int64_t ne01,
+        const int64_t nb00,
+        const int64_t nb01,
+        const int64_t nblk8,
+        const int64_t row_data_bytes,
+        const int64_t scale_inner_padded) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t total = ne01 * nblk8;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t outer = idx / nblk8;
+    const int64_t inner = idx - outer * nblk8;
+    const block_nvfp4_8 * b = (const block_nvfp4_8 *) (k + outer * nb01 + inner * nb00);
+    uint8_t * data_dst = out_data + outer * row_data_bytes + inner * 8;
+#pragma unroll
+    for (int j = 0; j < QK_NVFP4_8 / 2; ++j) {
+        data_dst[j] = b->qs[j];
+    }
+    const int64_t scale_idx = ggml_cuda_nvfp4_8_kq_scale_tiled_index(outer, inner, scale_inner_padded);
+    out_scale[scale_idx] = ggml_cuda_nvfp4_8_kq_lt_scale_from_ggml_scale_byte(b->e);
+}
+
+static __global__ void nvfp4_8_split_blocks_lt_vec16_kernel(
+        const block_nvfp4_8 * __restrict__ blocks,
+        uint8_t * __restrict__ out_data,
+        uint8_t * __restrict__ out_scale,
+        const int64_t nblk8,
+        const int64_t n_outer_valid,
+        const int64_t row_data_bytes,
+        const int64_t scale_inner_padded) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t total = n_outer_valid * nblk8;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t outer = idx / nblk8;
+    const int64_t inner = idx - outer * nblk8;
+    const block_nvfp4_8 b = blocks[idx];
+    uint8_t * data_dst = out_data + outer * row_data_bytes + inner * 8;
+#pragma unroll
+    for (int j = 0; j < QK_NVFP4_8 / 2; ++j) {
+        data_dst[j] = b.qs[j];
+    }
+    const int64_t scale_idx = ggml_cuda_nvfp4_8_kq_scale_tiled_index(outer, inner, scale_inner_padded);
+    out_scale[scale_idx] = ggml_cuda_nvfp4_8_kq_lt_scale_from_ggml_scale_byte(b.e);
+}
+
+static __global__ void nvfp4_8_kq_store_scaled_kernel(
+        const float * __restrict__ src,
+        const float * __restrict__ column_scales,
+        char * __restrict__ dst,
+        const int64_t m,
+        const int64_t n,
+        const int64_t src_ld,
+        const int64_t dst_nb0,
+        const int64_t dst_nb1) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t total = m * n;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t col = idx / m;
+    const int64_t row = idx - col * m;
+    *(float *) (dst + row * dst_nb0 + col * dst_nb1) = src[col * src_ld + row] * column_scales[col];
+}
+
 }
 
 bool ggml_cuda_mul_mat_nvfp4_8_kq(
@@ -300,4 +413,233 @@ bool ggml_cuda_mul_mat_nvfp4_8_kq(
     }
 
     return true;
+}
+
+bool ggml_cuda_mul_mat_nvfp4_8_kq_cublaslt(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst) {
+    GGML_UNUSED(GGML_CUDA_NVFP4_8_KQ_CUBLASLT_ENV);
+#if GGML_CUDA_HAS_CUBLASLT && GGML_CUDA_HAS_FP4 && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && GGML_CUDA_NVFP4_8_KQ_HAS_LT_SCALE_CHANNEL_ATTRS
+    GGML_ASSERT(src0 != nullptr);
+    GGML_ASSERT(src1 != nullptr);
+    GGML_ASSERT(dst  != nullptr);
+
+    if (src0->type != GGML_TYPE_NVFP4_8 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (src0->ne[0] != src1->ne[0] || src0->ne[0] % QK_NVFP4_8 != 0) {
+        return false;
+    }
+    if (dst->ne[0] != src0->ne[1] || dst->ne[1] != src1->ne[1] || dst->ne[2] != src1->ne[2] || dst->ne[3] != src1->ne[3]) {
+        return false;
+    }
+    if (src0->ne[2] <= 0 || src0->ne[3] <= 0 || src1->ne[2] % src0->ne[2] != 0 || src1->ne[3] % src0->ne[3] != 0) {
+        return false;
+    }
+    if (dst->nb[0] != sizeof(float)) {
+        return false;
+    }
+
+    cudaStream_t stream = ctx.stream();
+
+    const int64_t ne10 = src1->ne[0];
+    const int64_t ne11 = src1->ne[1];
+    const int64_t ne12 = src1->ne[2];
+    const int64_t ne13 = src1->ne[3];
+    const int64_t ne01 = src0->ne[1];
+    const int64_t lt_m = ggml_cuda_nvfp4_8_kq_pad_i64(ne01, 16);
+    const int64_t nblk8 = ne10 / QK_NVFP4_8;
+    // cuBLASLt exposes VEC16 FP4 scale groups; expand each NVFP4_8 block into one 16-lane group
+    // with the high 8 lanes zeroed so the original per-8 scale is preserved.
+    const int64_t lt_k = nblk8 * 16;
+    const int64_t lt_n = ggml_cuda_nvfp4_8_kq_pad_i64(ne11, 16);
+    const int64_t scale_inner_padded = ggml_cuda_nvfp4_8_kq_pad_i64(nblk8, 4);
+    const int64_t k_scale_outer_padded = ggml_cuda_nvfp4_8_kq_pad_i64(lt_m, 128);
+    const int64_t q_scale_outer_padded = ggml_cuda_nvfp4_8_kq_pad_i64(lt_n, 128);
+    const int64_t row_data_bytes = lt_k / 2;
+    const size_t k_data_nbytes = (size_t) lt_m * (size_t) row_data_bytes;
+    const size_t q_data_nbytes = (size_t) lt_n * (size_t) row_data_bytes;
+    const size_t k_scale_nbytes = (size_t) k_scale_outer_padded * (size_t) scale_inner_padded;
+    const size_t q_scale_nbytes = (size_t) q_scale_outer_padded * (size_t) scale_inner_padded;
+
+    ggml_cuda_pool_alloc<float> q_amax(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
+    ggml_cuda_pool_alloc<float> q_input_scales(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
+    ggml_cuda_pool_alloc<block_nvfp4_8> q_blocks(ctx.pool(), (size_t) std::max<int64_t>(ne11 * nblk8, 1));
+    ggml_cuda_pool_alloc<uint8_t> k_data(ctx.pool(), k_data_nbytes);
+    ggml_cuda_pool_alloc<uint8_t> k_scale(ctx.pool(), k_scale_nbytes);
+    ggml_cuda_pool_alloc<uint8_t> q_data(ctx.pool(), q_data_nbytes);
+    ggml_cuda_pool_alloc<uint8_t> q_scale(ctx.pool(), q_scale_nbytes);
+    ggml_cuda_pool_alloc<float> dst_tmp(ctx.pool(), (size_t) lt_m * (size_t) lt_n);
+
+    cublasLtMatmulDesc_t op_desc = nullptr;
+    cublasLtMatrixLayout_t a_desc = nullptr;
+    cublasLtMatrixLayout_t b_desc = nullptr;
+    cublasLtMatrixLayout_t c_desc = nullptr;
+
+    cublasStatus_t st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cudaDataType_t scale_type = CUDA_R_32F;
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_SCALE_TYPE, &scale_type, sizeof(scale_type));
+    }
+    const cublasOperation_t op_t = CUBLAS_OP_T;
+    const cublasOperation_t op_n = CUBLAS_OP_N;
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_t, sizeof(op_t));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode, sizeof(scale_mode));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode, sizeof(scale_mode));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) lt_k, (uint64_t) lt_m, (int64_t) lt_k);
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        st = cublasLtMatrixLayoutSetAttribute(a_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) lt_k, (uint64_t) lt_n, (int64_t) lt_k);
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        st = cublasLtMatrixLayoutSetAttribute(b_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) lt_m, (uint64_t) lt_n, (int64_t) lt_m);
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        st = cublasLtMatrixLayoutSetAttribute(c_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+
+    const int64_t r2 = src1->ne[2] / src0->ne[2];
+    const int64_t r3 = src1->ne[3] / src0->ne[3];
+
+    for (int64_t i3 = 0; i3 < ne13 && st == CUBLAS_STATUS_SUCCESS; ++i3) {
+        for (int64_t i2 = 0; i2 < ne12 && st == CUBLAS_STATUS_SUCCESS; ++i2) {
+            const int64_t k_i2 = i2 / r2;
+            const int64_t k_i3 = i3 / r3;
+            const char * k_slice = (const char *) src0->data + k_i2 * src0->nb[2] + k_i3 * src0->nb[3];
+            const char * q_slice = (const char *) src1->data + i2 * src1->nb[2] + i3 * src1->nb[3];
+            char * dst_slice = (char *) dst->data + i2 * dst->nb[2] + i3 * dst->nb[3];
+
+            CUDA_CHECK(cudaMemsetAsync(k_data.get(), 0, k_data_nbytes, stream));
+            CUDA_CHECK(cudaMemsetAsync(k_scale.get(), 0, k_scale_nbytes, stream));
+            CUDA_CHECK(cudaMemsetAsync(q_data.get(), 0, q_data_nbytes, stream));
+            CUDA_CHECK(cudaMemsetAsync(q_scale.get(), 0, q_scale_nbytes, stream));
+            CUDA_CHECK(cudaMemsetAsync(dst_tmp.get(), 0, (size_t) lt_m * (size_t) lt_n * sizeof(float), stream));
+
+            const int block_size = 256;
+            const int k_grid = (int) ((ne01 * nblk8 + block_size - 1) / block_size);
+            nvfp4_8_k_repack_lt_vec16_kernel<<<k_grid, block_size, 0, stream>>>(
+                    k_slice,
+                    k_data.get(),
+                    k_scale.get(),
+                    src0->ne[1],
+                    src0->nb[0], src0->nb[1],
+                    nblk8,
+                    row_data_bytes,
+                    scale_inner_padded);
+            CUDA_CHECK(cudaGetLastError());
+
+            nvfp4_8_q_abs_max_kernel<<<(uint32_t) ne11, block_size, 0, stream>>>(
+                    (const float *) q_slice,
+                    q_amax.get(),
+                    ne10, ne11, 1, 1,
+                    src1->nb[0], src1->nb[1], 0, 0);
+            CUDA_CHECK(cudaGetLastError());
+
+            const dim3 quant_grid((uint32_t) nblk8, (uint32_t) ne11, 1);
+            nvfp4_8_q_quantize_kernel<<<quant_grid, WARP_SIZE, 0, stream>>>(
+                    (const float *) q_slice,
+                    q_amax.get(),
+                    q_blocks.get(),
+                    q_input_scales.get(),
+                    ne10, ne11, 1, 1,
+                    src1->nb[0], src1->nb[1], 0, 0,
+                    nblk8);
+            CUDA_CHECK(cudaGetLastError());
+
+            const int q_grid = (int) ((ne11 * nblk8 + block_size - 1) / block_size);
+            nvfp4_8_split_blocks_lt_vec16_kernel<<<q_grid, block_size, 0, stream>>>(
+                    q_blocks.get(),
+                    q_data.get(),
+                    q_scale.get(),
+                    nblk8,
+                    ne11,
+                    row_data_bytes,
+                    scale_inner_padded);
+            CUDA_CHECK(cudaGetLastError());
+
+            if (st == CUBLAS_STATUS_SUCCESS) {
+                const void * a_scale_ptr = (const void *) k_scale.get();
+                st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_ptr, sizeof(a_scale_ptr));
+            }
+            if (st == CUBLAS_STATUS_SUCCESS) {
+                const void * b_scale_ptr = (const void *) q_scale.get();
+                st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr));
+            }
+            if (st == CUBLAS_STATUS_SUCCESS) {
+                const float alpha = 1.0f;
+                const float beta = 0.0f;
+                st = cublasLtMatmul(
+                        ctx.cublaslt_handle(),
+                        op_desc,
+                        &alpha,
+                        k_data.get(), a_desc,
+                        q_data.get(), b_desc,
+                        &beta,
+                        dst_tmp.get(), c_desc,
+                        dst_tmp.get(), c_desc,
+                        nullptr,
+                        nullptr, 0,
+                        stream);
+            }
+            if (st == CUBLAS_STATUS_SUCCESS) {
+                const int64_t total = ne01 * ne11;
+                const int store_grid = (int) ((total + block_size - 1) / block_size);
+                nvfp4_8_kq_store_scaled_kernel<<<store_grid, block_size, 0, stream>>>(
+                        dst_tmp.get(),
+                        q_input_scales.get(),
+                        dst_slice,
+                        ne01,
+                        ne11,
+                        lt_m,
+                        dst->nb[0],
+                        dst->nb[1]);
+                CUDA_CHECK(cudaGetLastError());
+            }
+        }
+    }
+
+    if (c_desc != nullptr) {
+        cublasLtMatrixLayoutDestroy(c_desc);
+    }
+    if (b_desc != nullptr) {
+        cublasLtMatrixLayoutDestroy(b_desc);
+    }
+    if (a_desc != nullptr) {
+        cublasLtMatrixLayoutDestroy(a_desc);
+    }
+    if (op_desc != nullptr) {
+        cublasLtMatmulDescDestroy(op_desc);
+    }
+
+    return st == CUBLAS_STATUS_SUCCESS;
+#else
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(src0);
+    GGML_UNUSED(src1);
+    GGML_UNUSED(dst);
+    return false;
+#endif
 }
