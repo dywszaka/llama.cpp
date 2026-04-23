@@ -12,7 +12,7 @@ Flash attention is out of scope. The new type is CUDA-oriented for non-flash att
 
 Introduce a new ggml quantized type, `GGML_TYPE_FP8_E4M3_E8M0_16`, with a 16-value block containing one E8M0 scale byte and 16 E4M3 payload bytes. Wire it into the CLI V cache type list, CPU reference quantize/dequantize helpers, CUDA copy/set-rows helpers, and KV cache layout selection.
 
-For non-flash `V * P`, add a CUDA direct kernel for `src0=fp8_e4m3_e8m0_16`, `src1=f32`, `dst=f32`. The kernel quantizes each contiguous 16-value `P` block with the same E8M0 scale and E4M3 payload semantics, immediately dequantizes that block for accumulation, and dequantizes the matching V block for the dot product.
+For non-flash `V * P`, add a native CUDA cuBLASLt path for `src0=fp8_e4m3_e8m0_16`, `src1=f32`, `dst=f32`. The path first quantizes each contiguous 16-value `P` block with the same E8M0 scale and E4M3 payload semantics as V. Because cuBLASLt exposes `VEC32_UE8M0` scale channels, each logical block16 V/P block is repacked as one vec32 group by appending 16 zero FP8 payload values, preserving block16 quantization semantics while using cuBLASLt for accumulation.
 
 ## Testing
 

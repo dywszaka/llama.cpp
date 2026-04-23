@@ -2151,11 +2151,11 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         src0->type == GGML_TYPE_FP8_E4M3_E8M0_16 &&
         src1->type == GGML_TYPE_F32 &&
         dst->type == GGML_TYPE_F32) {
-        if (ggml_cuda_mul_mat_fp8_e8m0_16_direct(ctx, src0, src1, dst)) {
+        if (ggml_cuda_mul_mat_fp8_e8m0_16_native(ctx, src0, src1, dst)) {
             return;
         }
         GGML_ABORT(
-                "%s: direct FP8(E4M3+E8M0 block16) path failed for dst=%s | "
+                "%s: native FP8(E4M3+E8M0 block16) path failed for dst=%s | "
                 "src0_type=%s src1_type=%s dst_type=%s "
                 "src0_ne=[%lld,%lld,%lld,%lld] src1_ne=[%lld,%lld,%lld,%lld] dst_ne=[%lld,%lld,%lld,%lld]",
                 __func__,
