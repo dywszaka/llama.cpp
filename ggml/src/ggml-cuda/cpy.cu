@@ -90,8 +90,20 @@ static __device__ void cpy_blck_fp8_e4m3_e8m0_16_fp8_e4m3_e8m0_16(const char * c
     *y = *x;
 }
 
+static __device__ void quantize_f32_fp8_e4m3_e8m0_block(const float * x, block_fp8_e4m3_e8m0_32 * y) {
+    quantize_f32_fp8_e4m3_e8m0_32_block(x, y);
+}
+
+static __device__ void quantize_f32_fp8_e4m3_e8m0_block(const float * x, block_fp8_e4m3_e8m0_16 * y) {
+    quantize_f32_fp8_e4m3_e8m0_16_block(x, y);
+}
+
+static bool ggml_cuda_is_fp8_e4m3_e8m0_type(ggml_type type) {
+    return type == GGML_TYPE_FP8_E4M3_E8M0_32 || type == GGML_TYPE_FP8_E4M3_E8M0_16;
+}
+
 static bool ggml_cuda_is_fp8_e8m0_transpose_permute_repack(const ggml_tensor * src0, const ggml_tensor * src1) {
-    if (src0->type != GGML_TYPE_FP8_E4M3_E8M0_32 || src1->type != GGML_TYPE_FP8_E4M3_E8M0_32) {
+    if (src0->type != src1->type || !ggml_cuda_is_fp8_e4m3_e8m0_type(src0->type)) {
         return false;
     }
 
@@ -105,7 +117,7 @@ static bool ggml_cuda_is_fp8_e8m0_transpose_permute_repack(const ggml_tensor * s
     }
 
     const ggml_tensor * base = perm->src[0];
-    if (base->type != GGML_TYPE_FP8_E4M3_E8M0_32) {
+    if (base->type != src1->type) {
         return false;
     }
 
@@ -117,9 +129,10 @@ static bool ggml_cuda_is_fp8_e8m0_transpose_permute_repack(const ggml_tensor * s
     return ggml_is_contiguous(src1);
 }
 
+template <typename block_t, int qk>
 static __global__ void cpy_fp8_e8m0_transpose_permute_repack_kernel(
-        const block_fp8_e4m3_e8m0_32 * __restrict__ src_base,
-        block_fp8_e4m3_e8m0_32 * __restrict__ dst,
+        const block_t * __restrict__ src_base,
+        block_t * __restrict__ dst,
         const int64_t base_nb0,
         const int64_t base_nb1,
         const int64_t base_nb2,
@@ -132,7 +145,7 @@ static __global__ void cpy_fp8_e8m0_transpose_permute_repack_kernel(
         const int64_t ne1,
         const int64_t ne2,
         const int64_t ne3) {
-    const int64_t nblk0 = ne0 / QK_FP8_E4M3_E8M0_32;
+    const int64_t nblk0 = ne0 / qk;
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = nblk0 * ne1 * ne2 * ne3;
 
@@ -147,31 +160,32 @@ static __global__ void cpy_fp8_e8m0_transpose_permute_repack_kernel(
     const int64_t i1 = rem2 / nblk0;
     const int64_t ib0 = rem2 - i1 * nblk0;
 
-    float tmp[QK_FP8_E4M3_E8M0_32];
+    float tmp[qk];
 
 #pragma unroll
-    for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
-        const int64_t i0 = ib0 * QK_FP8_E4M3_E8M0_32 + j;
+    for (int j = 0; j < qk; ++j) {
+        const int64_t i0 = ib0 * qk + j;
 
         const int64_t src_block_offset =
-                (i1 / QK_FP8_E4M3_E8M0_32) * base_nb0 +
+                (i1 / qk) * base_nb0 +
                 i2 * base_nb1 +
                 i0 * base_nb2 +
                 i3 * base_nb3;
-        const block_fp8_e4m3_e8m0_32 * src_block =
-                (const block_fp8_e4m3_e8m0_32 *) ((const char *) src_base + src_block_offset);
+        const block_t * src_block =
+                (const block_t *) ((const char *) src_base + src_block_offset);
         const float scale = ggml_cuda_e8m0_to_fp32(src_block->e);
-        tmp[j] = ggml_cuda_e4m3_to_fp32(src_block->qs[i1 % QK_FP8_E4M3_E8M0_32]) * scale;
+        tmp[j] = ggml_cuda_e4m3_to_fp32(src_block->qs[i1 % qk]) * scale;
     }
 
-    block_fp8_e4m3_e8m0_32 * dst_block = (block_fp8_e4m3_e8m0_32 *) ((char *) dst +
+    block_t * dst_block = (block_t *) ((char *) dst +
             ib0 * dst_nb0 +
             i1  * dst_nb1 +
             i2  * dst_nb2 +
             i3  * dst_nb3);
-    quantize_f32_fp8_e4m3_e8m0_32_block(tmp, dst_block);
+    quantize_f32_fp8_e4m3_e8m0_block(tmp, dst_block);
 }
 
+template <typename block_t, int qk, ggml_type type>
 static void ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda(
         const ggml_tensor * src0,
         ggml_tensor * src1,
@@ -180,21 +194,21 @@ static void ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda(
     const ggml_tensor * base = perm->src[0];
 
     GGML_ASSERT(base != nullptr);
-    GGML_ASSERT(base->type == GGML_TYPE_FP8_E4M3_E8M0_32);
-    GGML_ASSERT(src1->type == GGML_TYPE_FP8_E4M3_E8M0_32);
-    GGML_ASSERT(src1->ne[0] % QK_FP8_E4M3_E8M0_32 == 0);
+    GGML_ASSERT(base->type == type);
+    GGML_ASSERT(src1->type == type);
+    GGML_ASSERT(src1->ne[0] % qk == 0);
     GGML_ASSERT(ggml_is_contiguous(src1));
 
-    const int64_t total = (src1->ne[0] / QK_FP8_E4M3_E8M0_32) * src1->ne[1] * src1->ne[2] * src1->ne[3];
+    const int64_t total = (src1->ne[0] / qk) * src1->ne[1] * src1->ne[2] * src1->ne[3];
     if (total <= 0) {
         return;
     }
 
     const int block_size = 128;
     const int grid_size = (int) ((total + block_size - 1) / block_size);
-    cpy_fp8_e8m0_transpose_permute_repack_kernel<<<grid_size, block_size, 0, stream>>>(
-            (const block_fp8_e4m3_e8m0_32 *) base->data,
-            (block_fp8_e4m3_e8m0_32 *) src1->data,
+    cpy_fp8_e8m0_transpose_permute_repack_kernel<block_t, qk><<<grid_size, block_size, 0, stream>>>(
+            (const block_t *) base->data,
+            (block_t *) src1->data,
             base->nb[0], base->nb[1], base->nb[2], base->nb[3],
             src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3],
             src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3]);
@@ -647,7 +661,12 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
     GGML_UNUSED(disable_indirection_for_this_node);
 #endif
     if (ggml_cuda_is_fp8_e8m0_transpose_permute_repack(src0, src1)) {
-        ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda(src0, src1, main_stream);
+        if (src1->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
+            ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda<block_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32, GGML_TYPE_FP8_E4M3_E8M0_32>(src0, src1, main_stream);
+        } else {
+            GGML_ASSERT(src1->type == GGML_TYPE_FP8_E4M3_E8M0_16);
+            ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda<block_fp8_e4m3_e8m0_16, QK_FP8_E4M3_E8M0_16, GGML_TYPE_FP8_E4M3_E8M0_16>(src0, src1, main_stream);
+        }
     } else if (src0->type == src1->type && ggml_is_contiguous(src0) && ggml_is_contiguous(src1)) {
         GGML_ASSERT(ggml_nbytes(src0) == ggml_nbytes(src1));
 #if defined(GGML_USE_MUSA) && defined(GGML_MUSA_MUDNN_COPY)
@@ -743,7 +762,10 @@ void ggml_cuda_dup(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
 void* ggml_cuda_cpy_fn(const ggml_tensor * src0, ggml_tensor * src1) {
     if (ggml_cuda_is_fp8_e8m0_transpose_permute_repack(src0, src1)) {
-        return (void*) cpy_fp8_e8m0_transpose_permute_repack_kernel;
+        if (src1->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
+            return (void*) cpy_fp8_e8m0_transpose_permute_repack_kernel<block_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32>;
+        }
+        return (void*) cpy_fp8_e8m0_transpose_permute_repack_kernel<block_fp8_e4m3_e8m0_16, QK_FP8_E4M3_E8M0_16>;
     }
     if (src0->type == src1->type && ggml_is_contiguous(src0) && ggml_is_contiguous(src1)) {
         return nullptr;

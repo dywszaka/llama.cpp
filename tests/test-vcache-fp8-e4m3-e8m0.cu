@@ -443,6 +443,88 @@ static bool run_block16_same_type_view_copy_case() {
     return true;
 }
 
+static bool run_block16_transpose_permute_copy_case() {
+    ggml_init_params params = {
+        /* .mem_size   = */ 32 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context for block16 transpose-permute copy\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend for block16 transpose-permute copy\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    const int64_t head_dim = 128;
+    const int64_t n_head_kv = 8;
+    const int64_t n_kv = 32;
+
+    ggml_tensor * src_f32 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_dim, n_head_kv, n_kv, 1);
+    ggml_tensor * src_q   = ggml_new_tensor_4d(ctx, GGML_TYPE_FP8_E4M3_E8M0_16, head_dim, n_head_kv, n_kv, 1);
+
+    ggml_tensor * ref = ggml_cont(ctx, ggml_transpose(ctx, ggml_permute(ctx, src_f32, 0, 2, 1, 3)));
+    ggml_tensor * got_q = ggml_cont(ctx, ggml_transpose(ctx, ggml_permute(ctx, src_q, 0, 2, 1, 3)));
+    ggml_tensor * got_f32 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, got_q->ne[0], got_q->ne[1], got_q->ne[2], got_q->ne[3]);
+    ggml_tensor * got = ggml_cpy(ctx, got_q, got_f32);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 32, false);
+    ggml_build_forward_expand(gf, ref);
+    ggml_build_forward_expand(gf, got);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors for block16 transpose-permute copy\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    const std::vector<float> src_data = make_signal((size_t) ggml_nelements(src_f32), 2.5f, 0.1f, 0.23f);
+    if (!set_tensor_from_fp32(src_f32, src_data) || !set_tensor_from_fp32(src_q, src_data)) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    const ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "block16 transpose-permute copy compute failed: %s\n", ggml_status_to_string(status));
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> ref_data((size_t) ggml_nelements(ref), 0.0f);
+    std::vector<float> got_data((size_t) ggml_nelements(got), 0.0f);
+    ggml_backend_tensor_get(ref, ref_data.data(), 0, ref_data.size() * sizeof(float));
+    ggml_backend_tensor_get(got, got_data.data(), 0, got_data.size() * sizeof(float));
+
+    const double err_nmse = nmse(ref_data, got_data);
+    const float err_max_abs = max_abs_diff(ref_data, got_data);
+    std::fprintf(stderr, "block16 transpose-permute copy nmse=%g max_abs=%g\n", err_nmse, err_max_abs);
+    if (err_nmse > 8e-2 && err_max_abs > 1.25f) {
+        std::fprintf(stderr, "block16 transpose-permute copy mismatch nmse=%g max_abs=%g\n", err_nmse, err_max_abs);
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+    return true;
+}
+
 int main() {
     int dev_count = 0;
     const cudaError_t dev_err = cudaGetDeviceCount(&dev_count);
@@ -511,6 +593,9 @@ int main() {
         return 1;
     }
     if (!run_block16_same_type_view_copy_case()) {
+        return 1;
+    }
+    if (!run_block16_transpose_permute_copy_case()) {
         return 1;
     }
 
