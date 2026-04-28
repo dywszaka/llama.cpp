@@ -1326,6 +1326,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         if (!v_trans) {
             // note: avoid this branch
+            if (ggml_is_quantized(v->type) &&
+                    v->type != GGML_TYPE_FP8_E4M3_E8M0_32 &&
+                    v->type != GGML_TYPE_FP8_E4M3_E8M0_16) {
+                v = ggml_cast(ctx0, v, GGML_TYPE_F32);
+            }
             v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
         }
 
