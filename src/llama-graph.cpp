@@ -1326,12 +1326,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         if (!v_trans) {
             // note: avoid this branch
-            if (ggml_is_quantized(v->type) &&
-                    v->type != GGML_TYPE_FP8_E4M3_E8M0_32 &&
-                    v->type != GGML_TYPE_FP8_E4M3_E8M0_16) {
+            const ggml_type v_type = v->type;
+            if (ggml_is_quantized(v_type) &&
+                    v_type != GGML_TYPE_FP8_E4M3_E8M0_32 &&
+                    v_type != GGML_TYPE_FP8_E4M3_E8M0_16) {
                 v = ggml_cast(ctx0, v, GGML_TYPE_F32);
             }
             v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
+            if (v_type == GGML_TYPE_Q4_1) {
+                GGML_ASSERT(v->ne[0] % ggml_blck_size(v_type) == 0);
+                v = ggml_cast(ctx0, v, GGML_TYPE_Q4_1);
+            }
         }
 
         ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
