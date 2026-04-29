@@ -86,6 +86,87 @@ static void dequantize_matrix_nvfp4(
     }
 }
 
+static bool run_case_f32_to_nvfp4_roundtrip() {
+    const int rows = 3;
+    const int k = 64;
+
+    ggml_init_params params = {
+        /* .mem_size   = */ 16u * 1024u * 1024u,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context for f32->nvfp4 roundtrip\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend for f32->nvfp4 roundtrip\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_tensor * src = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, rows);
+    ggml_tensor * q   = ggml_cast(ctx, src, GGML_TYPE_NVFP4);
+    ggml_tensor * out = ggml_cast(ctx, q, GGML_TYPE_F32);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(gf, out);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors for f32->nvfp4 roundtrip\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> src_data((size_t) rows * (size_t) k);
+    for (size_t i = 0; i < src_data.size(); ++i) {
+        src_data[i] = 1.75f * sinf(0.13f * (float) i) + 0.25f * cosf(0.07f * (float) i);
+    }
+
+    std::vector<block_nvfp4> q_ref;
+    std::vector<float> ref;
+    quantize_matrix_nvfp4(src_data, q_ref, rows, k, 1.0f);
+    dequantize_matrix_nvfp4(q_ref, ref, rows, k, 1.0f);
+
+    ggml_backend_tensor_set(src, src_data.data(), 0, src_data.size() * sizeof(float));
+
+#if defined(_WIN32)
+    _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
+#else
+    setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
+#endif
+
+    const ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "f32->nvfp4 roundtrip compute failed: %s\n", ggml_status_to_string(status));
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> got(ref.size(), 0.0f);
+    ggml_backend_tensor_get(out, got.data(), 0, got.size() * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+
+    float max_abs_err = 0.0f;
+    for (size_t i = 0; i < ref.size(); ++i) {
+        max_abs_err = fmaxf(max_abs_err, fabsf(got[i] - ref[i]));
+    }
+
+    const bool ok = max_abs_err <= 1e-6f;
+    std::printf("f32->nvfp4 roundtrip | max_abs=%.6g | %s\n", max_abs_err, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 static void fp32_reference_matmul(
         const std::vector<float> & a_deq,
         const std::vector<float> & b_deq,
@@ -1119,6 +1200,7 @@ int main() {
     CUDA_CHECK(cudaSetDevice(0));
 
     bool ok = true;
+    ok = run_case_f32_to_nvfp4_roundtrip() && ok;
     ok = run_case(64, 64, 128, 1.00f, 1.00f, 1u) && ok;
     ok = run_case(48, 80, 256, 0.75f, 1.25f, 2u) && ok;
     ok = run_case(96, 96, 192, 1.50f, 0.90f, 3u) && ok;

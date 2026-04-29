@@ -98,6 +98,72 @@ static __device__ void quantize_f32_fp8_e4m3_e8m0_block(const float * x, block_f
     quantize_f32_fp8_e4m3_e8m0_16_block(x, y);
 }
 
+static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_cpy(float x) {
+    uint8_t best_index = 0;
+    float best_err = fabsf((float) kvalues_nvfp4[0] - x);
+
+#pragma unroll
+    for (int i = 1; i < 16; ++i) {
+        const float err = fabsf((float) kvalues_nvfp4[i] - x);
+        if (err < best_err) {
+            best_err = err;
+            best_index = (uint8_t) i;
+        }
+    }
+
+    return best_index;
+}
+
+static __device__ __forceinline__ uint8_t ggml_cuda_best_index_e4m3_cpy(float x) {
+    uint8_t best_index = 0;
+    float best_err = INFINITY;
+
+    for (int i = 0; i < 256; ++i) {
+        const float v = ggml_cuda_e4m3_to_fp32((uint8_t) i);
+        if (!isfinite(v)) {
+            continue;
+        }
+
+        const float err = fabsf(v - x);
+        if (err < best_err) {
+            best_err = err;
+            best_index = (uint8_t) i;
+        }
+    }
+
+    return best_index;
+}
+
+static __device__ void cpy_blck_f32_nvfp4(const char * cxi, char * cdsti) {
+    static constexpr float fp4_max = 6.0f;
+
+    const float * x = (const float *) cxi;
+    block_nvfp4 * y = (block_nvfp4 *) cdsti;
+
+    float vmax = 0.0f;
+    for (int j = 0; j < QK_NVFP4; ++j) {
+        vmax = fmaxf(vmax, fabsf(x[j]));
+    }
+
+    const float scale = vmax / fp4_max;
+    const uint8_t scale_q = ggml_cuda_best_index_e4m3_cpy(scale);
+    y->e = scale_q;
+
+    const float scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
+    const float inv_scale = scale_f != 0.0f ? 1.0f / scale_f : 0.0f;
+
+#pragma unroll
+    for (int j = 0; j < QK_NVFP4/2; ++j) {
+        const float v0 = x[2*j + 0] * inv_scale;
+        const float v1 = x[2*j + 1] * inv_scale;
+
+        const uint8_t q0 = ggml_cuda_best_index_nvfp4_cpy(v0);
+        const uint8_t q1 = ggml_cuda_best_index_nvfp4_cpy(v1);
+
+        y->qs[j] = q0 | (q1 << 4);
+    }
+}
+
 static bool ggml_cuda_is_fp8_e4m3_e8m0_type(ggml_type type) {
     return type == GGML_TYPE_FP8_E4M3_E8M0_32 || type == GGML_TYPE_FP8_E4M3_E8M0_16;
 }
@@ -471,6 +537,22 @@ static void ggml_cpy_f32_q5_1_cuda(
         (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, cdst_indirect, graph_cpynode_index++);
 }
 
+static void ggml_cpy_f32_nvfp4_cuda(
+    const char * cx, char * cdst, const int ne,
+    const int ne00, const int ne01, const int ne02,
+    const int nb00, const int nb01, const int nb02, const int nb03,
+    const int ne10, const int ne11, const int ne12,
+    const int nb10, const int nb11, const int nb12, const int nb13,
+    cudaStream_t stream, char ** cdst_indirect, int & graph_cpynode_index) {
+    GGML_ASSERT(ne % QK_NVFP4 == 0);
+    const int num_blocks = ne / QK_NVFP4;
+    cpy_f32_q<cpy_blck_f32_nvfp4, QK_NVFP4><<<num_blocks, 1, 0, stream>>>(
+            cx, cdst, ne,
+            ne00, ne01, ne02, nb00, nb01, nb02, nb03,
+            ne10, ne11, ne12, nb10, nb11, nb12, nb13,
+            cdst_indirect, graph_cpynode_index++);
+}
+
 static void ggml_cpy_q5_1_f32_cuda(
     const char * cx, char * cdst, const int ne,
     const int ne00, const int ne01, const int ne02,
@@ -718,6 +800,9 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
         ggml_cpy_f32_q5_1_cuda(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_Q5_1 && src1->type == GGML_TYPE_F32) {
         ggml_cpy_q5_1_f32_cuda(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
+    } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_NVFP4) {
+        ggml_cpy_f32_nvfp4_cuda(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03,
+                ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_NVFP4 && src1->type == GGML_TYPE_F32) {
         ggml_cpy_nvfp4_f32_cuda(src0_ddc, src0_nvfp4_scale_d, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03,
                 ne10, ne11, ne12, nb10, nb11, nb12, nb13,
@@ -807,6 +892,8 @@ void* ggml_cuda_cpy_fn(const ggml_tensor * src0, ggml_tensor * src1) {
         return (void*) cpy_f32_q<cpy_blck_f32_q5_1, QK5_1>;
     } else if (src0->type == GGML_TYPE_Q5_1 && src1->type == GGML_TYPE_F32) {
         return (void*) cpy_q_f32<cpy_blck_q_f32<dequantize_q5_1, QK5_1>, QK5_1>;
+    } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_NVFP4) {
+        return (void*) cpy_f32_q<cpy_blck_f32_nvfp4, QK_NVFP4>;
     } else if (src0->type == GGML_TYPE_NVFP4 && src1->type == GGML_TYPE_F32) {
         return (void*) cpy_nvfp4_f32<block_nvfp4, QK_NVFP4>;
     } else if (src0->type == GGML_TYPE_NVFP4_8 && src1->type == GGML_TYPE_F32) {
