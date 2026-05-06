@@ -1312,29 +1312,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
     } else {
-#ifdef GGML_USE_CUDA
-        const bool experimental_kv_convert = !kv_nvfp4_fp8_f32_ref && cparams.offload_kqv && llama_graph_env_enabled("LLAMA_EXPERIMENTAL_KV_CONVERT");
-#else
-        const bool experimental_kv_convert = false;
-#endif
-
-        if (experimental_kv_convert) {
-            if (k->type == GGML_TYPE_Q4_1) {
-                k = ggml_cast(ctx0, k, GGML_TYPE_F32);
-                GGML_ASSERT(k->ne[0] % ggml_blck_size(GGML_TYPE_NVFP4) == 0);
-                k = ggml_cast(ctx0, k, GGML_TYPE_NVFP4);
-                k_scale = nullptr;
-            } else if (k->type == GGML_TYPE_NVFP4 || k->type == GGML_TYPE_NVFP4_8) {
-                if (k_scale) {
-                    ggml_tensor_set_nvfp4_scale(k, k_scale);
-                }
-                k = ggml_cast(ctx0, k, GGML_TYPE_F32);
-                GGML_ASSERT(k->ne[0] % ggml_blck_size(GGML_TYPE_Q4_1) == 0);
-                k = ggml_cast(ctx0, k, GGML_TYPE_Q4_1);
-                k_scale = nullptr;
-            }
-        }
-
         ggml_tensor * kq;
         if (kv_nvfp4_fp8_f32_ref) {
             q = llama_graph_quant_roundtrip(ctx0, q, GGML_TYPE_NVFP4);
@@ -1384,39 +1361,14 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         if (!v_trans) {
             // note: avoid this branch
             const ggml_type v_type = v->type;
-            if (experimental_kv_convert && v_type == GGML_TYPE_Q4_1) {
+            if (ggml_is_quantized(v_type) &&
+                v_type != GGML_TYPE_FP8_E4M3_E8M0_32 &&
+                v_type != GGML_TYPE_FP8_E4M3_E8M0_16) {
                 v = ggml_cast(ctx0, v, GGML_TYPE_F32);
-                v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
-                GGML_ASSERT(v->ne[0] % ggml_blck_size(GGML_TYPE_FP8_E4M3_E8M0_32) == 0);
-                v = ggml_cast(ctx0, v, GGML_TYPE_FP8_E4M3_E8M0_32);
-            } else if (experimental_kv_convert &&
-                    (v_type == GGML_TYPE_FP8_E4M3_E8M0_32 ||
-                     v_type == GGML_TYPE_FP8_E4M3_E8M0_16)) {
-                v = ggml_cast(ctx0, v, GGML_TYPE_F32);
-                v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
-                GGML_ASSERT(v->ne[0] % ggml_blck_size(GGML_TYPE_Q4_1) == 0);
-                v = ggml_cast(ctx0, v, GGML_TYPE_Q4_1);
-            } else {
-                if (ggml_is_quantized(v_type) &&
-                    v_type != GGML_TYPE_FP8_E4M3_E8M0_32 &&
-                    v_type != GGML_TYPE_FP8_E4M3_E8M0_16) {
-                    v = ggml_cast(ctx0, v, GGML_TYPE_F32);
-                }
-                v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
-                if (v_type == GGML_TYPE_Q4_1) {
-                    GGML_ASSERT(v->ne[0] % ggml_blck_size(v_type) == 0);
-                    v = ggml_cast(ctx0, v, GGML_TYPE_Q4_1);
-                }
             }
-        } else if (experimental_kv_convert) {
-            if (v->type == GGML_TYPE_Q4_1) {
-                v = ggml_cast(ctx0, v, GGML_TYPE_F32);
-                GGML_ASSERT(v->ne[0] % ggml_blck_size(GGML_TYPE_FP8_E4M3_E8M0_32) == 0);
-                v = ggml_cast(ctx0, v, GGML_TYPE_FP8_E4M3_E8M0_32);
-            } else if (v->type == GGML_TYPE_FP8_E4M3_E8M0_32 ||
-                    v->type == GGML_TYPE_FP8_E4M3_E8M0_16) {
-                v = ggml_cast(ctx0, v, GGML_TYPE_F32);
-                GGML_ASSERT(v->ne[0] % ggml_blck_size(GGML_TYPE_Q4_1) == 0);
+            v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
+            if (v_type == GGML_TYPE_Q4_1) {
+                GGML_ASSERT(v->ne[0] % ggml_blck_size(v_type) == 0);
                 v = ggml_cast(ctx0, v, GGML_TYPE_Q4_1);
             }
         }
