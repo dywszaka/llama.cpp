@@ -65,6 +65,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <float.h>
 #include <initializer_list>
 #include <limits>
@@ -2138,6 +2139,10 @@ static bool ggml_cuda_fp8_e8m0_native_no_fallback() {
     return cached != 0;
 }
 
+static bool ggml_cuda_tensor_name_starts_with(const ggml_tensor * t, const char * prefix) {
+    return std::strncmp(ggml_get_name(t), prefix, std::strlen(prefix)) == 0;
+}
+
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
@@ -2169,6 +2174,26 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     if (!split &&
         src0->type == GGML_TYPE_FP8_E4M3_E8M0_32 &&
         src1->type == GGML_TYPE_F32 &&
+        dst->type == GGML_TYPE_F32 &&
+        ggml_cuda_tensor_name_starts_with(dst, "kqv-")) {
+        if (ggml_cuda_mul_mat_fp8_e8m0_vp(ctx, src0, src1, dst)) {
+            return;
+        }
+        GGML_ABORT(
+                "%s: FP8(E4M3+E8M0) VP CUDA kernel path failed for dst=%s | "
+                "src0_type=%s src1_type=%s dst_type=%s "
+                "src0_ne=[%lld,%lld,%lld,%lld] src1_ne=[%lld,%lld,%lld,%lld] dst_ne=[%lld,%lld,%lld,%lld]",
+                __func__,
+                ggml_get_name(dst),
+                ggml_type_name(src0->type), ggml_type_name(src1->type), ggml_type_name(dst->type),
+                (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2], (long long) src0->ne[3],
+                (long long) src1->ne[0], (long long) src1->ne[1], (long long) src1->ne[2], (long long) src1->ne[3],
+                (long long) dst->ne[0], (long long) dst->ne[1], (long long) dst->ne[2], (long long) dst->ne[3]);
+    }
+
+    if (!split &&
+        src0->type == GGML_TYPE_FP8_E4M3_E8M0_32 &&
+        src1->type == GGML_TYPE_F32 &&
         dst->type == GGML_TYPE_F32) {
         if (ggml_cuda_mul_mat_fp8_e8m0_native(ctx, src0, src1, dst)) {
             return;
@@ -2185,6 +2210,27 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
                     (long long) src1->ne[0], (long long) src1->ne[1], (long long) src1->ne[2], (long long) src1->ne[3],
                     (long long) dst->ne[0], (long long) dst->ne[1], (long long) dst->ne[2], (long long) dst->ne[3]);
         }
+    }
+
+    if (!split &&
+        ggml_cuda_nvfp4_native_enabled() &&
+        src0->type == GGML_TYPE_NVFP4 &&
+        src1->type == GGML_TYPE_F32 &&
+        dst->type == GGML_TYPE_F32 &&
+        ggml_cuda_tensor_name_starts_with(dst, "kq-")) {
+        if (ggml_cuda_mul_mat_nvfp4_kq(ctx, src0, src1, dst)) {
+            return;
+        }
+        GGML_ABORT(
+                "%s: NVFP4 KQ CUDA kernel path failed for dst=%s | "
+                "src0_type=%s src1_type=%s dst_type=%s "
+                "src0_ne=[%lld,%lld,%lld,%lld] src1_ne=[%lld,%lld,%lld,%lld] dst_ne=[%lld,%lld,%lld,%lld]",
+                __func__,
+                ggml_get_name(dst),
+                ggml_type_name(src0->type), ggml_type_name(src1->type), ggml_type_name(dst->type),
+                (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2], (long long) src0->ne[3],
+                (long long) src1->ne[0], (long long) src1->ne[1], (long long) src1->ne[2], (long long) src1->ne[3],
+                (long long) dst->ne[0], (long long) dst->ne[1], (long long) dst->ne[2], (long long) dst->ne[3]);
     }
 
     if (!split &&
