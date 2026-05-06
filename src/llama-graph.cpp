@@ -11,7 +11,29 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+
+static bool llama_graph_env_enabled(const char * name) {
+    const char * value = getenv(name);
+    return value && value[0] != '\0' && value[0] != '0';
+}
+
+static bool llama_graph_kv_nvfp4_fp8_f32_ref_enabled(
+        const ggml_tensor * k,
+        const ggml_tensor * v) {
+    return llama_graph_env_enabled("LLAMA_KV_NVFP4_FP8_F32_REF") &&
+        k->type == GGML_TYPE_NVFP4 &&
+        v->type == GGML_TYPE_FP8_E4M3_E8M0_32 &&
+        ggml_tensor_get_nvfp4_scale(k) != nullptr;
+}
+
+static ggml_tensor * llama_graph_quant_roundtrip(
+        ggml_context * ctx,
+        ggml_tensor  * t,
+        ggml_type      type) {
+    return ggml_cast(ctx, ggml_cast(ctx, t, type), GGML_TYPE_F32);
+}
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
@@ -1229,6 +1251,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
              int       il) const {
     const bool v_trans = v->nb[1] > v->nb[2];
     ggml_tensor * k_scale = (ggml_tensor *) ggml_tensor_get_nvfp4_scale(k);
+    const bool kv_nvfp4_fp8_f32_ref = llama_graph_kv_nvfp4_fp8_f32_ref_enabled(k, v);
 
     // split the batch into streams if needed
     const auto n_stream = k->ne[3];
@@ -1244,7 +1267,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     ggml_tensor * cur;
 
     // TODO: replace hardcoded padding with ggml-provided padding
-    if (cparams.flash_attn && (n_kv % 256 == 0) && kq_b == nullptr) {
+    if (!kv_nvfp4_fp8_f32_ref && cparams.flash_attn && (n_kv % 256 == 0) && kq_b == nullptr) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
         if (v_trans) {
@@ -1289,14 +1312,25 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
     } else {
-        ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+        ggml_tensor * kq;
+        if (kv_nvfp4_fp8_f32_ref) {
+            q = llama_graph_quant_roundtrip(ctx0, q, GGML_TYPE_NVFP4);
+            if (k_scale) {
+                ggml_tensor_set_nvfp4_scale(k, k_scale);
+            }
+            k = ggml_cast(ctx0, k, GGML_TYPE_F32);
+            kq = ggml_mul_mat(ctx0, k, q);
+            LLAMA_LOG_INFO("K Q matmul is F32 * F32\n");
+        } else {
+            kq = ggml_mul_mat(ctx0, k, q);
+        }
         cb(kq, "kq", il);
 
         // note: this op tends to require high floating point range
         //       while for some models F16 is enough, for others it is not, so we default to F32 here
         ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
 
-        if (k_scale) {
+        if (k_scale && !kv_nvfp4_fp8_f32_ref) {
             kq = ggml_mul(ctx0, kq, k_scale);
         }
 
@@ -1328,8 +1362,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             // note: avoid this branch
             const ggml_type v_type = v->type;
             if (ggml_is_quantized(v_type) &&
-                    v_type != GGML_TYPE_FP8_E4M3_E8M0_32 &&
-                    v_type != GGML_TYPE_FP8_E4M3_E8M0_16) {
+                v_type != GGML_TYPE_FP8_E4M3_E8M0_32 &&
+                v_type != GGML_TYPE_FP8_E4M3_E8M0_16) {
                 v = ggml_cast(ctx0, v, GGML_TYPE_F32);
             }
             v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
@@ -1339,7 +1373,15 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             }
         }
 
+        if (kv_nvfp4_fp8_f32_ref) {
+            kq = llama_graph_quant_roundtrip(ctx0, kq, GGML_TYPE_FP8_E4M3_E8M0_32);
+            v = ggml_cast(ctx0, v, GGML_TYPE_F32);
+        }
+
         ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
+        if (kv_nvfp4_fp8_f32_ref) {
+            LLAMA_LOG_INFO("V P matmul is F32 * F32\n");
+        }
         cb(kqv, "kqv", il);
 
         // for MLA with the absorption optimization, we need to "decompress" from MQA back to MHA

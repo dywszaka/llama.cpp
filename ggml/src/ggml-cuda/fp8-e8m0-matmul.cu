@@ -83,6 +83,131 @@ static void quantize_row_fp8_e8m0_cuda(
     quantize_row_fp8_e8m0_kernel<<<num_blocks, block_size, 0, stream>>>(x, y, ne00, s01);
 }
 
+static __global__ void quantize_row_fp8_e8m0_strided_kernel(
+        const float * __restrict__ x,
+        block_fp8_e4m3_e8m0_32 * __restrict__ y,
+        const int64_t ne10,
+        const int64_t ne11,
+        const int64_t ne12,
+        const int64_t ne13,
+        const int64_t nb10,
+        const int64_t nb11,
+        const int64_t nb12,
+        const int64_t nb13,
+        const int64_t nblk) {
+    const int64_t ib = blockIdx.x;
+    const int64_t row = blockIdx.y;
+    const int lane = threadIdx.x;
+    const int64_t nrows = ne11 * ne12 * ne13;
+    if (row >= nrows || ib >= nblk) {
+        return;
+    }
+
+    const int64_t i13 = row / (ne11 * ne12);
+    const int64_t rem = row - i13 * ne11 * ne12;
+    const int64_t i12 = rem / ne11;
+    const int64_t i11 = rem - i12 * ne11;
+    const int64_t k = ib * QK_FP8_E4M3_E8M0_32 + lane;
+    const char * base = (const char *) x + i11 * nb11 + i12 * nb12 + i13 * nb13;
+
+    const float xi = k < ne10 ? *(const float *) (base + k * nb10) : 0.0f;
+    float vmax = fabsf(xi);
+
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 16, WARP_SIZE));
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 8, WARP_SIZE));
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 4, WARP_SIZE));
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 2, WARP_SIZE));
+    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 1, WARP_SIZE));
+    vmax = __shfl_sync(0xFFFFFFFF, vmax, 0, WARP_SIZE);
+
+    uint8_t scale_q = 0;
+    float scale = 0.0f;
+    if (lane == 0) {
+        scale_q = ggml_cuda_fp32_to_e8m0_ceil_scale(vmax / 448.0f);
+        scale = ggml_cuda_e8m0_to_fp32(scale_q);
+        y[row * nblk + ib].e = scale_q;
+    }
+    scale = __shfl_sync(0xFFFFFFFF, scale, 0, WARP_SIZE);
+
+    const float inv_scale = scale > 0.0f ? 1.0f / scale : 0.0f;
+    y[row * nblk + ib].qs[lane] =
+            scale > 0.0f ? __nv_cvt_float_to_fp8(xi * inv_scale, __NV_SATFINITE, __NV_E4M3) : 0;
+}
+
+static __global__ void fp8_e8m0_vp_kernel(
+        const char * __restrict__ v,
+        const block_fp8_e4m3_e8m0_32 * __restrict__ p_blocks,
+        char * __restrict__ dst,
+        const int64_t ne00,
+        const int64_t ne01,
+        const int64_t ne02,
+        const int64_t ne03,
+        const int64_t nb00,
+        const int64_t nb01,
+        const int64_t nb02,
+        const int64_t nb03,
+        const int64_t ne11,
+        const int64_t ne12,
+        const int64_t ne13,
+        const int64_t nb0,
+        const int64_t nb1,
+        const int64_t nb2,
+        const int64_t nb3,
+        const int64_t nblk,
+        const int64_t r2,
+        const int64_t r3) {
+    const int64_t idx = blockIdx.x;
+    const int64_t total = ne01 * ne11 * ne12 * ne13;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t i3 = idx / (ne01 * ne11 * ne12);
+    const int64_t rem3 = idx - i3 * ne01 * ne11 * ne12;
+    const int64_t i2 = rem3 / (ne01 * ne11);
+    const int64_t rem2 = rem3 - i2 * ne01 * ne11;
+    const int64_t i1 = rem2 / ne01;
+    const int64_t i0 = rem2 - i1 * ne01;
+
+    const int64_t v_i2 = i2 / r2;
+    const int64_t v_i3 = i3 / r3;
+    if (v_i2 >= ne02 || v_i3 >= ne03) {
+        return;
+    }
+
+    const char * v_row = v + i0 * nb01 + v_i2 * nb02 + v_i3 * nb03;
+    const int64_t p_row = i1 + i2 * ne11 + i3 * ne11 * ne12;
+    const block_fp8_e4m3_e8m0_32 * p_row_blocks = p_blocks + p_row * nblk;
+
+    float acc = 0.0f;
+    for (int64_t ib = threadIdx.x; ib < nblk; ib += blockDim.x) {
+        const block_fp8_e4m3_e8m0_32 * vb = (const block_fp8_e4m3_e8m0_32 *) (v_row + ib * nb00);
+        const block_fp8_e4m3_e8m0_32 pb = p_row_blocks[ib];
+        const float vd = vb->e == 0 ? 0.0f : ggml_cuda_e8m0_to_fp32(vb->e);
+        const float pd = pb.e == 0 ? 0.0f : ggml_cuda_e8m0_to_fp32(pb.e);
+
+#pragma unroll
+        for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
+            acc += vd * pd * ggml_cuda_e4m3_to_fp32(vb->qs[j]) * ggml_cuda_e4m3_to_fp32(pb.qs[j]);
+        }
+    }
+
+    __shared__ float partial[256];
+    partial[threadIdx.x] = acc;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] += partial[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        *(float *) (dst + i0 * nb0 + i1 * nb1 + i2 * nb2 + i3 * nb3) = partial[0];
+    }
+}
+
 static __global__ void quantize_row_fp8_e8m0_16_kernel(
         const float * __restrict__ x,
         block_fp8_e4m3_e8m0_16 * __restrict__ y,
@@ -708,4 +833,63 @@ bool ggml_cuda_mul_mat_fp8_e8m0_native(
     GGML_UNUSED(dst);
     return false;
 #endif
+}
+
+bool ggml_cuda_mul_mat_fp8_e8m0_vp(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst) {
+    if (src0->type != GGML_TYPE_FP8_E4M3_E8M0_32 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (src0->ne[0] != src1->ne[0] || src0->ne[0] % QK_FP8_E4M3_E8M0_32 != 0) {
+        return false;
+    }
+    if (dst->ne[0] != src0->ne[1] || dst->ne[1] != src1->ne[1] || dst->ne[2] != src1->ne[2] || dst->ne[3] != src1->ne[3]) {
+        return false;
+    }
+    if (src0->ne[2] <= 0 || src0->ne[3] <= 0 || src1->ne[2] % src0->ne[2] != 0 || src1->ne[3] % src0->ne[3] != 0) {
+        return false;
+    }
+
+    cudaStream_t stream = ctx.stream();
+
+    const int64_t ne10 = src1->ne[0];
+    const int64_t ne11 = src1->ne[1];
+    const int64_t ne12 = src1->ne[2];
+    const int64_t ne13 = src1->ne[3];
+    const int64_t nrows_p = ne11 * ne12 * ne13;
+    const int64_t nblk = ne10 / QK_FP8_E4M3_E8M0_32;
+
+    ggml_cuda_pool_alloc<block_fp8_e4m3_e8m0_32> p_blocks(ctx.pool(), (size_t) std::max<int64_t>(nrows_p * nblk, 1));
+
+    if (nrows_p > 0) {
+        const dim3 quant_grid((uint32_t) nblk, (uint32_t) nrows_p, 1);
+        quantize_row_fp8_e8m0_strided_kernel<<<quant_grid, WARP_SIZE, 0, stream>>>(
+                (const float *) src1->data,
+                p_blocks.get(),
+                ne10, ne11, ne12, ne13,
+                src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3],
+                nblk);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    const int64_t r2 = src1->ne[2] / src0->ne[2];
+    const int64_t r3 = src1->ne[3] / src0->ne[3];
+    const int64_t total = dst->ne[0] * dst->ne[1] * dst->ne[2] * dst->ne[3];
+    if (total > 0) {
+        fp8_e8m0_vp_kernel<<<(uint32_t) total, 256, 0, stream>>>(
+                (const char *) src0->data,
+                p_blocks.get(),
+                (char *) dst->data,
+                src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+                src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
+                src1->ne[1], src1->ne[2], src1->ne[3],
+                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3],
+                nblk, r2, r3);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    return true;
 }
