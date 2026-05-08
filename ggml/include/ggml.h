@@ -2134,6 +2134,20 @@ extern "C" {
     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
             const struct ggml_tensor * a);
 
+    enum ggml_flash_attn_ext_flags {
+        GGML_FLASH_ATTN_FLAG_FP8_P_E4M3_E8M0  = 1 << 0,
+        GGML_FLASH_ATTN_FLAG_NVFP4_QKVP       = 1 << 1,
+        GGML_FLASH_ATTN_FLAG_NVFP4_P_TWOLEVEL = 1 << 2,
+        GGML_FLASH_ATTN_FLAG_NVFP4_SMOOTH_QK  = 1 << 3,
+    };
+
+    GGML_API void ggml_flash_attn_ext_set_flags(
+            struct ggml_tensor * a,
+            int32_t              flags);
+
+    GGML_API int32_t ggml_flash_attn_ext_get_flags(
+            const struct ggml_tensor * a);
+
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);

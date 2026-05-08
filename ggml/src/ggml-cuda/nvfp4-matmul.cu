@@ -392,7 +392,7 @@ static __global__ void quantize_row_nvfp4_dynamic_kernel(
     }
 }
 
-static void quantize_row_nvfp4_cuda(
+static void quantize_row_nvfp4_cuda_impl(
         const float * x,
         block_nvfp4 * y,
         int64_t ne00,
@@ -405,6 +405,17 @@ static void quantize_row_nvfp4_cuda(
     const dim3 num_blocks((uint32_t) (ne00 / QK_NVFP4), (uint32_t) ne01, 1);
     const dim3 block_size(WARP_SIZE, 1, 1);
     quantize_row_nvfp4_kernel<<<num_blocks, block_size, 0, stream>>>(x, y, ne00, s01, global_scale);
+}
+
+static void quantize_row_nvfp4_cuda(
+        const float * x,
+        block_nvfp4 * y,
+        int64_t ne00,
+        int64_t s01,
+        int64_t ne01,
+        float global_scale,
+        cudaStream_t stream) {
+    quantize_row_nvfp4_cuda_impl(x, y, ne00, s01, ne01, global_scale, stream);
 }
 
 static void quantize_row_nvfp4_dynamic_cuda(
@@ -715,6 +726,17 @@ static void ggml_cuda_nvfp4_materialize_contiguous_matrix(
 }
 
 } // namespace
+
+void ggml_cuda_nvfp4_quantize_rows_f32(
+        const float * x,
+        block_nvfp4 * y,
+        int64_t ne00,
+        int64_t s01,
+        int64_t ne01,
+        float global_scale,
+        cudaStream_t stream) {
+    quantize_row_nvfp4_cuda_impl(x, y, ne00, s01, ne01, global_scale, stream);
+}
 
 bool ggml_cuda_mul_mat_nvfp4_native(
         ggml_backend_cuda_context & ctx,

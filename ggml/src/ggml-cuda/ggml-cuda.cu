@@ -2998,6 +2998,14 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
 #endif
         }
 
+        if (node->op == GGML_OP_FLASH_ATTN_EXT &&
+                (ggml_flash_attn_ext_get_flags(node) & GGML_FLASH_ATTN_FLAG_NVFP4_QKVP) != 0) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for NVFP4 flash attention\n", __func__);
+#endif
+        }
+
         if (node->op == GGML_OP_ADD &&
             node->src[1] && node->src[1]->ne[1] > 1 &&
             (node->src[0] ? node->src[0]->name != gemma3n_per_layer_proj_src0_name : true) &&

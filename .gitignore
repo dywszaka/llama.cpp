@@ -151,3 +151,5 @@ poetry.toml
 /run-chat.sh
 
 myplayground/
+data
+experiments

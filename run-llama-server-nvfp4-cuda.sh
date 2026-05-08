@@ -8,6 +8,7 @@ PORT="${PORT:-8080}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export GGML_CUDA_DISABLE_GRAPHS="${GGML_CUDA_DISABLE_GRAPHS:-1}"
 export GGML_CUDA_NVFP4_NATIVE="${GGML_CUDA_NVFP4_NATIVE:-1}"
+export GGML_CUDA_NVFP4_FATTN="${GGML_CUDA_NVFP4_FATTN:-1}"
 
 exec "${ROOT_DIR}/build_cuda_release/bin/llama-server" \
   -m "${MODEL_PATH}" \
@@ -19,4 +20,5 @@ exec "${ROOT_DIR}/build_cuda_release/bin/llama-server" \
   -t 32 \
   -c 2048 \
   --no-warmup \
+  --flash-attn \
   "$@"

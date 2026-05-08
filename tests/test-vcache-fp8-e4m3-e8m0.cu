@@ -12,8 +12,6 @@
 #include <cstring>
 #include <vector>
 
-static constexpr int32_t GGML_FLASH_ATTN_FLAG_FP8_P_E4M3_E8M0 = 1;
-
 static void disable_cuda_truncation() {
 #if defined(_WIN32)
     _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
