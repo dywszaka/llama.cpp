@@ -107,6 +107,71 @@ static __device__ __forceinline__ float read_tensor_f32_or_f16_device(
     return __half2float(*(const half *) ptr);
 }
 
+static __device__ __forceinline__ float read_tensor_nvfp4_device(
+        const void * data,
+        const float * scale,
+        int64_t nb0,
+        int64_t nb1,
+        int64_t nb2,
+        int64_t nb3,
+        int64_t scale_nb0,
+        int64_t scale_nb1,
+        int64_t scale_nb2,
+        int64_t scale_nb3,
+        int scale_axis,
+        int64_t i0,
+        int64_t i1,
+        int64_t i2,
+        int64_t i3) {
+    const char * ptr = (const char *) data + (i0 / QK_NVFP4)*nb0 + i1*nb1 + i2*nb2 + i3*nb3;
+    const block_nvfp4 * block = (const block_nvfp4 *) ptr;
+    const uint8_t packed = block->qs[(i0 % QK_NVFP4) / 2];
+    const uint8_t q = (i0 & 1) == 0 ? (packed & 0x0F) : (packed >> 4);
+
+    float input_scale = 1.0f;
+    if (scale != nullptr && scale_axis >= 0) {
+        const int64_t scale_i0 = scale_axis == 0 ? i0 : scale_axis == 1 ? i1 : scale_axis == 2 ? i2 : i3;
+        const int64_t scale_i1 = scale_axis == 1 ? 0  : i1;
+        const int64_t scale_i2 = scale_axis == 2 ? 0  : i2;
+        const char * scale_ptr = (const char *) scale + scale_i0*scale_nb0 + scale_i1*scale_nb1 + scale_i2*scale_nb2 + i3*scale_nb3;
+        input_scale = *(const float *) scale_ptr;
+    }
+
+    return ggml_cuda_e4m3_to_fp32_half(block->e) * input_scale * (float) kvalues_nvfp4[q];
+}
+
+static bool get_nvfp4_scale_layout(
+        const ggml_tensor * src,
+        int & scale_axis,
+        int64_t & scale_nb0,
+        int64_t & scale_nb1,
+        int64_t & scale_nb2,
+        int64_t & scale_nb3) {
+    const ggml_tensor * scale = ggml_tensor_get_nvfp4_scale(src);
+    if (scale == nullptr || scale->type != GGML_TYPE_F32 || scale->data == nullptr) {
+        return false;
+    }
+
+    scale_nb0 = (int64_t) scale->nb[0];
+    scale_nb1 = (int64_t) scale->nb[1];
+    scale_nb2 = (int64_t) scale->nb[2];
+    scale_nb3 = (int64_t) scale->nb[3];
+
+    if (scale->ne[0] == src->ne[1] && scale->ne[3] == src->ne[3]) {
+        scale_axis = 1;
+        return true;
+    }
+    if (scale->ne[0] == src->ne[2] && scale->ne[3] == src->ne[3]) {
+        scale_axis = 2;
+        return true;
+    }
+    if (scale->ne[0] == src->ne[0] && scale->ne[3] == src->ne[3]) {
+        scale_axis = 0;
+        return true;
+    }
+    return false;
+}
+
 static __device__ __forceinline__ void atomic_max_f32_positive(float * addr, float value) {
     int * addr_i = (int *) addr;
     int old = *addr_i;
@@ -306,6 +371,47 @@ static __global__ void k_no_smooth_kernel(
         const int64_t visible = visible_lens[b];
 
         k_centered[idx] = t < visible ? read_tensor_f32_or_f16_device(k, k_type, k_nb0, k_nb1, k_nb2, k_nb3, i, t, h, b) : 0.0f;
+    }
+}
+
+static __global__ void k_no_smooth_nvfp4_kernel(
+        const void * k,
+        const float * k_scale,
+        int64_t k_nb0,
+        int64_t k_nb1,
+        int64_t k_nb2,
+        int64_t k_nb3,
+        int64_t k_scale_nb0,
+        int64_t k_scale_nb1,
+        int64_t k_scale_nb2,
+        int64_t k_scale_nb3,
+        int k_scale_axis,
+        const int64_t * visible_lens,
+        float * k_centered,
+        int64_t d,
+        int64_t kv_len,
+        int64_t kv_heads,
+        int64_t total) {
+    for (int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+            idx < total;
+            idx += (int64_t) blockDim.x * gridDim.x) {
+        int64_t rem = idx;
+        const int64_t i = rem % d;
+        rem /= d;
+        const int64_t t = rem % kv_len;
+        rem /= kv_len;
+        const int64_t h = rem % kv_heads;
+        const int64_t b = rem / kv_heads;
+        const int64_t visible = visible_lens[b];
+
+        k_centered[idx] = t < visible ?
+            read_tensor_nvfp4_device(
+                    k, k_scale,
+                    k_nb0, k_nb1, k_nb2, k_nb3,
+                    k_scale_nb0, k_scale_nb1, k_scale_nb2, k_scale_nb3,
+                    k_scale_axis,
+                    i, t, h, b) :
+            0.0f;
     }
 }
 
@@ -603,8 +709,15 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     if (q == nullptr || k == nullptr || v == nullptr || q->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
         return false;
     }
-    if (!((k->type == GGML_TYPE_F16 || k->type == GGML_TYPE_F32) &&
+    const bool no_q_smooth = env_enabled("GGML_CUDA_NVFP4_FATTN_NO_Q_SMOOTH");
+    const bool no_k_smooth = env_enabled("GGML_CUDA_NVFP4_FATTN_NO_K_SMOOTH");
+    const bool k_nvfp4_cache = k->type == GGML_TYPE_NVFP4;
+
+    if (!((k->type == GGML_TYPE_F16 || k->type == GGML_TYPE_F32 || k_nvfp4_cache) &&
           (v->type == GGML_TYPE_F16 || v->type == GGML_TYPE_F32))) {
+        return false;
+    }
+    if (k_nvfp4_cache && !no_k_smooth) {
         return false;
     }
     if (q->ne[0] != k->ne[0] || q->ne[0] != v->ne[0] || q->ne[0] % QK_NVFP4 != 0 || k->ne[1] % QK_NVFP4 != 0) {
@@ -643,8 +756,19 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     cudaStream_t stream = ctx.stream();
     const bool debug_log = env_enabled("GGML_CUDA_NVFP4_FATTN_DEBUG");
     const bool p_direct = env_enabled("GGML_CUDA_NVFP4_FATTN_P_DIRECT");
-    const bool no_q_smooth = env_enabled("GGML_CUDA_NVFP4_FATTN_NO_Q_SMOOTH");
-    const bool no_k_smooth = env_enabled("GGML_CUDA_NVFP4_FATTN_NO_K_SMOOTH");
+
+    int k_scale_axis = -1;
+    int64_t k_scale_nb0 = 0;
+    int64_t k_scale_nb1 = 0;
+    int64_t k_scale_nb2 = 0;
+    int64_t k_scale_nb3 = 0;
+    const ggml_tensor * k_scale_tensor = nullptr;
+    if (k_nvfp4_cache) {
+        if (!get_nvfp4_scale_layout(k, k_scale_axis, k_scale_nb0, k_scale_nb1, k_scale_nb2, k_scale_nb3)) {
+            return false;
+        }
+        k_scale_tensor = ggml_tensor_get_nvfp4_scale(k);
+    }
 
     std::vector<uint8_t> mask_raw(mask != nullptr ? tensor_data_span_bytes(mask) : 0);
     if (mask != nullptr) {
@@ -689,7 +813,14 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     }
     CUDA_CHECK(cudaGetLastError());
 
-    if (no_k_smooth) {
+    if (no_k_smooth && k_nvfp4_cache) {
+        k_no_smooth_nvfp4_kernel<<<(int) std::min<int64_t>(1024, (k_rows*d + q_block_size - 1) / q_block_size),
+                q_block_size, 0, stream>>>(
+                k->data, (const float *) k_scale_tensor->data,
+                (int64_t) k->nb[0], (int64_t) k->nb[1], (int64_t) k->nb[2], (int64_t) k->nb[3],
+                k_scale_nb0, k_scale_nb1, k_scale_nb2, k_scale_nb3, k_scale_axis,
+                d_visible.get(), k_centered.get(), d, kv_len, kv_heads, k_rows*d);
+    } else if (no_k_smooth) {
         k_no_smooth_kernel<<<(int) std::min<int64_t>(1024, (k_rows*d + q_block_size - 1) / q_block_size),
                 q_block_size, 0, stream>>>(
                 k->data, k->type,

@@ -2331,8 +2331,8 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
-    if (params.flash_attn && (params.type_k == GGML_TYPE_NVFP4 || params.type_k == GGML_TYPE_NVFP4_8)) {
-        LLAMA_LOG_ERROR("%s: NVFP4 K cache does not support flash_attn yet\n", __func__);
+    if (params.flash_attn && params.type_k == GGML_TYPE_NVFP4_8) {
+        LLAMA_LOG_ERROR("%s: NVFP4_8 K cache does not support flash_attn yet\n", __func__);
         return nullptr;
     }
 
