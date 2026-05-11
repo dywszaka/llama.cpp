@@ -210,6 +210,35 @@ static __global__ void q_smooth_decode_kernel(
     }
 }
 
+static __global__ void q_no_smooth_kernel(
+        const void * q,
+        int q_type,
+        int64_t q_nb0,
+        int64_t q_nb1,
+        int64_t q_nb2,
+        int64_t q_nb3,
+        float * q_centered,
+        float * q_mean,
+        int64_t d,
+        int64_t q_len,
+        int64_t q_heads,
+        int64_t total) {
+    for (int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+            idx < total;
+            idx += (int64_t) blockDim.x * gridDim.x) {
+        int64_t rem = idx;
+        const int64_t i = rem % d;
+        rem /= d;
+        const int64_t t = rem % q_len;
+        rem /= q_len;
+        const int64_t h = rem % q_heads;
+        const int64_t b = rem / q_heads;
+
+        q_centered[idx] = read_tensor_f32_or_f16_device(q, q_type, q_nb0, q_nb1, q_nb2, q_nb3, i, t, h, b);
+        q_mean[idx] = 0.0f;
+    }
+}
+
 static __global__ void k_smooth_kernel(
         const void * k,
         int k_type,
@@ -248,6 +277,35 @@ static __global__ void k_smooth_kernel(
         const int64_t row = (b*kv_heads + h)*kv_len + t;
         const float kv = t < visible ? read_tensor_f32_or_f16_device(k, k_type, k_nb0, k_nb1, k_nb2, k_nb3, i, t, h, b) - mean : 0.0f;
         k_centered[row*d + i] = kv;
+    }
+}
+
+static __global__ void k_no_smooth_kernel(
+        const void * k,
+        int k_type,
+        int64_t k_nb0,
+        int64_t k_nb1,
+        int64_t k_nb2,
+        int64_t k_nb3,
+        const int64_t * visible_lens,
+        float * k_centered,
+        int64_t d,
+        int64_t kv_len,
+        int64_t kv_heads,
+        int64_t total) {
+    for (int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+            idx < total;
+            idx += (int64_t) blockDim.x * gridDim.x) {
+        int64_t rem = idx;
+        const int64_t i = rem % d;
+        rem /= d;
+        const int64_t t = rem % kv_len;
+        rem /= kv_len;
+        const int64_t h = rem % kv_heads;
+        const int64_t b = rem / kv_heads;
+        const int64_t visible = visible_lens[b];
+
+        k_centered[idx] = t < visible ? read_tensor_f32_or_f16_device(k, k_type, k_nb0, k_nb1, k_nb2, k_nb3, i, t, h, b) : 0.0f;
     }
 }
 
@@ -447,6 +505,24 @@ static __global__ void probs_twolevel_scale_kernel(
     }
 }
 
+static __global__ void probs_direct_scale_kernel(
+        const float * probs,
+        float * probs_scaled,
+        float * first_scales,
+        int64_t q_len,
+        int64_t kv_len) {
+    const int64_t qt = blockIdx.x;
+    const int64_t bh = blockIdx.y;
+    const int64_t row = bh*q_len + qt;
+
+    if (threadIdx.x == 0) {
+        first_scales[row] = 1.0f;
+    }
+    for (int64_t kt = threadIdx.x; kt < kv_len; kt += blockDim.x) {
+        probs_scaled[row*kv_len + kt] = probs[row*kv_len + kt];
+    }
+}
+
 static ggml_tensor make_cuda_temp_tensor_2d(ggml_type type, void * data, int64_t ne0, int64_t ne1) {
     ggml_tensor t = {};
     t.type = type;
@@ -566,6 +642,9 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
 
     cudaStream_t stream = ctx.stream();
     const bool debug_log = env_enabled("GGML_CUDA_NVFP4_FATTN_DEBUG");
+    const bool p_direct = env_enabled("GGML_CUDA_NVFP4_FATTN_P_DIRECT");
+    const bool no_q_smooth = env_enabled("GGML_CUDA_NVFP4_FATTN_NO_Q_SMOOTH");
+    const bool no_k_smooth = env_enabled("GGML_CUDA_NVFP4_FATTN_NO_K_SMOOTH");
 
     std::vector<uint8_t> mask_raw(mask != nullptr ? tensor_data_span_bytes(mask) : 0);
     if (mask != nullptr) {
@@ -587,9 +666,16 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     ggml_cuda_pool_alloc<float> k_centered(ctx.pool(), (size_t) k_rows * (size_t) d);
     ggml_cuda_pool_alloc<float> v_by_dim(ctx.pool(), (size_t) v_rows * (size_t) kv_len);
 
-    if (q_len == 1) {
+    const int q_block_size = 256;
+    if (no_q_smooth) {
+        const int64_t q_total = q_rows*d;
+        q_no_smooth_kernel<<<(int) std::min<int64_t>(1024, (q_total + q_block_size - 1) / q_block_size),
+                q_block_size, 0, stream>>>(
+                q->data, q->type,
+                (int64_t) q->nb[0], (int64_t) q->nb[1], (int64_t) q->nb[2], (int64_t) q->nb[3],
+                q_centered.get(), q_mean.get(), d, q_len, q_heads, q_total);
+    } else if (q_len == 1) {
         const int64_t q_total = batch*q_heads*d;
-        const int q_block_size = 256;
         q_smooth_decode_kernel<<<(int) std::min<int64_t>(1024, (q_total + q_block_size - 1) / q_block_size),
                 q_block_size, 0, stream>>>(
                 q->data, q->type,
@@ -603,10 +689,18 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     }
     CUDA_CHECK(cudaGetLastError());
 
-    k_smooth_kernel<<<dim3((uint32_t) d, (uint32_t) (batch*kv_heads), 1), 256, 0, stream>>>(
-            k->data, k->type,
-            (int64_t) k->nb[0], (int64_t) k->nb[1], (int64_t) k->nb[2], (int64_t) k->nb[3],
-            d_visible.get(), k_centered.get(), d, kv_len, kv_heads);
+    if (no_k_smooth) {
+        k_no_smooth_kernel<<<(int) std::min<int64_t>(1024, (k_rows*d + q_block_size - 1) / q_block_size),
+                q_block_size, 0, stream>>>(
+                k->data, k->type,
+                (int64_t) k->nb[0], (int64_t) k->nb[1], (int64_t) k->nb[2], (int64_t) k->nb[3],
+                d_visible.get(), k_centered.get(), d, kv_len, kv_heads, k_rows*d);
+    } else {
+        k_smooth_kernel<<<dim3((uint32_t) d, (uint32_t) (batch*kv_heads), 1), 256, 0, stream>>>(
+                k->data, k->type,
+                (int64_t) k->nb[0], (int64_t) k->nb[1], (int64_t) k->nb[2], (int64_t) k->nb[3],
+                d_visible.get(), k_centered.get(), d, kv_len, kv_heads);
+    }
     CUDA_CHECK(cudaGetLastError());
 
     const int block_size = 256;
@@ -632,7 +726,8 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
                 "%s: NVFP4 FATTN native quantization: "
                 "Q/K group_dim=head_dim group_size=%d tensor_global_scale_inv=[q=%g k=%g] "
                 "V group_dim=kv_len group_size=%d tensor_global_scale_inv=%g "
-                "P format=nvfp4_twolevel group_dim=kv_len first_level=row_max/(448*6) second_level=NVFP4(global_scale_inv=1) "
+                "P format=%s "
+                "smooth=[q=%s k=%s] "
                 "shape=[batch=%lld q_heads=%lld kv_heads=%lld q_len=%lld kv_len=%lld head_dim=%lld]\n",
                 __func__,
                 QK_NVFP4,
@@ -640,6 +735,11 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
                 (double) k_global_scale,
                 QK_NVFP4,
                 (double) v_global_scale,
+                p_direct ?
+                    "nvfp4_direct group_dim=kv_len first_level=none second_level=NVFP4(global_scale_inv=1)" :
+                    "nvfp4_twolevel group_dim=kv_len first_level=row_max/(448*6) second_level=NVFP4(global_scale_inv=1)",
+                no_q_smooth ? "off" : "on",
+                no_k_smooth ? "off" : "on",
                 (long long) batch,
                 (long long) q_heads,
                 (long long) kv_heads,
@@ -720,8 +820,13 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
             q_len, q_heads, kv_len, scale, max_bias, logit_softcap);
     CUDA_CHECK(cudaGetLastError());
 
-    probs_twolevel_scale_kernel<<<dim3((uint32_t) q_len, (uint32_t) bh_rows, 1), 256, 0, stream>>>(
-            probs.get(), probs_scaled.get(), p_first_scales.get(), q_len, kv_len);
+    if (p_direct) {
+        probs_direct_scale_kernel<<<dim3((uint32_t) q_len, (uint32_t) bh_rows, 1), 256, 0, stream>>>(
+                probs.get(), probs_scaled.get(), p_first_scales.get(), q_len, kv_len);
+    } else {
+        probs_twolevel_scale_kernel<<<dim3((uint32_t) q_len, (uint32_t) bh_rows, 1), 256, 0, stream>>>(
+                probs.get(), probs_scaled.get(), p_first_scales.get(), q_len, kv_len);
+    }
     CUDA_CHECK(cudaGetLastError());
 
     float v_weight_scale_value = 1.0f / v_global_scale;
@@ -745,14 +850,16 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
                 GGML_LOG_INFO(
                         "%s: VP matmul requested: backend=cublasLt tensor_core=FP4 lt_type=CUDA_R_4F_E2M1 "
                         "A=V[NVFP4,k=%lld,m=%lld,weight_scale=1/v_global_scale_inv=%g] "
-                        "B=P_scaled[F32->NVFP4,k=%lld,n=%lld,input_scale=1,twolevel_first_scale_applied_after_matmul] "
+                        "B=%s[F32->NVFP4,k=%lld,n=%lld,input_scale=1,%s] "
                         "C=F32[%lld,%lld]\n",
                         __func__,
                         (long long) kv_len,
                         (long long) d,
                         (double) v_weight_scale_value,
+                        p_direct ? "P_raw" : "P_scaled",
                         (long long) kv_len,
                         (long long) q_len,
+                        p_direct ? "no_first_scale" : "twolevel_first_scale_applied_after_matmul",
                         (long long) d,
                         (long long) q_len);
             }
