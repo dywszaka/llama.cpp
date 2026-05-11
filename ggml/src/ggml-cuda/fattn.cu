@@ -295,9 +295,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const int32_t flags = ggml_flash_attn_ext_get_flags(KQV);
 
     if ((flags & GGML_FLASH_ATTN_FLAG_NVFP4_QKVP) != 0) {
-        const bool ok = Q->ne[1] == 1 ?
-            ggml_cuda_flash_attn_ext_nvfp4_decode(ctx, dst) :
-            ggml_cuda_flash_attn_ext_nvfp4_prefill(ctx, dst);
+        const bool ok = ggml_cuda_flash_attn_ext_nvfp4(ctx, dst);
         if (ok) {
             return;
         }

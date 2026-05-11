@@ -19,13 +19,11 @@ static void disable_cuda_truncation() {
     _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
     _putenv_s("GGML_CUDA_GRAPHS", "0");
     _putenv_s("GGML_CUDA_NVFP4_FATTN", "1");
-    _putenv_s("GGML_CUDA_NVFP4_FATTN_DECODE", "1");
     _putenv_s("GGML_CUDA_NVFP4_FATTN_NO_FALLBACK", "1");
 #else
     setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
     setenv("GGML_CUDA_GRAPHS", "0", 1);
     setenv("GGML_CUDA_NVFP4_FATTN", "1", 1);
-    setenv("GGML_CUDA_NVFP4_FATTN_DECODE", "1", 1);
     setenv("GGML_CUDA_NVFP4_FATTN_NO_FALLBACK", "1", 1);
 #endif
 }
