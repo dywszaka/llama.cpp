@@ -140,6 +140,28 @@ static __device__ __forceinline__ float read_tensor_nvfp4_device(
     return ggml_cuda_e4m3_to_fp32_half(block->e) * input_scale * (float) kvalues_nvfp4[q];
 }
 
+static __device__ __forceinline__ float read_nvfp4_scale_device(
+        const float * scale,
+        int64_t scale_nb0,
+        int64_t scale_nb1,
+        int64_t scale_nb2,
+        int64_t scale_nb3,
+        int scale_axis,
+        int64_t i0,
+        int64_t i1,
+        int64_t i2,
+        int64_t i3) {
+    if (scale == nullptr || scale_axis < 0) {
+        return 1.0f;
+    }
+
+    const int64_t scale_i0 = scale_axis == 0 ? i0 : scale_axis == 1 ? i1 : scale_axis == 2 ? i2 : i3;
+    const int64_t scale_i1 = scale_axis == 1 ? 0  : i1;
+    const int64_t scale_i2 = scale_axis == 2 ? 0  : i2;
+    const char * scale_ptr = (const char *) scale + scale_i0*scale_nb0 + scale_i1*scale_nb1 + scale_i2*scale_nb2 + i3*scale_nb3;
+    return *(const float *) scale_ptr;
+}
+
 static bool get_nvfp4_scale_layout(
         const ggml_tensor * src,
         int & scale_axis,
@@ -374,44 +396,52 @@ static __global__ void k_no_smooth_kernel(
     }
 }
 
-static __global__ void k_no_smooth_nvfp4_kernel(
+static __global__ void copy_k_nvfp4_head_kernel(
         const void * k,
-        const float * k_scale,
+        block_nvfp4 * k_head,
         int64_t k_nb0,
         int64_t k_nb1,
         int64_t k_nb2,
         int64_t k_nb3,
+        int64_t d,
+        int64_t kv_len,
+        int64_t kh,
+        int64_t b,
+        int64_t total_blocks) {
+    for (int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+            idx < total_blocks;
+            idx += (int64_t) blockDim.x * gridDim.x) {
+        const int64_t ib = idx % (d / QK_NVFP4);
+        const int64_t t  = idx / (d / QK_NVFP4);
+        const char * src = (const char *) k + ib*k_nb0 + t*k_nb1 + kh*k_nb2 + b*k_nb3;
+        k_head[idx] = *(const block_nvfp4 *) src;
+    }
+}
+
+static __global__ void qk_apply_k_scale_kernel(
+        float * qk,
+        const float * k_scale,
         int64_t k_scale_nb0,
         int64_t k_scale_nb1,
         int64_t k_scale_nb2,
         int64_t k_scale_nb3,
         int k_scale_axis,
-        const int64_t * visible_lens,
-        float * k_centered,
-        int64_t d,
+        int64_t q_len,
         int64_t kv_len,
-        int64_t kv_heads,
+        int64_t kh,
+        int64_t b,
         int64_t total) {
     for (int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
             idx < total;
             idx += (int64_t) blockDim.x * gridDim.x) {
-        int64_t rem = idx;
-        const int64_t i = rem % d;
-        rem /= d;
-        const int64_t t = rem % kv_len;
-        rem /= kv_len;
-        const int64_t h = rem % kv_heads;
-        const int64_t b = rem / kv_heads;
-        const int64_t visible = visible_lens[b];
-
-        k_centered[idx] = t < visible ?
-            read_tensor_nvfp4_device(
-                    k, k_scale,
-                    k_nb0, k_nb1, k_nb2, k_nb3,
-                    k_scale_nb0, k_scale_nb1, k_scale_nb2, k_scale_nb3,
-                    k_scale_axis,
-                    i, t, h, b) :
-            0.0f;
+        const int64_t kt = idx % kv_len;
+        const int64_t qt = idx / kv_len;
+        const float scale = read_nvfp4_scale_device(
+                k_scale,
+                k_scale_nb0, k_scale_nb1, k_scale_nb2, k_scale_nb3,
+                k_scale_axis,
+                0, kt, kh, b);
+        qk[qt*kv_len + kt] *= scale;
     }
 }
 
@@ -463,6 +493,59 @@ static __global__ void qmean_kcorr_kernel(
     const int64_t krow = (b*kv_heads + kh)*kv_len + kt;
     for (int64_t i = threadIdx.x; i < d; i += blockDim.x) {
         local += q_mean[qrow*d + i] * k_centered[krow*d + i];
+    }
+
+    __shared__ float smem[256];
+    smem[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            smem[threadIdx.x] += smem[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        corr[bh*kv_len*q_len + kt + qt*kv_len] = smem[0];
+    }
+}
+
+static __global__ void qmean_kcorr_nvfp4_kernel(
+        const float * q_mean,
+        const void * k,
+        const float * k_scale,
+        float * corr,
+        int64_t k_nb0,
+        int64_t k_nb1,
+        int64_t k_nb2,
+        int64_t k_nb3,
+        int64_t k_scale_nb0,
+        int64_t k_scale_nb1,
+        int64_t k_scale_nb2,
+        int64_t k_scale_nb3,
+        int k_scale_axis,
+        int64_t d,
+        int64_t q_len,
+        int64_t q_heads,
+        int64_t kv_len,
+        int64_t kv_heads,
+        int64_t gqa_ratio) {
+    const int64_t kt = blockIdx.x;
+    const int64_t qt = blockIdx.y;
+    const int64_t bh = blockIdx.z;
+    const int64_t b = bh / q_heads;
+    const int64_t qh = bh - b*q_heads;
+    const int64_t kh = qh / gqa_ratio;
+
+    float local = 0.0f;
+    const int64_t qrow = (b*q_heads + qh)*q_len + qt;
+    for (int64_t i = threadIdx.x; i < d; i += blockDim.x) {
+        const float kv = read_tensor_nvfp4_device(
+                k, k_scale,
+                k_nb0, k_nb1, k_nb2, k_nb3,
+                k_scale_nb0, k_scale_nb1, k_scale_nb2, k_scale_nb3,
+                k_scale_axis,
+                i, kt, kh, b);
+        local += q_mean[qrow*d + i] * kv;
     }
 
     __shared__ float smem[256];
@@ -787,7 +870,7 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
 
     ggml_cuda_pool_alloc<float> q_centered(ctx.pool(), (size_t) q_rows * (size_t) d);
     ggml_cuda_pool_alloc<float> q_mean(ctx.pool(), (size_t) q_rows * (size_t) d);
-    ggml_cuda_pool_alloc<float> k_centered(ctx.pool(), (size_t) k_rows * (size_t) d);
+    ggml_cuda_pool_alloc<float> k_centered(ctx.pool(), k_nvfp4_cache ? 0 : (size_t) k_rows * (size_t) d);
     ggml_cuda_pool_alloc<float> v_by_dim(ctx.pool(), (size_t) v_rows * (size_t) kv_len);
 
     const int q_block_size = 256;
@@ -813,26 +896,20 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     }
     CUDA_CHECK(cudaGetLastError());
 
-    if (no_k_smooth && k_nvfp4_cache) {
-        k_no_smooth_nvfp4_kernel<<<(int) std::min<int64_t>(1024, (k_rows*d + q_block_size - 1) / q_block_size),
-                q_block_size, 0, stream>>>(
-                k->data, (const float *) k_scale_tensor->data,
-                (int64_t) k->nb[0], (int64_t) k->nb[1], (int64_t) k->nb[2], (int64_t) k->nb[3],
-                k_scale_nb0, k_scale_nb1, k_scale_nb2, k_scale_nb3, k_scale_axis,
-                d_visible.get(), k_centered.get(), d, kv_len, kv_heads, k_rows*d);
-    } else if (no_k_smooth) {
+    if (no_k_smooth && !k_nvfp4_cache) {
         k_no_smooth_kernel<<<(int) std::min<int64_t>(1024, (k_rows*d + q_block_size - 1) / q_block_size),
                 q_block_size, 0, stream>>>(
                 k->data, k->type,
                 (int64_t) k->nb[0], (int64_t) k->nb[1], (int64_t) k->nb[2], (int64_t) k->nb[3],
                 d_visible.get(), k_centered.get(), d, kv_len, kv_heads, k_rows*d);
-    } else {
+        CUDA_CHECK(cudaGetLastError());
+    } else if (!k_nvfp4_cache) {
         k_smooth_kernel<<<dim3((uint32_t) d, (uint32_t) (batch*kv_heads), 1), 256, 0, stream>>>(
                 k->data, k->type,
                 (int64_t) k->nb[0], (int64_t) k->nb[1], (int64_t) k->nb[2], (int64_t) k->nb[3],
                 d_visible.get(), k_centered.get(), d, kv_len, kv_heads);
+        CUDA_CHECK(cudaGetLastError());
     }
-    CUDA_CHECK(cudaGetLastError());
 
     const int block_size = 256;
     const int64_t v_total = v_rows * kv_len;
@@ -843,10 +920,10 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     CUDA_CHECK(cudaGetLastError());
 
     const float q_amax = device_absmax(ctx, q_centered.get(), q_rows*d, stream);
-    const float k_amax = device_absmax(ctx, k_centered.get(), k_rows*d, stream);
+    const float k_amax = k_nvfp4_cache ? 1.0f : device_absmax(ctx, k_centered.get(), k_rows*d, stream);
     const float v_amax = device_absmax(ctx, v_by_dim.get(), v_rows*kv_len, stream);
     const float q_global_scale = q_amax > 0.0f ? (FP8_E4M3FN_MAX * FP4_E2M1_MAX) / q_amax : 0.0f;
-    const float k_global_scale = k_amax > 0.0f ? (FP8_E4M3FN_MAX * FP4_E2M1_MAX) / k_amax : 0.0f;
+    const float k_global_scale = k_nvfp4_cache ? 1.0f : (k_amax > 0.0f ? (FP8_E4M3FN_MAX * FP4_E2M1_MAX) / k_amax : 0.0f);
     const float v_global_scale = v_amax > 0.0f ? (FP8_E4M3FN_MAX * FP4_E2M1_MAX) / v_amax : 0.0f;
     if (q_global_scale == 0.0f || k_global_scale == 0.0f || v_global_scale == 0.0f) {
         return false;
@@ -879,9 +956,11 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
                 (long long) d);
     }
 
-    ggml_cuda_pool_alloc<block_nvfp4> k_q(ctx.pool(), (size_t) k_rows * (size_t) (d / QK_NVFP4));
+    ggml_cuda_pool_alloc<block_nvfp4> k_q(ctx.pool(), k_nvfp4_cache ? 0 : (size_t) k_rows * (size_t) (d / QK_NVFP4));
     ggml_cuda_pool_alloc<block_nvfp4> v_q(ctx.pool(), (size_t) v_rows * (size_t) (kv_len / QK_NVFP4));
-    ggml_cuda_nvfp4_quantize_rows_f32(k_centered.get(), k_q.get(), d, d, k_rows, k_global_scale, stream);
+    if (!k_nvfp4_cache) {
+        ggml_cuda_nvfp4_quantize_rows_f32(k_centered.get(), k_q.get(), d, d, k_rows, k_global_scale, stream);
+    }
     ggml_cuda_nvfp4_quantize_rows_f32(v_by_dim.get(), v_q.get(), kv_len, kv_len, v_rows, v_global_scale, stream);
     CUDA_CHECK(cudaGetLastError());
 
@@ -892,18 +971,39 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     ggml_cuda_pool_alloc<float> p_first_scales(ctx.pool(), (size_t) bh_rows * (size_t) q_len);
     ggml_cuda_pool_alloc<float> vp(ctx.pool(), (size_t) bh_rows * (size_t) d * (size_t) q_len);
 
-    qmean_kcorr_kernel<<<dim3((uint32_t) kv_len, (uint32_t) q_len, (uint32_t) bh_rows), 256, 0, stream>>>(
-            q_mean.get(), k_centered.get(), corr.get(), d, q_len, q_heads, kv_len, kv_heads, gqa_ratio);
+    if (k_nvfp4_cache) {
+        qmean_kcorr_nvfp4_kernel<<<dim3((uint32_t) kv_len, (uint32_t) q_len, (uint32_t) bh_rows), 256, 0, stream>>>(
+                q_mean.get(), k->data, (const float *) k_scale_tensor->data, corr.get(),
+                (int64_t) k->nb[0], (int64_t) k->nb[1], (int64_t) k->nb[2], (int64_t) k->nb[3],
+                k_scale_nb0, k_scale_nb1, k_scale_nb2, k_scale_nb3, k_scale_axis,
+                d, q_len, q_heads, kv_len, kv_heads, gqa_ratio);
+    } else {
+        qmean_kcorr_kernel<<<dim3((uint32_t) kv_len, (uint32_t) q_len, (uint32_t) bh_rows), 256, 0, stream>>>(
+                q_mean.get(), k_centered.get(), corr.get(), d, q_len, q_heads, kv_len, kv_heads, gqa_ratio);
+    }
     CUDA_CHECK(cudaGetLastError());
 
     float q_input_scale_value = 1.0f / q_global_scale;
     float k_weight_scale_value = 1.0f / k_global_scale;
     ggml_tensor q_input_scale = make_host_scalar_tensor_f32(&q_input_scale_value);
     ggml_tensor k_weight_scale = make_host_scalar_tensor_f32(&k_weight_scale_value);
+    ggml_cuda_pool_alloc<block_nvfp4> k_head_q(ctx.pool(), k_nvfp4_cache ? (size_t) kv_len * (size_t) (d / QK_NVFP4) : 0);
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t qh = 0; qh < q_heads; ++qh) {
             const int64_t kh = qh / gqa_ratio;
-            block_nvfp4 * k_ptr = k_q.get() + ((b*kv_heads + kh)*kv_len) * (d / QK_NVFP4);
+            block_nvfp4 * k_ptr = nullptr;
+            if (k_nvfp4_cache) {
+                const int64_t k_blocks = kv_len * (d / QK_NVFP4);
+                copy_k_nvfp4_head_kernel<<<(int) std::min<int64_t>(1024, (k_blocks + q_block_size - 1) / q_block_size),
+                        q_block_size, 0, stream>>>(
+                        k->data, k_head_q.get(),
+                        (int64_t) k->nb[0], (int64_t) k->nb[1], (int64_t) k->nb[2], (int64_t) k->nb[3],
+                        d, kv_len, kh, b, k_blocks);
+                CUDA_CHECK(cudaGetLastError());
+                k_ptr = k_head_q.get();
+            } else {
+                k_ptr = k_q.get() + ((b*kv_heads + kh)*kv_len) * (d / QK_NVFP4);
+            }
             float * q_ptr = q_centered.get() + ((b*q_heads + qh)*q_len) * d;
             float * qk_ptr = qk.get() + (b*q_heads + qh)*kv_len*q_len;
 
@@ -916,13 +1016,15 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
             if (debug_log && b == 0 && qh == 0) {
                 GGML_LOG_INFO(
                         "%s: QK matmul requested: backend=cublasLt tensor_core=FP4 lt_type=CUDA_R_4F_E2M1 "
-                        "A=K_centered[NVFP4,k=%lld,m=%lld,weight_scale=1/k_global_scale_inv=%g] "
+                        "A=%s[NVFP4,k=%lld,m=%lld,weight_scale=%g%s] "
                         "B=Q_centered[F32->NVFP4,k=%lld,n=%lld,input_scale=1/q_global_scale_inv=%g] "
                         "C=F32[%lld,%lld]\n",
                         __func__,
+                        k_nvfp4_cache ? "K_cache_direct" : "K_centered",
                         (long long) d,
                         (long long) kv_len,
                         (double) k_weight_scale_value,
+                        k_nvfp4_cache ? ",row_scale_after_matmul" : "",
                         (long long) d,
                         (long long) q_len,
                         (double) q_input_scale_value,
@@ -937,6 +1039,15 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
             }
             if (debug_log && b == 0 && qh == 0) {
                 GGML_LOG_INFO("%s: QK matmul active: native Tensor Core FP4 path confirmed (cublasLt CUDA_R_4F_E2M1)\n", __func__);
+            }
+            if (k_nvfp4_cache) {
+                const int64_t qk_total = q_len * kv_len;
+                qk_apply_k_scale_kernel<<<(int) std::min<int64_t>(1024, (qk_total + q_block_size - 1) / q_block_size),
+                        q_block_size, 0, stream>>>(
+                        qk_ptr, (const float *) k_scale_tensor->data,
+                        k_scale_nb0, k_scale_nb1, k_scale_nb2, k_scale_nb3, k_scale_axis,
+                        q_len, kv_len, kh, b, qk_total);
+                CUDA_CHECK(cudaGetLastError());
             }
         }
     }

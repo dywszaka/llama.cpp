@@ -100,19 +100,31 @@ static void nvfp4_quant_dequant_rows_with_scales(
         const std::vector<float> & src,
         std::vector<block_nvfp4> & quantized,
         std::vector<float> & scales,
-        std::vector<float> & dequantized,
         int64_t rows,
         int64_t cols) {
     GGML_ASSERT(cols % QK_NVFP4 == 0);
     const int64_t nblk = cols / QK_NVFP4;
     quantized.assign((size_t) rows * (size_t) nblk, {});
     scales.assign((size_t) rows, 0.0f);
-    dequantized.assign(src.size(), 0.0f);
     for (int64_t r = 0; r < rows; ++r) {
         const float amax = max_abs_row(src, r, cols);
         const float global_scale = amax > 0.0f ? (FP8_E4M3FN_MAX * FP4_E2M1_MAX) / amax : 0.0f;
         scales[(size_t) r] = global_scale != 0.0f ? 1.0f / global_scale : 0.0f;
         quantize_row_nvfp4_ref(src.data() + (size_t) r * (size_t) cols, quantized.data() + (size_t) r * (size_t) nblk, cols, global_scale);
+    }
+}
+
+static void nvfp4_dequant_rows_with_scales(
+        const std::vector<block_nvfp4> & quantized,
+        const std::vector<float> & scales,
+        std::vector<float> & dequantized,
+        int64_t rows,
+        int64_t cols) {
+    GGML_ASSERT(cols % QK_NVFP4 == 0);
+    const int64_t nblk = cols / QK_NVFP4;
+    dequantized.assign((size_t) rows * (size_t) cols, 0.0f);
+    for (int64_t r = 0; r < rows; ++r) {
+        const float global_scale = scales[(size_t) r] != 0.0f ? 1.0f / scales[(size_t) r] : 0.0f;
         dequantize_row_nvfp4(quantized.data() + (size_t) r * (size_t) nblk, dequantized.data() + (size_t) r * (size_t) cols, cols, global_scale);
     }
 }
@@ -370,9 +382,7 @@ static std::vector<float> reference_nvfp4_decode_no_k_smooth(
     std::vector<float> q_deq;
     nvfp4_quant_dequant_rows(q_centered, q_deq, 1, d, q_gscale_inv);
 
-    const float k_gscale_inv = (max_abs(k) > 0.0f) ? (FP8_E4M3FN_MAX * FP4_E2M1_MAX) / max_abs(k) : 0.0f;
-    std::vector<float> k_deq;
-    nvfp4_quant_dequant_rows(k, k_deq, kv_len, d, k_gscale_inv);
+    const std::vector<float> & k_deq = k;
 
     std::vector<float> v_by_dim((size_t) d * (size_t) kv_len, 0.0f);
     for (int64_t i = 0; i < d; ++i) {
@@ -855,7 +865,8 @@ static bool test_flash_attn_nvfp4_k_cache_no_k_smooth_matches_reference() {
     for (int64_t t = 0; t < kv_len; ++t) {
         for (int64_t i = 0; i < d; ++i) {
             const float x = (float) (t * d + i);
-            k_data[(size_t) t * (size_t) d + (size_t) i] = 0.73f * sinf(0.015f * x) + 0.19f * cosf(0.037f * x);
+            k_data[(size_t) t * (size_t) d + (size_t) i] =
+                    2.90f * sinf(0.015f * x) + 0.77f * cosf(0.037f * x) + 0.11f * sinf(0.071f * (float) i);
             v_data[(size_t) t * (size_t) d + (size_t) i] = 1.10f * sinf(0.017f * x + 0.2f) + 0.37f * cosf(0.021f * x);
         }
     }
@@ -863,7 +874,8 @@ static bool test_flash_attn_nvfp4_k_cache_no_k_smooth_matches_reference() {
     std::vector<block_nvfp4> k_q;
     std::vector<float> k_scales;
     std::vector<float> k_ref;
-    nvfp4_quant_dequant_rows_with_scales(k_data, k_q, k_scales, k_ref, kv_len, d);
+    nvfp4_quant_dequant_rows_with_scales(k_data, k_q, k_scales, kv_len, d);
+    nvfp4_dequant_rows_with_scales(k_q, k_scales, k_ref, kv_len, d);
 
     std::vector<ggml_fp16_t> v_f16(v_data.size());
     ggml_fp32_to_fp16_row(v_data.data(), v_f16.data(), (int64_t) v_data.size());
