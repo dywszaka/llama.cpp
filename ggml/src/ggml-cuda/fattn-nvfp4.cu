@@ -839,6 +839,7 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     cudaStream_t stream = ctx.stream();
     const bool debug_log = env_enabled("GGML_CUDA_NVFP4_FATTN_DEBUG");
     const bool p_direct = env_enabled("GGML_CUDA_NVFP4_FATTN_P_DIRECT");
+    const bool q_dynamic = env_enabled("GGML_CUDA_NVFP4_FATTN_Q_DYNAMIC");
 
     int k_scale_axis = -1;
     int64_t k_scale_nb0 = 0;
@@ -935,6 +936,7 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
                 "Q/K group_dim=head_dim group_size=%d tensor_global_scale_inv=[q=%g k=%g] "
                 "V group_dim=kv_len group_size=%d tensor_global_scale_inv=%g "
                 "P format=%s "
+                "Q quant=%s "
                 "smooth=[q=%s k=%s] "
                 "shape=[batch=%lld q_heads=%lld kv_heads=%lld q_len=%lld kv_len=%lld head_dim=%lld]\n",
                 __func__,
@@ -946,6 +948,7 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
                 p_direct ?
                     "nvfp4_direct group_dim=kv_len first_level=none second_level=NVFP4(global_scale_inv=1)" :
                     "nvfp4_twolevel group_dim=kv_len first_level=row_max/(448*6) second_level=NVFP4(global_scale_inv=1)",
+                q_dynamic ? "dynamic_per_row" : "static_global",
                 no_q_smooth ? "off" : "on",
                 no_k_smooth ? "off" : "on",
                 (long long) batch,
@@ -1009,7 +1012,7 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
 
             ggml_tensor k_t = make_cuda_temp_tensor_2d(GGML_TYPE_NVFP4, k_ptr, d, kv_len);
             ggml_tensor q_t = make_cuda_temp_tensor_2d(GGML_TYPE_F32, q_ptr, d, q_len);
-            ggml_tensor qk_t = make_cuda_mul_mat_dst(qk_ptr, kv_len, q_len, &k_weight_scale, &q_input_scale);
+            ggml_tensor qk_t = make_cuda_mul_mat_dst(qk_ptr, kv_len, q_len, &k_weight_scale, q_dynamic ? nullptr : &q_input_scale);
             ggml_set_name(&k_t, "nvfp4-fattn-k");
             ggml_set_name(&q_t, "nvfp4-fattn-q");
             ggml_set_name(&qk_t, "nvfp4-fattn-qk");
@@ -1017,7 +1020,7 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
                 GGML_LOG_INFO(
                         "%s: QK matmul requested: backend=cublasLt tensor_core=FP4 lt_type=CUDA_R_4F_E2M1 "
                         "A=%s[NVFP4,k=%lld,m=%lld,weight_scale=%g%s] "
-                        "B=Q_centered[F32->NVFP4,k=%lld,n=%lld,input_scale=1/q_global_scale_inv=%g] "
+                        "B=Q_centered[F32->NVFP4,k=%lld,n=%lld,%s=%g] "
                         "C=F32[%lld,%lld]\n",
                         __func__,
                         k_nvfp4_cache ? "K_cache_direct" : "K_centered",
@@ -1027,6 +1030,7 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
                         k_nvfp4_cache ? ",row_scale_after_matmul" : "",
                         (long long) d,
                         (long long) q_len,
+                        q_dynamic ? "dynamic_per_row_scale_placeholder" : "input_scale=1/q_global_scale_inv",
                         (double) q_input_scale_value,
                         (long long) kv_len,
                         (long long) q_len);

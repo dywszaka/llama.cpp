@@ -915,6 +915,130 @@ static bool test_flash_attn_nvfp4_k_cache_no_k_smooth_matches_reference() {
     return true;
 }
 
+static bool test_flash_attn_nvfp4_k_cache_no_q_no_k_smooth_dynamic_q_smoke() {
+    disable_cuda_truncation();
+    scoped_env_var no_q_smooth("GGML_CUDA_NVFP4_FATTN_NO_Q_SMOOTH", "1");
+    scoped_env_var no_k_smooth("GGML_CUDA_NVFP4_FATTN_NO_K_SMOOTH", "1");
+    scoped_env_var dynamic_q("GGML_CUDA_NVFP4_FATTN_Q_DYNAMIC", "1");
+
+    static constexpr int64_t d = 64;
+    static constexpr int64_t q_len = 2;
+    static constexpr int64_t kv_len = 256;
+    static constexpr int64_t n_head = 1;
+    const float scale = 1.0f / sqrtf((float) d);
+
+    ggml_init_params params = {
+        /* .mem_size   = */ 16 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to initialize ggml context\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to initialize CUDA backend\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, d, q_len, n_head, 1);
+    ggml_tensor * k = ggml_new_tensor_4d(ctx, GGML_TYPE_NVFP4, d, kv_len, n_head, 1);
+    ggml_tensor * k_scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kv_len);
+    ggml_tensor_set_nvfp4_scale(k, k_scale);
+    ggml_tensor * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, d, kv_len, n_head, 1);
+    ggml_tensor * fa = ggml_flash_attn_ext(ctx, q, k, v, nullptr, scale, 0.0f, 0.0f);
+    ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+    ggml_flash_attn_ext_set_flags(fa,
+            GGML_FLASH_ATTN_FLAG_NVFP4_QKVP |
+            GGML_FLASH_ATTN_FLAG_NVFP4_P_TWOLEVEL |
+            GGML_FLASH_ATTN_FLAG_NVFP4_SMOOTH_QK);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, fa);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> q_data((size_t) q_len * (size_t) d);
+    std::vector<float> k_data((size_t) kv_len * (size_t) d);
+    std::vector<float> v_data((size_t) kv_len * (size_t) d);
+    for (int64_t qt = 0; qt < q_len; ++qt) {
+        const float amp = qt == 0 ? 0.0017f : 2.75f;
+        for (int64_t i = 0; i < d; ++i) {
+            q_data[(size_t) qt * (size_t) d + (size_t) i] =
+                    amp * sinf(0.17f * (float) (qt*d + i)) +
+                    0.21f * cosf(0.041f * (float) i) +
+                    0.013f * (float) ((i % 9) - 4);
+        }
+    }
+    for (int64_t t = 0; t < kv_len; ++t) {
+        for (int64_t i = 0; i < d; ++i) {
+            const float x = (float) (t * d + i);
+            k_data[(size_t) t * (size_t) d + (size_t) i] =
+                    2.15f * sinf(0.011f * x) + 0.91f * cosf(0.031f * x) + 0.19f * sinf(0.073f * (float) i);
+            v_data[(size_t) t * (size_t) d + (size_t) i] =
+                    1.32f * sinf(0.015f * x + 0.3f) + 0.43f * cosf(0.025f * x);
+        }
+    }
+
+    std::vector<block_nvfp4> k_q;
+    std::vector<float> k_scales;
+    nvfp4_quant_dequant_rows_with_scales(k_data, k_q, k_scales, kv_len, d);
+
+    std::vector<ggml_fp16_t> v_f16(v_data.size());
+    ggml_fp32_to_fp16_row(v_data.data(), v_f16.data(), (int64_t) v_data.size());
+
+    ggml_backend_tensor_set(q, q_data.data(), 0, q_data.size() * sizeof(float));
+    ggml_backend_tensor_set(k, k_q.data(), 0, k_q.size() * sizeof(block_nvfp4));
+    ggml_backend_tensor_set(k_scale, k_scales.data(), 0, k_scales.size() * sizeof(float));
+    ggml_backend_tensor_set(v, v_f16.data(), 0, v_f16.size() * sizeof(ggml_fp16_t));
+
+    const ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "NVFP4 K cache dynamic-Q graph compute failed: %s\n", ggml_status_to_string(status));
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> got((size_t) ggml_nelements(fa));
+    ggml_backend_tensor_get(fa, got.data(), 0, got.size() * sizeof(float));
+
+    float got_amax = 0.0f;
+    for (float x : got) {
+        if (!isfinite(x)) {
+            std::fprintf(stderr, "NVFP4 K cache no-Q/no-K-smooth dynamic-Q output contains non-finite value\n");
+            ggml_backend_buffer_free(buf);
+            ggml_backend_free(backend);
+            ggml_free(ctx);
+            return false;
+        }
+        got_amax = fmaxf(got_amax, fabsf(x));
+    }
+    if (got_amax == 0.0f) {
+        std::fprintf(stderr, "NVFP4 K cache no-Q/no-K-smooth dynamic-Q output is all zero\n");
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+    return true;
+}
+
 static bool test_flash_attn_nvfp4_prefill_matches_sega3_quantization() {
     disable_cuda_truncation();
 
@@ -1042,6 +1166,9 @@ int main() {
         return 1;
     }
     if (!test_flash_attn_nvfp4_k_cache_no_k_smooth_matches_reference()) {
+        return 1;
+    }
+    if (!test_flash_attn_nvfp4_k_cache_no_q_no_k_smooth_dynamic_q_smoke()) {
         return 1;
     }
     if (!test_flash_attn_nvfp4_prefill_matches_sega3_quantization()) {
