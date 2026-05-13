@@ -1,14 +1,15 @@
-# Session Context (NVFP4 CUDA / Release)
+# Project Agent Instructions
 
-## Project coding policy: experiment-first changes
-- Most code changes in this project are experimental unless explicitly stated otherwise.
-- Every experiment must be gated by a switch.
-  - The default state of every experiment switch must be off.
+## Project Coding Policy
+- Treat most code changes in this repository as experimental unless the user explicitly says otherwise.
+- Every new experiment must be gated by a switch.
+  - New experiment switches must default to off.
   - Switch definitions must be centralized in one clear place.
   - The centralized definition must document what each switch does and what behavior it enables.
-- Switch usage should be consolidated behind one helper/function per switch where possible.
+- Switch usage should be consolidated behind one helper/function per switch whenever possible.
   - Avoid checking the same switch directly in many unrelated call sites.
   - Keep switch plumbing narrow and easy to audit.
+  - Existing historical switches may predate this policy; when touching them, migrate toward centralized helpers and documentation instead of adding more scattered `getenv()` checks.
 - Switch effectiveness must be confirmed by logs.
   - Log whether each switch is enabled or disabled.
   - The confirmation log should print only once during service startup or first runtime use.
@@ -19,22 +20,12 @@
   - Prefer small functions with one reason to change.
   - Depend on narrow helper APIs instead of scattering environment/config parsing.
 
-## What was fixed
-- NVFP4 native CUDA matmul correctness issue was fixed in `ggml/src/ggml-cuda/nvfp4-matmul.cu`.
-- Root causes:
-  - `quantize_row_nvfp4_kernel` used `__shfl_xor_sync` under a lane predicate; this could corrupt packed high nibble data.
-  - `cublasLtMatmul` scaling missed `global_scale` compensation.
-- Effective fixes:
-  - Always execute the shuffle for all lanes, then conditionally store on even lanes.
-  - Use `matmul_alpha = out_scale / global_scale` (when `global_scale != 0`).
+## Documentation Hygiene
+- Keep this file as durable project guidance, not a dated session log.
+- Do not record temporary build directories, one-off validation results, or old commit lists here.
+- If a path or runtime description changes, update the relevant map below in the same commit as the code change.
 
-## Validation status
-- Added/kept CUDA test target `test-nvfp4-matmul` and integration-style cases.
-- Test file: `tests/test-nvfp4-matmul.cu`.
-- CMake wiring: `tests/CMakeLists.txt`.
-- Current result: `build_cuda/bin/test-nvfp4-matmul` passes all cases.
-
-## NVFP4 runtime map
+## NVFP4 Runtime Map
 - Model graph binding lives in `src/llama-model.cpp`.
   - NVFP4-specific tensors (`*_input_scale`, `*_weight_scale_2`, etc.) are defined in `src/llama-model.h`.
   - During graph build, `build_lora_mm_scaled()` is the key branch:
@@ -55,8 +46,12 @@
     - Quantizes the F32 activation matrix to temporary NVFP4 on device with `quantize_row_nvfp4_kernel`.
     - Splits packed NVFP4 blocks into separate data and scale channels before calling `cublasLtMatmul`.
     - Reuses a repacked cache for static NVFP4 weights (`src0`) to avoid repeated repacking.
-    - Correct scaling is now `matmul_alpha = out_scale / global_scale` when `global_scale != 0`.
+    - For statically-bound activation scales, `matmul_alpha` compensates for the activation `global_scale`; check the current code before changing alpha/scale behavior.
   - The nibble packing fix in `quantize_row_nvfp4_kernel` is critical: all lanes must participate in the warp shuffle, and only even lanes store packed bytes.
+- CUDA NVFP4 flash-attention experiments are split between graph flags and CUDA implementation.
+  - Graph flag selection is in `src/llama-graph.cpp`.
+  - CUDA execution lives in `ggml/src/ggml-cuda/fattn-nvfp4.cu`.
+  - Current related env switches include `GGML_CUDA_NVFP4_FATTN`, `GGML_CUDA_NVFP4_FATTN_NO_FALLBACK`, `GGML_CUDA_NVFP4_FATTN_NO_Q_SMOOTH`, `GGML_CUDA_NVFP4_FATTN_NO_K_SMOOTH`, `GGML_CUDA_NVFP4_FATTN_Q_DYNAMIC`, `GGML_CUDA_NVFP4_FATTN_P_DIRECT`, and `GGML_CUDA_NVFP4_FATTN_DEBUG`.
 - CUDA fallback path:
   - If native NVFP4 is not applicable or fails, execution falls back to the general quantized matmul path in `ggml/src/ggml-cuda/mmq.cu`.
   - In that path, the F32 activation is quantized to `Q8_1`, then the kernel uses the NVFP4-specific device dot product `vec_dot_nvfp4_q8_1` from `ggml/src/ggml-cuda/vecdotq.cuh`.
@@ -64,26 +59,22 @@
   - Generic `to_float` / `get_rows` style dequantization uses only the in-band NVFP4 block scale byte (`e`) and does not know about the extra tensor-wise `global_scale`.
   - For correctness-sensitive debugging, prefer the explicit NVFP4 matmul path (CPU roundtrip or CUDA native/fallback matmul path), not unrelated generic dequant-only paths.
 
-## Release logging policy applied
-- In Release builds, these logs were disabled (kept for Debug):
+## Logging Policy
+- Release builds should not contain high-volume debug logs. These historical noisy logs are expected to stay Debug-only:
   - `llama_decode begin/end` in `tools/server/server.cpp`
   - `sampled token: tok=...` in `tools/server/server.cpp`
   - `ggml_compute_forward_get_rows_f32 ... firstN=...` in `ggml/src/ggml-cpu/ops.cpp`
   - `NVFP4 layout diagnostic for ...` in `ggml/src/ggml-cuda/nvfp4-matmul.cu`
 - Implementation pattern: `#ifndef NDEBUG`.
+- Experiment switch confirmation logs are allowed in Release only when they print once and are useful for confirming runtime behavior.
 
-## Release build outputs
-- CUDA Release build dir: `build_cuda_release`.
-- Main binaries:
-  - `build_cuda_release/bin/llama-server`
-  - `build_cuda_release/bin/llama-bench`
-
-## Helper scripts added
+## Helper Scripts
 - `run-llama-server-nvfp4-cuda.sh`
-  - Mirrors NVFP4 CUDA server launch, without debug env toggles.
+  - Local NVFP4 CUDA server launch helper.
 - `llama_bench.sh`
-  - Simple release benchmark runner for local models.
+  - Local benchmark helper.
 
-## Relevant commits from this session
-- `54ecf5e1` - `cuda: fix nvfp4 native quantization shuffle and alpha scaling`
-- `d8e23e47` - `release: quiet debug logs and add release run scripts`
+## Validation Guidance
+- For NVFP4 native CUDA matmul changes, prefer running `test-nvfp4-matmul` from the active CUDA build directory when the local GPU/toolkit supports it.
+- For NVFP4 flash-attention or KV-cache changes, run the nearest focused CUDA tests first, then a small server or perplexity smoke test if behavior changes.
+- Document skipped validation explicitly in the final response when local hardware, toolkit, or build availability prevents a test.
