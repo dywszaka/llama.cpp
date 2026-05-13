@@ -1,5 +1,24 @@
 # Session Context (NVFP4 CUDA / Release)
 
+## Project coding policy: experiment-first changes
+- Most code changes in this project are experimental unless explicitly stated otherwise.
+- Every experiment must be gated by a switch.
+  - The default state of every experiment switch must be off.
+  - Switch definitions must be centralized in one clear place.
+  - The centralized definition must document what each switch does and what behavior it enables.
+- Switch usage should be consolidated behind one helper/function per switch where possible.
+  - Avoid checking the same switch directly in many unrelated call sites.
+  - Keep switch plumbing narrow and easy to audit.
+- Switch effectiveness must be confirmed by logs.
+  - Log whether each switch is enabled or disabled.
+  - The confirmation log should print only once during service startup or first runtime use.
+  - Avoid noisy per-token, per-request, or per-kernel repeated logging.
+- After code validation passes, commit the verified change.
+- Follow SOLID principles when coding:
+  - Keep experiment control separate from core algorithm code.
+  - Prefer small functions with one reason to change.
+  - Depend on narrow helper APIs instead of scattering environment/config parsing.
+
 ## What was fixed
 - NVFP4 native CUDA matmul correctness issue was fixed in `ggml/src/ggml-cuda/nvfp4-matmul.cu`.
 - Root causes:
