@@ -85,6 +85,123 @@ static bool test_block32_roundtrip() {
     return true;
 }
 
+static bool test_block32_e4m2_experiment_helper_masks_exact_low_bit() {
+    for (int v = 0; v < 256; ++v) {
+        const uint8_t byte = (uint8_t) v;
+        const uint8_t disabled = ggml_fp8_e4m3_e8m0_32_apply_experiment(byte, 0);
+        const uint8_t enabled = ggml_fp8_e4m3_e8m0_32_apply_experiment(byte, 1);
+
+        if (disabled != byte) {
+            std::fprintf(stderr, "e4m2 helper changed disabled byte: v=%u got=%u\n", byte, disabled);
+            return false;
+        }
+
+        if (enabled != (uint8_t) (byte & 0xFEu)) {
+            std::fprintf(stderr, "e4m2 helper did not clear only low bit: v=%u got=%u expected=%u\n",
+                    byte, enabled, (uint8_t) (byte & 0xFEu));
+            return false;
+        }
+
+        if ((enabled & 1u) != 0) {
+            std::fprintf(stderr, "e4m2 helper left low bit set: v=%u got=%u\n", byte, enabled);
+            return false;
+        }
+
+        if ((enabled & 0xFEu) != (byte & 0xFEu)) {
+            std::fprintf(stderr, "e4m2 helper changed high bits: v=%u got=%u\n", byte, enabled);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool test_block32_e4m2_experiment_masks_low_bit() {
+    const std::vector<float> src = make_signal(QK_FP8_E4M3_E8M0_32, 17.0f, 0.125f, 0.25f);
+
+    std::vector<block_fp8_e4m3_e8m0_32> e4m3(1);
+    std::vector<block_fp8_e4m3_e8m0_32> e4m2(1);
+
+    quantize_row_fp8_e4m3_e8m0_32_ref(src.data(), e4m3.data(), (int64_t) src.size());
+    quantize_row_fp8_e4m3_e8m0_32_e4m2_ref(src.data(), e4m2.data(), (int64_t) src.size());
+
+    if (e4m2[0].e != e4m3[0].e) {
+        std::fprintf(stderr, "block32 e4m2 experiment changed scale: e4m3=%u e4m2=%u\n", e4m3[0].e, e4m2[0].e);
+        return false;
+    }
+
+    bool saw_masked_value = false;
+    for (int i = 0; i < QK_FP8_E4M3_E8M0_32; ++i) {
+        if ((e4m2[0].qs[i] & 1u) != 0) {
+            std::fprintf(stderr, "block32 e4m2 experiment left low bit set at i=%d q=%u\n", i, e4m2[0].qs[i]);
+            return false;
+        }
+        if ((e4m3[0].qs[i] & 1u) != 0) {
+            saw_masked_value = true;
+        }
+        if (e4m2[0].qs[i] != (uint8_t) (e4m3[0].qs[i] & 0xFEu)) {
+            std::fprintf(stderr, "block32 e4m2 experiment mismatch at i=%d e4m3=%u e4m2=%u\n",
+                    i, e4m3[0].qs[i], e4m2[0].qs[i]);
+            return false;
+        }
+    }
+
+    if (!saw_masked_value) {
+        std::fprintf(stderr, "block32 e4m2 experiment test did not exercise an odd fp8 byte\n");
+        return false;
+    }
+
+    return true;
+}
+
+static bool test_block32_e4m2_experiment_masks_low_bit_all_blocks() {
+    std::vector<float> src = make_signal(4 * QK_FP8_E4M3_E8M0_32, 23.0f, -0.375f, 1.25f);
+
+    src[QK_FP8_E4M3_E8M0_32 + 0] = 0.0f;
+    src[QK_FP8_E4M3_E8M0_32 + 1] = -0.0f;
+    src[2 * QK_FP8_E4M3_E8M0_32 + 7] = 448.0f;
+    src[3 * QK_FP8_E4M3_E8M0_32 + 9] = -448.0f;
+
+    std::vector<block_fp8_e4m3_e8m0_32> e4m3(src.size() / QK_FP8_E4M3_E8M0_32);
+    std::vector<block_fp8_e4m3_e8m0_32> e4m2(src.size() / QK_FP8_E4M3_E8M0_32);
+
+    quantize_row_fp8_e4m3_e8m0_32_ref(src.data(), e4m3.data(), (int64_t) src.size());
+    quantize_row_fp8_e4m3_e8m0_32_e4m2_ref(src.data(), e4m2.data(), (int64_t) src.size());
+
+    bool saw_masked_value = false;
+    for (size_t ib = 0; ib < e4m2.size(); ++ib) {
+        if (e4m2[ib].e != e4m3[ib].e) {
+            std::fprintf(stderr, "block32 e4m2 experiment changed scale at block=%zu: e4m3=%u e4m2=%u\n",
+                    ib, e4m3[ib].e, e4m2[ib].e);
+            return false;
+        }
+
+        for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
+            const uint8_t expected = (uint8_t) (e4m3[ib].qs[j] & 0xFEu);
+            if ((e4m2[ib].qs[j] & 1u) != 0) {
+                std::fprintf(stderr, "block32 e4m2 experiment left low bit set at block=%zu i=%d q=%u\n",
+                        ib, j, e4m2[ib].qs[j]);
+                return false;
+            }
+            if (e4m2[ib].qs[j] != expected) {
+                std::fprintf(stderr, "block32 e4m2 experiment mismatch at block=%zu i=%d e4m3=%u e4m2=%u expected=%u\n",
+                        ib, j, e4m3[ib].qs[j], e4m2[ib].qs[j], expected);
+                return false;
+            }
+            if ((e4m3[ib].qs[j] & 1u) != 0) {
+                saw_masked_value = true;
+            }
+        }
+    }
+
+    if (!saw_masked_value) {
+        std::fprintf(stderr, "block32 e4m2 multi-block test did not exercise an odd fp8 byte\n");
+        return false;
+    }
+
+    return true;
+}
+
 static bool test_block16_roundtrip() {
     std::vector<float> src = {
         -30.0f, -12.0f, -8.0f, -3.5f, -1.25f, -0.75f, -0.25f, -0.03125f,
@@ -539,6 +656,15 @@ int main() {
     disable_cuda_truncation();
 
     if (!test_block32_roundtrip()) {
+        return 1;
+    }
+    if (!test_block32_e4m2_experiment_helper_masks_exact_low_bit()) {
+        return 1;
+    }
+    if (!test_block32_e4m2_experiment_masks_low_bit()) {
+        return 1;
+    }
+    if (!test_block32_e4m2_experiment_masks_low_bit_all_blocks()) {
         return 1;
     }
     if (!test_block16_roundtrip()) {

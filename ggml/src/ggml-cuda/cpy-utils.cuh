@@ -153,7 +153,7 @@ static __device__ void quantize_f32_q8_0_block(const float * __restrict__ x, blo
     }
 }
 
-static __device__ void quantize_f32_fp8_e4m3_e8m0_32_block(const float * __restrict__ x, block_fp8_e4m3_e8m0_32 * __restrict__ y) {
+static __device__ void quantize_f32_fp8_e4m3_e8m0_32_block(const float * __restrict__ x, block_fp8_e4m3_e8m0_32 * __restrict__ y, bool e4m2_experiment = false) {
     float amax = 0.0f;
 
     for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
@@ -176,7 +176,8 @@ static __device__ void quantize_f32_fp8_e4m3_e8m0_32_block(const float * __restr
     y->e = scale_q;
 #pragma unroll
     for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
-        y->qs[j] = __nv_cvt_float_to_fp8(x[j] * inv_scale, __NV_SATFINITE, __NV_E4M3);
+        const uint8_t q = __nv_cvt_float_to_fp8(x[j] * inv_scale, __NV_SATFINITE, __NV_E4M3);
+        y->qs[j] = ggml_fp8_e4m3_e8m0_32_apply_experiment(q, e4m2_experiment);
     }
 }
 
@@ -267,6 +268,10 @@ static __device__ void cpy_blck_f32_iq4_nl(const char * cxi, char * cdsti) {
 
 static __device__ void cpy_blck_f32_fp8_e4m3_e8m0_32(const char * cxi, char * cdsti) {
     quantize_f32_fp8_e4m3_e8m0_32_block((const float *) cxi, (block_fp8_e4m3_e8m0_32 *) cdsti);
+}
+
+static __device__ void cpy_blck_f32_fp8_e4m3_e8m0_32_e4m2(const char * cxi, char * cdsti) {
+    quantize_f32_fp8_e4m3_e8m0_32_block((const float *) cxi, (block_fp8_e4m3_e8m0_32 *) cdsti, true);
 }
 
 static __device__ void cpy_blck_f32_fp8_e4m3_e8m0_16(const char * cxi, char * cdsti) {

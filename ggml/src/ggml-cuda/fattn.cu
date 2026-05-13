@@ -9,6 +9,42 @@
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
 
+#include <atomic>
+
+static void ggml_cuda_log_fattn_tensor_brief_once(
+        const ggml_tensor * Q,
+        const ggml_tensor * K,
+        const ggml_tensor * V,
+        const ggml_tensor * dst) {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_INFO(
+            "%s: Q{name=%s type=%s ne=[%lld,%lld,%lld,%lld]} "
+            "K{name=%s type=%s ne=[%lld,%lld,%lld,%lld]} "
+            "V{name=%s type=%s ne=[%lld,%lld,%lld,%lld]} "
+            "dst{name=%s type=%s ne=[%lld,%lld,%lld,%lld]}\n",
+            __func__,
+            Q != nullptr ? ggml_get_name(Q) : "(null)",
+            Q != nullptr ? ggml_type_name(Q->type) : "(null)",
+            Q != nullptr ? (long long) Q->ne[0] : 0, Q != nullptr ? (long long) Q->ne[1] : 0,
+            Q != nullptr ? (long long) Q->ne[2] : 0, Q != nullptr ? (long long) Q->ne[3] : 0,
+            K != nullptr ? ggml_get_name(K) : "(null)",
+            K != nullptr ? ggml_type_name(K->type) : "(null)",
+            K != nullptr ? (long long) K->ne[0] : 0, K != nullptr ? (long long) K->ne[1] : 0,
+            K != nullptr ? (long long) K->ne[2] : 0, K != nullptr ? (long long) K->ne[3] : 0,
+            V != nullptr ? ggml_get_name(V) : "(null)",
+            V != nullptr ? ggml_type_name(V->type) : "(null)",
+            V != nullptr ? (long long) V->ne[0] : 0, V != nullptr ? (long long) V->ne[1] : 0,
+            V != nullptr ? (long long) V->ne[2] : 0, V != nullptr ? (long long) V->ne[3] : 0,
+            dst != nullptr ? ggml_get_name(dst) : "(null)",
+            dst != nullptr ? ggml_type_name(dst->type) : "(null)",
+            dst != nullptr ? (long long) dst->ne[0] : 0, dst != nullptr ? (long long) dst->ne[1] : 0,
+            dst != nullptr ? (long long) dst->ne[2] : 0, dst != nullptr ? (long long) dst->ne[3] : 0);
+}
+
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
@@ -293,6 +329,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
     const enum ggml_prec prec = ggml_flash_attn_ext_get_prec(KQV);
     const int32_t flags = ggml_flash_attn_ext_get_flags(KQV);
+    ggml_cuda_log_fattn_tensor_brief_once(Q, K, V, dst);
 
     if ((flags & GGML_FLASH_ATTN_FLAG_NVFP4_QKVP) != 0) {
         const bool ok = ggml_cuda_flash_attn_ext_nvfp4(ctx, dst);

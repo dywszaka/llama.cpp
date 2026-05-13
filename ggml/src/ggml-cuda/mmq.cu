@@ -98,9 +98,9 @@ static void ggml_cuda_log_nvfp4_block(const block_nvfp4 & block, const ggml_tens
 }
 
 static void ggml_cuda_log_f32_first4(const char * label, const float vals[4], const ggml_tensor * dst) {
-    GGML_LOG_INFO("%s: dst=%s %s first4=%.9g %.9g %.9g %.9g\n",
-            __func__, dst ? ggml_get_name(dst) : "unknown", label,
-            vals[0], vals[1], vals[2], vals[3]);
+    // GGML_LOG_INFO("%s: dst=%s %s first4=%.9g %.9g %.9g %.9g\n",
+    //         __func__, dst ? ggml_get_name(dst) : "unknown", label,
+    //         vals[0], vals[1], vals[2], vals[3]);
 }
 
 static const char * ggml_cuda_mmq_layout_name(mmq_q8_1_ds_layout layout) {

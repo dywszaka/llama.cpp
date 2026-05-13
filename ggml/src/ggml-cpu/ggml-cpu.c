@@ -1256,8 +1256,8 @@ void ggml_compute_forward_mul_mat(
                 ggml_get_f32_1d(src1, 2),
                 ggml_get_f32_1d(src1, 3),
             };
-            GGML_LOG_INFO("%s: dst=%s input first4=%.9g %.9g %.9g %.9g\n",
-                          __func__, dst_name, in_vals[0], in_vals[1], in_vals[2], in_vals[3]);
+            // GGML_LOG_INFO("%s: dst=%s input first4=%.9g %.9g %.9g %.9g\n",
+            //               __func__, dst_name, in_vals[0], in_vals[1], in_vals[2], in_vals[3]);
         }
     }
 
@@ -1456,8 +1456,8 @@ UseGgmlGemm2:;
                 ggml_get_f32_1d(dst, 2),
                 ggml_get_f32_1d(dst, 3),
             };
-            GGML_LOG_INFO("%s: dst=%s output first4=%.9g %.9g %.9g %.9g\n",
-                          __func__, dst_name, out_vals[0], out_vals[1], out_vals[2], out_vals[3]);
+            // GGML_LOG_INFO("%s: dst=%s output first4=%.9g %.9g %.9g %.9g\n",
+            //               __func__, dst_name, out_vals[0], out_vals[1], out_vals[2], out_vals[3]);
         }
     }
 }

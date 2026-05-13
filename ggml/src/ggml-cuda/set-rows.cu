@@ -10,6 +10,46 @@ static constexpr float GGML_CUDA_NVFP4_FP4_MAX = 6.0f;
 static constexpr float GGML_CUDA_NVFP4_E4M3_HALF_MAX = 224.0f;
 static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_HALF_MAX;
 
+static bool ggml_cuda_fp8_e4m3_e8m0_32_e4m2_experiment_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2");
+        cached = (env != nullptr && atoi(env) != 0) ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static void ggml_cuda_log_fp8_e4m3_e8m0_32_e4m2_set_rows_once(const ggml_tensor * dst, bool enabled) {
+    static int logged_enabled = 0;
+    static int logged_disabled = 0;
+
+    int * logged = enabled ? &logged_enabled : &logged_disabled;
+    if (*logged != 0) {
+        return;
+    }
+    *logged = 1;
+
+    const char * env = getenv("GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2");
+    GGML_LOG_INFO(
+            "%s: GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2=%s -> %s; dst=%s type=%s ne=[%lld,%lld,%lld,%lld]\n",
+            __func__,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, CUDA set_rows will mask FP8 mantissa low bit (E4M2 experiment)"
+                    : "disabled, CUDA set_rows keeps FP8 E4M3",
+            ggml_get_name(dst),
+            ggml_type_name(dst->type),
+            (long long) dst->ne[0], (long long) dst->ne[1],
+            (long long) dst->ne[2], (long long) dst->ne[3]);
+}
+
+static __device__ void quantize_f32_fp8_e4m3_e8m0_32_e4m2_block(const float * __restrict__ x, block_fp8_e4m3_e8m0_32 * __restrict__ y) {
+    quantize_f32_fp8_e4m3_e8m0_32_block(x, y, true);
+}
+
+static __device__ void quantize_f32_fp8_e4m3_e8m0_32_e4m3_block(const float * __restrict__ x, block_fp8_e4m3_e8m0_32 * __restrict__ y) {
+    quantize_f32_fp8_e4m3_e8m0_32_block(x, y, false);
+}
+
 static __device__ __forceinline__ void ggml_cuda_atomic_max_f32(float * addr, float value) {
     int * addr_i = (int *) addr;
     int old = *addr_i;
@@ -453,15 +493,29 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
             stream
         );
     } else if (dst->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
-        set_rows_cuda_quant<block_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32, quantize_f32_fp8_e4m3_e8m0_32_block>(
-            src0_d, src1_d, (block_fp8_e4m3_e8m0_32 *) dst->data,
-            ne00, ne01, ne02, ne03,
-            ne10, ne11, ne12, ne13,
-            nb01, nb02, nb03,
-            nb10, nb11, nb12,
-            nb1, nb2, nb3,
-            stream
-        );
+        const bool fp8_e4m2_experiment = ggml_cuda_fp8_e4m3_e8m0_32_e4m2_experiment_enabled();
+        ggml_cuda_log_fp8_e4m3_e8m0_32_e4m2_set_rows_once(dst, fp8_e4m2_experiment);
+        if (fp8_e4m2_experiment) {
+            set_rows_cuda_quant<block_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32, quantize_f32_fp8_e4m3_e8m0_32_e4m2_block>(
+                src0_d, src1_d, (block_fp8_e4m3_e8m0_32 *) dst->data,
+                ne00, ne01, ne02, ne03,
+                ne10, ne11, ne12, ne13,
+                nb01, nb02, nb03,
+                nb10, nb11, nb12,
+                nb1, nb2, nb3,
+                stream
+            );
+        } else {
+            set_rows_cuda_quant<block_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32, quantize_f32_fp8_e4m3_e8m0_32_e4m3_block>(
+                src0_d, src1_d, (block_fp8_e4m3_e8m0_32 *) dst->data,
+                ne00, ne01, ne02, ne03,
+                ne10, ne11, ne12, ne13,
+                nb01, nb02, nb03,
+                nb10, nb11, nb12,
+                nb1, nb2, nb3,
+                stream
+            );
+        }
     } else if (dst->type == GGML_TYPE_FP8_E4M3_E8M0_16) {
         set_rows_cuda_quant<block_fp8_e4m3_e8m0_16, QK_FP8_E4M3_E8M0_16, quantize_f32_fp8_e4m3_e8m0_16_block>(
             src0_d, src1_d, (block_fp8_e4m3_e8m0_16 *) dst->data,

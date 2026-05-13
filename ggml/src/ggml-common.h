@@ -221,6 +221,14 @@ typedef struct {
 } block_fp8_e4m3_e8m0_32;
 static_assert(sizeof(block_fp8_e4m3_e8m0_32) == sizeof(uint8_t) + QK_FP8_E4M3_E8M0_32, "wrong fp8_e4m3_e8m0_32 block size/padding");
 
+#if defined(GGML_COMMON_DECL_CUDA) || defined(GGML_COMMON_DECL_HIP) || defined(GGML_COMMON_DECL_MUSA)
+static __host__ __device__ __forceinline__ uint8_t ggml_fp8_e4m3_e8m0_32_apply_experiment(uint8_t v, int enable) {
+#else
+static inline uint8_t ggml_fp8_e4m3_e8m0_32_apply_experiment(uint8_t v, int enable) {
+#endif
+    return enable ? (v & 0xFEu) : v;
+}
+
 #define QK_FP8_E4M3_E8M0_16 16
 typedef struct {
     uint8_t e; // E8M0

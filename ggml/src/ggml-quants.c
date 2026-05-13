@@ -341,6 +341,36 @@ static uint8_t best_index_e4m3(float x) {
     return best_i;
 }
 
+bool ggml_fp8_e4m3_e8m0_32_experiment_e4m2_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2");
+        cached = (env != NULL && atoi(env) != 0) ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static void ggml_log_fp8_e4m3_e8m0_32_e4m2_quantize_once(bool enabled, int64_t nrow, int64_t n_per_row) {
+    static int logged_enabled = 0;
+    static int logged_disabled = 0;
+
+    int * logged = enabled ? &logged_enabled : &logged_disabled;
+    if (*logged != 0) {
+        return;
+    }
+    *logged = 1;
+
+    const char * env = getenv("GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2");
+    GGML_LOG_INFO(
+            "%s: GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2=%s -> %s; nrow=%lld n_per_row=%lld\n",
+            __func__,
+            env != NULL ? env : "(unset)",
+            enabled ? "enabled, CPU/ref quantizer will mask FP8 mantissa low bit (E4M2 experiment)"
+                    : "disabled, CPU/ref quantizer keeps FP8 E4M3",
+            (long long) nrow,
+            (long long) n_per_row);
+}
+
 void quantize_row_fp8_e4m3_e8m0_32_ref(const float * GGML_RESTRICT x, block_fp8_e4m3_e8m0_32 * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_FP8_E4M3_E8M0_32 == 0);
 
@@ -365,6 +395,17 @@ void quantize_row_fp8_e4m3_e8m0_32_ref(const float * GGML_RESTRICT x, block_fp8_
         y[ib].e = scale_q;
         for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
             y[ib].qs[j] = best_index_e4m3(xb[j] * inv_scale);
+        }
+    }
+}
+
+void quantize_row_fp8_e4m3_e8m0_32_e4m2_ref(const float * GGML_RESTRICT x, block_fp8_e4m3_e8m0_32 * GGML_RESTRICT y, int64_t k) {
+    quantize_row_fp8_e4m3_e8m0_32_ref(x, y, k);
+
+    const int64_t nb = k / QK_FP8_E4M3_E8M0_32;
+    for (int64_t ib = 0; ib < nb; ++ib) {
+        for (int j = 0; j < QK_FP8_E4M3_E8M0_32; ++j) {
+            y[ib].qs[j] = ggml_fp8_e4m3_e8m0_32_apply_experiment(y[ib].qs[j], true);
         }
     }
 }
@@ -2367,7 +2408,13 @@ size_t quantize_q8_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, 
 
 size_t quantize_fp8_e4m3_e8m0_32(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
     GGML_UNUSED(quant_weights);
-    quantize_row_fp8_e4m3_e8m0_32_ref(src, (block_fp8_e4m3_e8m0_32 *) dst, (int64_t) nrow*n_per_row);
+    const bool fp8_e4m2_experiment = ggml_fp8_e4m3_e8m0_32_experiment_e4m2_enabled();
+    ggml_log_fp8_e4m3_e8m0_32_e4m2_quantize_once(fp8_e4m2_experiment, nrow, n_per_row);
+    if (fp8_e4m2_experiment) {
+        quantize_row_fp8_e4m3_e8m0_32_e4m2_ref(src, (block_fp8_e4m3_e8m0_32 *) dst, (int64_t) nrow*n_per_row);
+    } else {
+        quantize_row_fp8_e4m3_e8m0_32_ref(src, (block_fp8_e4m3_e8m0_32 *) dst, (int64_t) nrow*n_per_row);
+    }
     return nrow * ggml_row_size(GGML_TYPE_FP8_E4M3_E8M0_32, n_per_row);
 }
 

@@ -6,6 +6,7 @@
 #include <cuda_fp16.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -760,6 +761,39 @@ static ggml_tensor make_host_scalar_tensor_f32(float * value) {
     return t;
 }
 
+static void log_nvfp4_fattn_tensor_brief_once(
+        const char * label,
+        const ggml_tensor * a,
+        const ggml_tensor * b,
+        const ggml_tensor * dst,
+        bool qk) {
+    static std::atomic<bool> qk_logged(false);
+    static std::atomic<bool> pv_logged(false);
+    std::atomic<bool> & logged = qk ? qk_logged : pv_logged;
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_INFO(
+            "%s: %s A{name=%s type=%s ne=[%lld,%lld,%lld,%lld]} "
+            "B{name=%s type=%s ne=[%lld,%lld,%lld,%lld]} "
+            "dst{name=%s type=%s ne=[%lld,%lld,%lld,%lld]}\n",
+            __func__,
+            label,
+            a != nullptr ? ggml_get_name(a) : "(null)",
+            a != nullptr ? ggml_type_name(a->type) : "(null)",
+            a != nullptr ? (long long) a->ne[0] : 0, a != nullptr ? (long long) a->ne[1] : 0,
+            a != nullptr ? (long long) a->ne[2] : 0, a != nullptr ? (long long) a->ne[3] : 0,
+            b != nullptr ? ggml_get_name(b) : "(null)",
+            b != nullptr ? ggml_type_name(b->type) : "(null)",
+            b != nullptr ? (long long) b->ne[0] : 0, b != nullptr ? (long long) b->ne[1] : 0,
+            b != nullptr ? (long long) b->ne[2] : 0, b != nullptr ? (long long) b->ne[3] : 0,
+            dst != nullptr ? ggml_get_name(dst) : "(null)",
+            dst != nullptr ? ggml_type_name(dst->type) : "(null)",
+            dst != nullptr ? (long long) dst->ne[0] : 0, dst != nullptr ? (long long) dst->ne[1] : 0,
+            dst != nullptr ? (long long) dst->ne[2] : 0, dst != nullptr ? (long long) dst->ne[3] : 0);
+}
+
 static float device_absmax(
         ggml_backend_cuda_context & ctx,
         const float * x,
@@ -1016,6 +1050,7 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
             ggml_set_name(&k_t, "nvfp4-fattn-k");
             ggml_set_name(&q_t, "nvfp4-fattn-q");
             ggml_set_name(&qk_t, "nvfp4-fattn-qk");
+            log_nvfp4_fattn_tensor_brief_once("q*k", &k_t, &q_t, &qk_t, true);
             if (debug_log && b == 0 && qh == 0) {
                 GGML_LOG_INFO(
                         "%s: QK matmul requested: backend=cublasLt tensor_core=FP4 lt_type=CUDA_R_4F_E2M1 "
@@ -1092,6 +1127,7 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
             ggml_set_name(&v_t, "nvfp4-fattn-v");
             ggml_set_name(&p_t, "nvfp4-fattn-p");
             ggml_set_name(&vp_t, "nvfp4-fattn-vp");
+            log_nvfp4_fattn_tensor_brief_once("p*v", &v_t, &p_t, &vp_t, false);
             if (debug_log && b == 0 && qh == 0) {
                 GGML_LOG_INFO(
                         "%s: VP matmul requested: backend=cublasLt tensor_core=FP4 lt_type=CUDA_R_4F_E2M1 "
