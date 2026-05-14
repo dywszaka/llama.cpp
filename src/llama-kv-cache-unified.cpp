@@ -1212,16 +1212,16 @@ ggml_tensor * llama_kv_cache_unified::get_v(ggml_context * ctx, int32_t il, uint
     if (use_experimental_nvfp4_vcache_layout()) {
         ggml_tensor * res = ggml_view_4d(ctx, v,
                     n_kv, hparams.n_head_kv(il), hparams.n_embd_head_v, ns,
-                    ggml_row_size(v->type, kv_size_v),
                     ggml_row_size(v->type, kv_size_v*hparams.n_embd_head_v),
+                    ggml_row_size(v->type, kv_size_v),
                     ggml_row_size(v->type, kv_size_v*n_embd_v_gqa_phys),
                     ggml_row_size(v->type, kv_size_v*n_embd_v_gqa_phys)*sinfo.s0);
 
         if (v_scale) {
             ggml_tensor * scale = ggml_view_4d(ctx, v_scale,
                     n_kv / 16, hparams.n_head_kv(il), hparams.n_embd_head_v, ns,
-                    (int64_t) get_v_cache_block_count() * sizeof(float),
                     (int64_t) get_v_cache_block_count() * hparams.n_embd_head_v * sizeof(float),
+                    (int64_t) get_v_cache_block_count() * sizeof(float),
                     (int64_t) get_v_cache_block_count() * n_embd_v_gqa_phys * sizeof(float),
                     (int64_t) sinfo.s0 * get_v_cache_block_count() * n_embd_v_gqa_phys * sizeof(float));
             ggml_tensor_set_nvfp4_scale(res, scale);

@@ -63,8 +63,10 @@ static __global__ void k_vcache_nvfp4_matmul_4d(
         int64_t kv_size,
         int64_t rows,
         int64_t cols,
-        int64_t heads,
-        int64_t streams,
+        int64_t kv_heads,
+        int64_t q_heads,
+        int64_t kv_streams,
+        int64_t q_streams,
         int64_t v_nb0,
         int64_t v_nb1,
         int64_t v_nb2,
@@ -78,24 +80,28 @@ static __global__ void k_vcache_nvfp4_matmul_4d(
         int64_t p_nb3,
         int64_t dst_nb1,
         int64_t dst_nb2,
-        int64_t dst_nb3) {
+        int64_t dst_nb3,
+        int64_t r2,
+        int64_t r3) {
     const int64_t row = blockIdx.x;
     const int64_t col = blockIdx.y;
-    const int64_t head = blockIdx.z % heads;
-    const int64_t stream = blockIdx.z / heads;
+    const int64_t head = blockIdx.z % q_heads;
+    const int64_t stream = blockIdx.z / q_heads;
+    const int64_t kv_head = head / r2;
+    const int64_t kv_stream = stream / r3;
     const int lane = threadIdx.x;
 
-    if (row >= rows || col >= cols || head >= heads || stream >= streams || lane >= kv_size) {
+    if (row >= rows || col >= cols || head >= q_heads || stream >= q_streams || kv_head >= kv_heads || kv_stream >= kv_streams || lane >= kv_size) {
         return;
     }
 
     const int64_t block = lane / QK_NVFP4;
     const int64_t in_block = lane % QK_NVFP4;
 
-    const char * v_base = (const char *) v_data + row * v_nb1 + head * v_nb2 + stream * v_nb3;
+    const char * v_base = (const char *) v_data + row * v_nb1 + kv_head * v_nb2 + kv_stream * v_nb3;
     const block_nvfp4 * v_block_ptr = (const block_nvfp4 *) (v_base + block * v_nb0);
 
-    const char * scale_base = (const char *) v_scale + row * scale_row_nb + head * scale_head_nb + stream * scale_stream_nb;
+    const char * scale_base = (const char *) v_scale + row * scale_row_nb + kv_head * scale_head_nb + kv_stream * scale_stream_nb;
     const float input_scale = *(const float *) (scale_base + block * scale_nb0);
 
     const block_nvfp4 vb = *v_block_ptr;
@@ -141,23 +147,29 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     const ggml_tensor * scale = ggml_tensor_get_nvfp4_scale(src0);
     int64_t blocks = 0;
     int64_t rows = 0;
-    int64_t heads = 0;
-    int64_t streams = 0;
+    int64_t kv_heads = 0;
+    int64_t kv_streams = 0;
     int64_t scale_row_nb = 0;
     int64_t scale_head_nb = 0;
     int64_t scale_stream_nb = 0;
-    if (!ggml_cuda_match_vcache_nvfp4_scale_layout(src0, scale, blocks, rows, heads, streams, scale_row_nb, scale_head_nb, scale_stream_nb)) {
+    if (!ggml_cuda_match_vcache_nvfp4_scale_layout(src0, scale, blocks, rows, kv_heads, kv_streams, scale_row_nb, scale_head_nb, scale_stream_nb)) {
         return false;
     }
 
     const int64_t kv_size = src0->ne[0];
     const int64_t cols = src1->ne[1];
+    const int64_t q_heads = src1->ne[2];
+    const int64_t q_streams = src1->ne[3];
 
-    if (src1->ne[0] != kv_size || src1->ne[2] != heads || src1->ne[3] != streams) {
+    if (src1->ne[0] != kv_size) {
         return false;
     }
 
-    if (dst->ne[0] != rows || dst->ne[1] != cols || dst->ne[2] != heads || dst->ne[3] != streams) {
+    if (kv_heads <= 0 || kv_streams <= 0 || q_heads % kv_heads != 0 || q_streams % kv_streams != 0) {
+        return false;
+    }
+
+    if (dst->ne[0] != rows || dst->ne[1] != cols || dst->ne[2] != q_heads || dst->ne[3] != q_streams) {
         return false;
     }
 
@@ -169,7 +181,10 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
         return false;
     }
 
-    const dim3 grid((uint32_t) rows, (uint32_t) cols, (uint32_t) (heads * streams));
+    const int64_t r2 = q_heads / kv_heads;
+    const int64_t r3 = q_streams / kv_streams;
+
+    const dim3 grid((uint32_t) rows, (uint32_t) cols, (uint32_t) (q_heads * q_streams));
     const dim3 block((uint32_t) kv_size, 1, 1);
     k_vcache_nvfp4_matmul_4d<<<grid, block, 0, ctx.stream()>>>(
             (const block_nvfp4 *) src0->data,
@@ -179,8 +194,10 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
             kv_size,
             rows,
             cols,
-            heads,
-            streams,
+            kv_heads,
+            q_heads,
+            kv_streams,
+            q_streams,
             src0->nb[0],
             src0->nb[1],
             src0->nb[2],
@@ -194,7 +211,9 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
             src1->nb[3],
             dst->nb[1],
             dst->nb[2],
-            dst->nb[3]);
+            dst->nb[3],
+            r2,
+            r3);
     CUDA_CHECK(cudaGetLastError());
     return true;
 }

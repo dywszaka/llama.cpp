@@ -212,6 +212,7 @@ endif()
 
 llama_build_and_test(test-vcache-calibration.cpp)
 llama_build_and_test(test-vcache-nvfp4.cpp)
+llama_build_and_test(test-vcache-nvfp4-layout.cpp)
 
 if (GGML_CUDA)
     enable_language(CUDA)

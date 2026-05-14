@@ -1236,9 +1236,15 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * sinks,
              float     kq_scale,
              int       il) const {
-    const bool v_trans = v->nb[1] > v->nb[2];
     ggml_tensor * k_scale = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_scale(k));
     ggml_tensor * v_scale = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_scale(v));
+    const bool v_is_experimental_nvfp4_cache =
+            v->type == GGML_TYPE_NVFP4 &&
+            v_scale != nullptr &&
+            v_scale->type == GGML_TYPE_F32 &&
+            v->ne[0] % 16 == 0 &&
+            v_scale->ne[0] == v->ne[0] / 16;
+    const bool v_trans = v_is_experimental_nvfp4_cache || v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
     const auto n_stream = k->ne[3];
