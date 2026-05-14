@@ -8,6 +8,7 @@
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
+#include "llama-vcache-nvfp4.h"
 
 #include <cinttypes>
 #include <cstring>
@@ -2326,8 +2327,21 @@ llama_context * llama_init_from_model(
         params.flash_attn = false;
     }
 
-    if (params.type_v == GGML_TYPE_NVFP4 || params.type_v == GGML_TYPE_NVFP4_8) {
-        LLAMA_LOG_ERROR("%s: NVFP4 V cache is disabled\n", __func__);
+    if (params.type_v == GGML_TYPE_NVFP4) {
+        llama_vcache_nvfp4_log_once();
+        llama_cparams nvfp4_vcache_cparams = {};
+        nvfp4_vcache_cparams.flash_attn = params.flash_attn;
+        nvfp4_vcache_cparams.offload_kqv = params.offload_kqv;
+        nvfp4_vcache_cparams.kv_unified = params.kv_unified;
+        if (!llama_vcache_nvfp4_runtime_supported(nvfp4_vcache_cparams, params.type_v)) {
+            LLAMA_LOG_ERROR("%s: NVFP4 V cache requires %s=1, flash_attn=0, offload_kqv=1, and kv_unified=1\n",
+                    __func__, "LLAMA_EXPERIMENT_NVFP4_VCACHE");
+            return nullptr;
+        }
+    }
+
+    if (params.type_v == GGML_TYPE_NVFP4_8) {
+        LLAMA_LOG_ERROR("%s: NVFP4_8 V cache is disabled\n", __func__);
         return nullptr;
     }
 

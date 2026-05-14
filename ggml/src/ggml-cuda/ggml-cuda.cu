@@ -29,6 +29,7 @@
 #include "ggml-cuda/mmvq.cuh"
 #include "ggml-cuda/nvfp4-kq.cuh"
 #include "ggml-cuda/nvfp4-matmul.cuh"
+#include "ggml-cuda/vcache-nvfp4-matmul.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
 #include "ggml-cuda/opt-step-sgd.cuh"
@@ -2244,6 +2245,15 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     }
 
     if (!split &&
+        src0->type == GGML_TYPE_NVFP4 &&
+        src1->type == GGML_TYPE_F32 &&
+        dst->type == GGML_TYPE_F32) {
+        if (ggml_cuda_mul_mat_vcache_nvfp4(ctx, src0, src1, dst)) {
+            return;
+        }
+    }
+
+    if (!split &&
         ggml_cuda_nvfp4_native_enabled() &&
         src0->type == GGML_TYPE_NVFP4 &&
         src1->type == GGML_TYPE_F32 &&
@@ -3059,6 +3069,13 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             use_cuda_graph = false;
 #ifndef NDEBUG
             GGML_LOG_DEBUG("%s: disabling CUDA graphs for NVFP4 flash attention\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_SET_ROWS && ggml_cuda_is_experimental_nvfp4_vcache_set_rows_node(node)) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for experimental NVFP4 V-cache set_rows\n", __func__);
 #endif
         }
 

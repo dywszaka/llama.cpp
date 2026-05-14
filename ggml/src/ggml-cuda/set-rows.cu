@@ -1,14 +1,78 @@
 #include "set-rows.cuh"
 #include "cpy-utils.cuh"
+#include "../ggml-quants.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstring>
+#include <unordered_map>
+#include <vector>
 
 typedef void (*set_rows_kernel_t)(const char * src, char * dst);
 
 static constexpr float GGML_CUDA_NVFP4_FP4_MAX = 6.0f;
 static constexpr float GGML_CUDA_NVFP4_E4M3_HALF_MAX = 224.0f;
 static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_HALF_MAX;
+
+static bool ggml_cuda_nvfp4_vcache_experiment_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static bool ggml_cuda_is_nvfp4_vcache_transposed_set_rows(
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        const ggml_tensor * dst) {
+    if (!ggml_cuda_nvfp4_vcache_experiment_enabled()) {
+        return false;
+    }
+
+    if (dst->type != GGML_TYPE_NVFP4 || src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_I64) {
+        return false;
+    }
+
+    if (dst->view_src == nullptr || ggml_tensor_get_nvfp4_scale(dst) == nullptr) {
+        return false;
+    }
+
+    if (src0->ne[2] != 1 || src0->ne[3] != 1 || src1->ne[1] != 1 || src1->ne[2] != 1 || src1->ne[3] != 1) {
+        return false;
+    }
+
+    if (dst->ne[0] != 1 || dst->ne[2] != 1 || dst->ne[3] != 1) {
+        return false;
+    }
+
+    if (src0->ne[0] <= 0 || src0->ne[1] <= 0) {
+        return false;
+    }
+
+    if (src1->ne[0] != src0->ne[0] * src0->ne[1]) {
+        return false;
+    }
+
+    return true;
+}
+
+bool ggml_cuda_is_experimental_nvfp4_vcache_set_rows_node(const ggml_tensor * dst) {
+    if (dst == nullptr || dst->op != GGML_OP_SET_ROWS) {
+        return false;
+    }
+
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    const ggml_tensor * src2 = dst->src[2];
+    if (src0 == nullptr || src1 == nullptr || src2 == nullptr) {
+        return false;
+    }
+
+    return ggml_cuda_is_nvfp4_vcache_transposed_set_rows(src1, src2, dst);
+}
 
 static bool ggml_cuda_fp8_e4m3_e8m0_32_e4m2_experiment_enabled() {
     static int cached = -1;
@@ -225,6 +289,121 @@ static __global__ void k_set_rows_nvfp4_8(
     }
 }
 
+static void ggml_cuda_op_set_rows_nvfp4_vcache(
+        ggml_backend_cuda_context & ctx,
+        ggml_tensor * dst,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1) {
+    cudaStream_t stream = ctx.stream();
+
+    ggml_tensor * v_cache = dst->view_src;
+    const ggml_tensor * v_scale = ggml_tensor_get_nvfp4_scale(dst);
+
+    GGML_ASSERT(v_cache != nullptr);
+    GGML_ASSERT(v_scale != nullptr);
+    GGML_ASSERT(v_cache->type == GGML_TYPE_NVFP4);
+    GGML_ASSERT(v_scale->type == GGML_TYPE_F32);
+
+    const int64_t kv_size_padded = v_cache->ne[0];
+    const int64_t n_rows = v_cache->ne[1];
+    const int64_t n_flat = src1->ne[0];
+    const int64_t n_tokens = n_flat / n_rows;
+
+    GGML_ASSERT(kv_size_padded % QK_NVFP4 == 0);
+    GGML_ASSERT(n_rows > 0);
+    GGML_ASSERT(n_flat % n_rows == 0);
+    GGML_ASSERT(src0->ne[0] == 1);
+    GGML_ASSERT(src0->ne[1] == n_flat);
+
+    std::vector<float> host_src((size_t) n_flat);
+    std::vector<int64_t> host_idx((size_t) n_flat);
+    CUDA_CHECK(cudaMemcpyAsync(host_src.data(), src0->data, host_src.size() * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(host_idx.data(), src1->data, host_idx.size() * sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    const int64_t n_blocks = kv_size_padded / QK_NVFP4;
+    std::vector<block_nvfp4> host_cache((size_t) n_rows * (size_t) n_blocks);
+    std::vector<float> host_scale((size_t) n_rows * (size_t) n_blocks);
+    CUDA_CHECK(cudaMemcpyAsync(host_cache.data(), v_cache->data, host_cache.size() * sizeof(block_nvfp4), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(host_scale.data(), v_scale->data, host_scale.size() * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    struct block_state {
+        std::array<float, QK_NVFP4> tile = {};
+    };
+
+    std::unordered_map<size_t, size_t> block_to_state;
+    std::vector<block_state> states;
+
+    auto scale_offset = [n_blocks](int64_t row, int64_t block) {
+        return (size_t) row * (size_t) n_blocks + (size_t) block;
+    };
+    auto cache_offset = [n_blocks](int64_t row, int64_t block) {
+        return (size_t) row * (size_t) n_blocks + (size_t) block;
+    };
+    auto get_state = [&](int64_t row, int64_t block) -> block_state & {
+        const size_t so = scale_offset(row, block);
+        auto it = block_to_state.find(so);
+        if (it != block_to_state.end()) {
+            return states[it->second];
+        }
+
+        block_state state = {};
+        const float input_scale = host_scale[so];
+        const float global_scale = (input_scale > 0.0f && std::isfinite(input_scale)) ? (1.0f / input_scale) : 0.0f;
+        dequantize_row_nvfp4(&host_cache[cache_offset(row, block)], state.tile.data(), QK_NVFP4, global_scale);
+
+        const size_t idx = states.size();
+        states.push_back(state);
+        block_to_state.emplace(so, idx);
+        return states[idx];
+    };
+
+    for (int64_t token = 0; token < n_tokens; ++token) {
+        for (int64_t row = 0; row < n_rows; ++row) {
+            const size_t flat = (size_t) token * (size_t) n_rows + (size_t) row;
+            const int64_t dst_index = host_idx[flat];
+            const int64_t row_from_idx = dst_index / kv_size_padded;
+            const int64_t token_slot = dst_index % kv_size_padded;
+            GGML_ASSERT(row_from_idx == row);
+            GGML_ASSERT(token_slot >= 0 && token_slot < kv_size_padded);
+
+            const int64_t block = token_slot / QK_NVFP4;
+            const int64_t lane = token_slot % QK_NVFP4;
+            const size_t so = scale_offset(row, block);
+            block_state & state = get_state(row, block);
+            state.tile[(size_t) lane] = host_src[flat];
+
+            // Re-quantize immediately when this write completes the current block or it is the last write touching it.
+            bool flush = false;
+            if (lane == QK_NVFP4 - 1) {
+                flush = true;
+            } else if (token == n_tokens - 1) {
+                flush = true;
+            } else {
+                const size_t next_flat = (size_t) (token + 1) * (size_t) n_rows + (size_t) row;
+                const int64_t next_idx = host_idx[next_flat];
+                const int64_t next_block = (next_idx % kv_size_padded) / QK_NVFP4;
+                flush = next_block != block;
+            }
+
+            if (flush) {
+                float amax = 0.0f;
+                for (float v : state.tile) {
+                    amax = std::max(amax, fabsf(v));
+                }
+                const float global_scale = (amax > 0.0f && std::isfinite(amax)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax) : 0.0f;
+                host_scale[so] = (global_scale != 0.0f) ? (1.0f / global_scale) : 0.0f;
+                quantize_row_nvfp4_ref(state.tile.data(), &host_cache[cache_offset(row, block)], QK_NVFP4, global_scale);
+            }
+        }
+    }
+
+    CUDA_CHECK(cudaMemcpyAsync(v_cache->data, host_cache.data(), host_cache.size() * sizeof(block_nvfp4), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync((void *) v_scale->data, host_scale.data(), host_scale.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaGetLastError());
+}
+
 static __global__ void k_set_rows_scale(
         const int64_t * __restrict__ src1,
         float * __restrict__ scale,
@@ -409,6 +588,11 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t * src1_d = (const int64_t *)src1->data;
 
     cudaStream_t stream = ctx.stream();
+
+    if (ggml_cuda_is_nvfp4_vcache_transposed_set_rows(src0, src1, dst)) {
+        ggml_cuda_op_set_rows_nvfp4_vcache(ctx, dst, src0, src1);
+        return;
+    }
 
 
 

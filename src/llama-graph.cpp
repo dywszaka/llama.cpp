@@ -1238,6 +1238,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
              int       il) const {
     const bool v_trans = v->nb[1] > v->nb[2];
     ggml_tensor * k_scale = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_scale(k));
+    ggml_tensor * v_scale = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_scale(v));
 
     // split the batch into streams if needed
     const auto n_stream = k->ne[3];
@@ -1249,6 +1250,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     v = ggml_permute(ctx0, v, 0, 2, 1, 3);
     if (k_scale) {
         ggml_tensor_set_nvfp4_scale(k, k_scale);
+    }
+    if (v_scale) {
+        ggml_tensor_set_nvfp4_scale(v, v_scale);
     }
 
     const auto n_kv = k->ne[1];

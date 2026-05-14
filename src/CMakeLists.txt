@@ -35,6 +35,7 @@ add_library(llama
             llama-sampling.cpp
             llama-vocab.cpp
             llama-vcache-calibration.cpp
+            llama-vcache-nvfp4.cpp
             unicode-data.cpp
             unicode.cpp
             unicode.h

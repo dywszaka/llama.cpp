@@ -211,15 +211,19 @@ private:
         ggml_tensor * k;
         ggml_tensor * v;
         ggml_tensor * k_scale;
+        ggml_tensor * v_scale;
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
         std::vector<ggml_tensor *> k_scale_stream;
+        std::vector<ggml_tensor *> v_scale_stream;
     };
 
     bool v_trans = true;  // the value tensor is transposed
     bool has_k_scale = false;
     bool non_flash_fp8_e8m0 = false;
+    bool experimental_nvfp4_vcache = false;
+    ggml_type type_v_cache = GGML_TYPE_F16;
 
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
@@ -298,6 +302,14 @@ private:
 
     bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count);
+
+    bool use_contiguous_v_slots() const;
+    bool use_experimental_nvfp4_vcache_layout() const;
+
+    uint32_t get_v_cache_kv_padded() const;
+    uint32_t get_v_cache_block_count() const;
+    uint32_t get_v_cache_row_count(int32_t il) const;
+    uint32_t get_v_cache_scale_offset(uint32_t row, uint32_t block) const;
 };
 
 class llama_kv_cache_unified_context : public llama_memory_context_i {
