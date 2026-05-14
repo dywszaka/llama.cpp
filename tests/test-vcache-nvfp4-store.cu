@@ -24,10 +24,8 @@ static std::vector<float> make_signal(size_t n, float amplitude, float bias, flo
 static bool run_store_case(int64_t head_dim, int64_t n_tokens) {
 #if defined(_WIN32)
     _putenv_s("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-    _putenv_s("GGML_CUDA_DISABLE_GRAPHS", "1");
 #else
     setenv("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1", 1);
-    setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 1);
 #endif
 
     ggml_init_params params = {
