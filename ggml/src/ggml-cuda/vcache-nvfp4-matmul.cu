@@ -89,33 +89,35 @@ static __global__ void k_vcache_nvfp4_matmul_4d(
     const int64_t stream = blockIdx.z / q_heads;
     const int64_t kv_head = head / r2;
     const int64_t kv_stream = stream / r3;
-    const int lane = threadIdx.x;
 
-    if (row >= rows || col >= cols || head >= q_heads || stream >= q_streams || kv_head >= kv_heads || kv_stream >= kv_streams || lane >= kv_size) {
+    if (row >= rows || col >= cols || head >= q_heads || stream >= q_streams || kv_head >= kv_heads || kv_stream >= kv_streams) {
         return;
     }
 
-    const int64_t block = lane / QK_NVFP4;
-    const int64_t in_block = lane % QK_NVFP4;
-
     const char * v_base = (const char *) v_data + row * v_nb1 + kv_head * v_nb2 + kv_stream * v_nb3;
-    const block_nvfp4 * v_block_ptr = (const block_nvfp4 *) (v_base + block * v_nb0);
-
     const char * scale_base = (const char *) v_scale + row * scale_row_nb + kv_head * scale_head_nb + kv_stream * scale_stream_nb;
-    const float input_scale = *(const float *) (scale_base + block * scale_nb0);
 
-    const block_nvfp4 vb = *v_block_ptr;
-    const float d = ggml_cuda_e4m3_to_fp32_half(vb.e) * input_scale;
-    const uint8_t packed = vb.qs[in_block / 2];
-    const uint8_t q = (in_block & 1) == 0 ? (packed & 0x0F) : (packed >> 4);
-    const float v = d * (float) kvalues_nvfp4[q];
+    float thread_sum = 0.0f;
+    for (int64_t lane = threadIdx.x; lane < kv_size; lane += blockDim.x) {
+        const int64_t block = lane / QK_NVFP4;
+        const int64_t in_block = lane % QK_NVFP4;
 
-    const char * p_ptr = (const char *) p_data + lane * sizeof(float) + col * p_nb1 + head * p_nb2 + stream * p_nb3;
-    const float p = *(const float *) p_ptr;
-    const float prod = v * p;
+        const block_nvfp4 * v_block_ptr = (const block_nvfp4 *) (v_base + block * v_nb0);
+        const float input_scale = *(const float *) (scale_base + block * scale_nb0);
+
+        const block_nvfp4 vb = *v_block_ptr;
+        const float d = ggml_cuda_e4m3_to_fp32_half(vb.e) * input_scale;
+        const uint8_t packed = vb.qs[in_block / 2];
+        const uint8_t q = (in_block & 1) == 0 ? (packed & 0x0F) : (packed >> 4);
+        const float v = d * (float) kvalues_nvfp4[q];
+
+        const char * p_ptr = (const char *) p_data + lane * sizeof(float) + col * p_nb1 + head * p_nb2 + stream * p_nb3;
+        const float p = *(const float *) p_ptr;
+        thread_sum += v * p;
+    }
 
     __shared__ float sum[256];
-    sum[threadIdx.x] = prod;
+    sum[threadIdx.x] = thread_sum;
     __syncthreads();
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
@@ -173,7 +175,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
         return false;
     }
 
-    if (kv_size > 256 || (kv_size & (kv_size - 1)) != 0) {
+    if (kv_size <= 0) {
         return false;
     }
 
@@ -183,9 +185,13 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
 
     const int64_t r2 = q_heads / kv_heads;
     const int64_t r3 = q_streams / kv_streams;
+    int block_threads = 16;
+    while (block_threads < kv_size && block_threads < 256) {
+        block_threads *= 2;
+    }
 
     const dim3 grid((uint32_t) rows, (uint32_t) cols, (uint32_t) (q_heads * q_streams));
-    const dim3 block((uint32_t) kv_size, 1, 1);
+    const dim3 block((uint32_t) block_threads, 1, 1);
     k_vcache_nvfp4_matmul_4d<<<grid, block, 0, ctx.stream()>>>(
             (const block_nvfp4 *) src0->data,
             (const float *) scale->data,
