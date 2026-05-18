@@ -53,9 +53,9 @@ static bool run_store_case(int64_t head_dim, int64_t n_tokens) {
     ggml_tensor * v_cur_3d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, 1, n_tokens);
     ggml_tensor * v_cur = ggml_reshape_2d(ctx, v_cur_3d, head_dim, n_tokens);
 
-    ggml_tensor * v_view = ggml_reshape_2d(ctx, v_cache, 1, head_dim * kv_size);
-    ggml_tensor * idx = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, head_dim * n_tokens);
-    ggml_tensor * set = ggml_set_rows(ctx, v_view, ggml_reshape_2d(ctx, v_cur, 1, head_dim * n_tokens), idx);
+    ggml_tensor * v_view = ggml_reshape_2d(ctx, v_cache, 16, head_dim * kv_size / 16);
+    ggml_tensor * idx = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, head_dim * n_tokens / 16);
+    ggml_tensor * set = ggml_set_rows(ctx, v_view, ggml_reshape_2d(ctx, v_cur, 16, head_dim * n_tokens / 16), idx);
     ggml_tensor_set_nvfp4_scale(set, v_scale);
 
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8, false);
@@ -70,10 +70,10 @@ static bool run_store_case(int64_t head_dim, int64_t n_tokens) {
     }
 
     const std::vector<float> src = make_signal((size_t) ggml_nelements(v_cur_3d), 2.0f, 0.1f, 0.3f);
-    std::vector<int64_t> idx_data((size_t) (head_dim * n_tokens));
+    std::vector<int64_t> idx_data((size_t) (head_dim * n_tokens / 16));
     for (int64_t i = 0; i < n_tokens; ++i) {
-        for (int64_t j = 0; j < head_dim; ++j) {
-            idx_data[(size_t) i * (size_t) head_dim + (size_t) j] = j * kv_size + i;
+        for (int64_t j = 0; j < head_dim; j += 16) {
+            idx_data[(size_t) i * (size_t) (head_dim / 16) + (size_t) (j / 16)] = j * kv_size + i;
         }
     }
 

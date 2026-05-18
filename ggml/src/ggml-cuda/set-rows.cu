@@ -42,7 +42,7 @@ static bool ggml_cuda_is_nvfp4_vcache_transposed_set_rows(
         return false;
     }
 
-    if (dst->ne[0] != 1 || dst->ne[2] != 1 || dst->ne[3] != 1) {
+    if (dst->ne[0] != QK_NVFP4 || dst->ne[2] != 1 || dst->ne[3] != 1) {
         return false;
     }
 
@@ -50,7 +50,11 @@ static bool ggml_cuda_is_nvfp4_vcache_transposed_set_rows(
         return false;
     }
 
-    if (src1->ne[0] != src0->ne[0] * src0->ne[1]) {
+    if (src0->ne[0] != QK_NVFP4) {
+        return false;
+    }
+
+    if (src1->ne[0] * QK_NVFP4 != src0->ne[0] * src0->ne[1]) {
         return false;
     }
 
@@ -179,13 +183,17 @@ static __global__ void k_set_rows_nvfp4_vcache(
         int64_t n_rows_local,
         int64_t n_tokens,
         int64_t kv_size_padded,
-        int64_t n_blocks) {
+        int64_t n_blocks,
+        int64_t n_row_groups) {
     const int row_local = blockIdx.x;
     const int lane = threadIdx.x;
 
     if (row_local >= n_rows_local || lane >= WARP_SIZE) {
         return;
     }
+
+    const int64_t row_group = row_local / QK_NVFP4;
+    const int64_t row_in_group = row_local - row_group * QK_NVFP4;
 
     __shared__ float tile[QK_NVFP4];
     __shared__ float reduction[QK_NVFP4];
@@ -257,8 +265,8 @@ static __global__ void k_set_rows_nvfp4_vcache(
     __syncthreads();
 
     for (int64_t token = 0; token < n_tokens; ++token) {
-        const int64_t flat = token * n_rows_local + row_local;
-        const int64_t dst_index = src1[flat];
+        const int64_t flat_group = token * n_row_groups + row_group;
+        const int64_t dst_index = src1[flat_group] + row_in_group * kv_size_padded;
         const int64_t row_global = dst_index / kv_size_padded;
         const int64_t token_slot = dst_index - row_global * kv_size_padded;
         const int64_t block_idx = token_slot / QK_NVFP4;
@@ -267,7 +275,7 @@ static __global__ void k_set_rows_nvfp4_vcache(
         if (lane == 0) {
             pending_flush = active_block && (row_global != current_row_global || block_idx != current_block);
             pending_lane = in_block;
-            pending_value = src0[flat];
+            pending_value = src0[flat_group * QK_NVFP4 + row_in_group];
         }
         __syncthreads();
 
@@ -443,15 +451,17 @@ static void ggml_cuda_op_set_rows_nvfp4_vcache(
 
     const int64_t kv_size_padded = v_cache->ne[0];
     const int64_t n_rows_local = v_cache->ne[1];
-    const int64_t n_flat = src1->ne[0];
-    const int64_t n_tokens = n_flat / n_rows_local;
+    const int64_t n_row_groups = n_rows_local / QK_NVFP4;
+    const int64_t n_tokens = src1->ne[0] / n_row_groups;
     const int64_t n_blocks = kv_size_padded / QK_NVFP4;
 
     GGML_ASSERT(kv_size_padded % QK_NVFP4 == 0);
+    GGML_ASSERT(n_rows_local % QK_NVFP4 == 0);
     GGML_ASSERT(n_rows_local > 0);
-    GGML_ASSERT(n_flat % n_rows_local == 0);
-    GGML_ASSERT(src0->ne[0] == 1);
-    GGML_ASSERT(src0->ne[1] == n_flat);
+    GGML_ASSERT(n_row_groups > 0);
+    GGML_ASSERT(src1->ne[0] % n_row_groups == 0);
+    GGML_ASSERT(src0->ne[0] == QK_NVFP4);
+    GGML_ASSERT(src0->ne[1] == src1->ne[0]);
     if (n_tokens > 0) {
         k_set_rows_nvfp4_vcache<<<(uint32_t) n_rows_local, WARP_SIZE, 0, stream>>>(
                 (const float *) src0->data,
@@ -461,7 +471,8 @@ static void ggml_cuda_op_set_rows_nvfp4_vcache(
                 n_rows_local,
                 n_tokens,
                 kv_size_padded,
-                n_blocks);
+                n_blocks,
+                n_row_groups);
     }
     CUDA_CHECK(cudaGetLastError());
 }

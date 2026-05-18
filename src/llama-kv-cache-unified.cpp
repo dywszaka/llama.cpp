@@ -1305,8 +1305,11 @@ ggml_tensor * llama_kv_cache_unified::cpy_v(ggml_context * ctx, ggml_tensor * v_
                 v_cur = ggml_pad(ctx, v_cur, n_embd_v_gqa_phys - n_embd_v_gqa, 0, 0, 0);
             }
 
-            ggml_tensor * v_view = ggml_reshape_2d(ctx, v, 1, v->ne[0]*v->ne[1]*v->ne[2]);
-            v_cur = ggml_reshape_2d(ctx, v_cur, 1, v_cur->ne[0]*v_cur->ne[1]);
+            GGML_ASSERT(v->ne[0] % 16 == 0);
+            GGML_ASSERT(v_cur->ne[0] % 16 == 0);
+
+            ggml_tensor * v_view = ggml_reshape_2d(ctx, v, 16, v->ne[0]*v->ne[1]*v->ne[2] / 16);
+            v_cur = ggml_reshape_2d(ctx, v_cur, 16, v_cur->ne[0]*v_cur->ne[1] / 16);
 
             ggml_tensor * res = ggml_set_rows(ctx, v_view, v_cur, v_idxs);
             if (v_scale) {
@@ -1371,6 +1374,9 @@ ggml_tensor * llama_kv_cache_unified::build_input_v_idxs(ggml_context * ctx, con
 
     if (!v_trans) {
         v_idxs = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, n_tokens);
+    } else if (use_experimental_nvfp4_vcache_layout()) {
+        GGML_ASSERT(hparams.n_embd_v_gqa_max() % 16 == 0);
+        v_idxs = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, n_tokens*hparams.n_embd_v_gqa_max()/16);
     } else {
         v_idxs = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, n_tokens*hparams.n_embd_v_gqa_max());
     }
@@ -1419,9 +1425,26 @@ void llama_kv_cache_unified::set_input_v_idxs(ggml_tensor * dst, const llama_uba
                 data[s*sinfo.size() + i] = offs + sinfo.idxs[s][i];
             }
         }
+    } else if (use_experimental_nvfp4_vcache_layout()) {
+        // note: the experimental NVFP4 V cache stores 16 token slots per block.
+        const int64_t kv_size = get_v_cache_kv_padded();
+        const int64_t n_embd_v_gqa = hparams.n_embd_v_gqa_max();
+        GGML_ASSERT(n_embd_v_gqa % 16 == 0);
+
+        const int64_t n_row_groups = n_embd_v_gqa / 16;
+
+        for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+            const int64_t offs = sinfo.strm[s]*kv_size*n_embd_v_gqa;
+
+            for (uint32_t i = 0; i < sinfo.size(); ++i) {
+                for (int64_t j = 0; j < n_embd_v_gqa; j += 16) {
+                    data[s*sinfo.size()*n_row_groups + i*n_row_groups + j/16] = offs + j*kv_size + sinfo.idxs[s][i];
+                }
+            }
+        }
     } else {
         // note: the V cache is transposed when not using flash attention
-        const int64_t kv_size = use_experimental_nvfp4_vcache_layout() ? get_v_cache_kv_padded() : get_size();
+        const int64_t kv_size = get_size();
 
         const int64_t n_embd_v_gqa = hparams.n_embd_v_gqa_max();
 
