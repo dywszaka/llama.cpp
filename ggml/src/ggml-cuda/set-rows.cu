@@ -9,6 +9,7 @@
 
 typedef void (*set_rows_kernel_t)(const char * src, char * dst);
 
+static constexpr const char * GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE";
 static constexpr float GGML_CUDA_NVFP4_FP4_MAX = 6.0f;
 static constexpr float GGML_CUDA_NVFP4_E4M3_HALF_MAX = 224.0f;
 static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_HALF_MAX;
@@ -20,6 +21,32 @@ static bool ggml_cuda_nvfp4_vcache_experiment_enabled() {
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
     }
     return cached != 0;
+}
+
+static bool ggml_cuda_nvfp4_vcache_fast_update_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv(GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV);
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static void ggml_cuda_log_nvfp4_vcache_fast_update_once(bool enabled) {
+    static int logged = 0;
+    if (logged != 0) {
+        return;
+    }
+    logged = 1;
+
+    const char * env = getenv(GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV);
+    GGML_LOG_INFO(
+            "%s: %s=%s -> %s\n",
+            __func__,
+            GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, CUDA NVFP4 V-cache set_rows may patch single-token updates without requantizing the block"
+                    : "disabled");
 }
 
 static bool ggml_cuda_is_nvfp4_vcache_transposed_set_rows(
@@ -184,7 +211,8 @@ static __global__ void k_set_rows_nvfp4_vcache(
         int64_t n_tokens,
         int64_t kv_size_padded,
         int64_t n_blocks,
-        int64_t n_row_groups) {
+        int64_t n_row_groups,
+        bool fast_update) {
     const int row_local = blockIdx.x;
     const int lane = threadIdx.x;
 
@@ -202,8 +230,54 @@ static __global__ void k_set_rows_nvfp4_vcache(
     __shared__ int64_t current_block;
     __shared__ int pending_flush;
     __shared__ int active_block;
+    __shared__ int fast_update_done;
     __shared__ int pending_lane;
     __shared__ float pending_value;
+
+    if (fast_update && n_tokens == 1) {
+        const int64_t flat_group = row_group;
+        const int64_t dst_index = src1[flat_group] + row_in_group * kv_size_padded;
+        const int64_t row_global = dst_index / kv_size_padded;
+        const int64_t token_slot = dst_index - row_global * kv_size_padded;
+        const int64_t block_idx = token_slot / QK_NVFP4;
+        const int in_block = (int) (token_slot % QK_NVFP4);
+        const int64_t flat_block = row_global * n_blocks + block_idx;
+
+        if (lane == 0) {
+            fast_update_done = 0;
+            const float value = src0[flat_group * QK_NVFP4 + row_in_group];
+            const float input_scale = scale[flat_block];
+            const block_nvfp4 block = dst[flat_block];
+            const float block_scale_f = ggml_cuda_e4m3_to_fp32_half(block.e);
+            float current_amax_q = 0.0f;
+            for (int byte = 0; byte < QK_NVFP4 / 2; ++byte) {
+                const uint8_t packed = block.qs[byte];
+                current_amax_q = fmaxf(current_amax_q, fabsf((float) kvalues_nvfp4[packed & 0x0F]));
+                current_amax_q = fmaxf(current_amax_q, fabsf((float) kvalues_nvfp4[packed >> 4]));
+            }
+            const float current_amax = current_amax_q * block_scale_f * input_scale;
+
+            if (input_scale > 0.0f && block_scale_f > 0.0f &&
+                    isfinite(input_scale) && isfinite(block_scale_f) && isfinite(value) &&
+                    fabsf(value) <= current_amax) {
+                const float global_scale = 1.0f / input_scale;
+                const float inv_scale = global_scale / block_scale_f;
+                const uint8_t q = ggml_cuda_best_index_nvfp4_set_rows(value * inv_scale);
+                const int byte = in_block / 2;
+                const uint8_t old = block.qs[byte];
+                const uint8_t patched = (in_block & 1) == 0
+                    ? (uint8_t) ((old & 0xF0) | q)
+                    : (uint8_t) ((old & 0x0F) | (q << 4));
+                dst[flat_block].qs[byte] = patched;
+                fast_update_done = 1;
+            }
+        }
+        __syncthreads();
+
+        if (fast_update_done != 0) {
+            return;
+        }
+    }
 
     auto load_block = [&](int64_t row_global, int64_t block_idx) {
         if (lane < QK_NVFP4) {
@@ -454,6 +528,7 @@ static void ggml_cuda_op_set_rows_nvfp4_vcache(
     const int64_t n_row_groups = n_rows_local / QK_NVFP4;
     const int64_t n_tokens = src1->ne[0] / n_row_groups;
     const int64_t n_blocks = kv_size_padded / QK_NVFP4;
+    const bool fast_update = ggml_cuda_nvfp4_vcache_fast_update_enabled();
 
     GGML_ASSERT(kv_size_padded % QK_NVFP4 == 0);
     GGML_ASSERT(n_rows_local % QK_NVFP4 == 0);
@@ -462,6 +537,9 @@ static void ggml_cuda_op_set_rows_nvfp4_vcache(
     GGML_ASSERT(src1->ne[0] % n_row_groups == 0);
     GGML_ASSERT(src0->ne[0] == QK_NVFP4);
     GGML_ASSERT(src0->ne[1] == src1->ne[0]);
+
+    ggml_cuda_log_nvfp4_vcache_fast_update_once(fast_update);
+
     if (n_tokens > 0) {
         k_set_rows_nvfp4_vcache<<<(uint32_t) n_rows_local, WARP_SIZE, 0, stream>>>(
                 (const float *) src0->data,
@@ -472,7 +550,8 @@ static void ggml_cuda_op_set_rows_nvfp4_vcache(
                 n_tokens,
                 kv_size_padded,
                 n_blocks,
-                n_row_groups);
+                n_row_groups,
+                fast_update);
     }
     CUDA_CHECK(cudaGetLastError());
 }

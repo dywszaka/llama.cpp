@@ -8,7 +8,57 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
+
+static constexpr float NVFP4_FP4_MAX = 6.0f;
+static constexpr int8_t NVFP4_VALUES[16] = { 0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12 };
+
+static float e4m3_to_fp32(uint8_t x) {
+    uint32_t sign = x & 0x80;
+    int exp = (x >> 3) & 0x0f;
+    int mant = x & 0x07;
+
+    if (exp == 0) {
+        if (mant == 0) {
+            return sign ? -0.0f : 0.0f;
+        }
+        return (sign ? -1.0f : 1.0f) * ldexpf((float) mant, -9);
+    }
+
+    if (exp == 0x0f) {
+        return (sign ? -1.0f : 1.0f) * 448.0f;
+    }
+
+    return (sign ? -1.0f : 1.0f) * ldexpf(1.0f + (float) mant / 8.0f, exp - 7);
+}
+
+static float e4m3_to_fp32_half(uint8_t x) {
+    return e4m3_to_fp32(x) * 0.5f;
+}
+
+static uint8_t best_index_nvfp4_ref(float x) {
+    uint8_t best_index = 0;
+    float best_err = fabsf((float) NVFP4_VALUES[0] - x);
+
+    for (int i = 1; i < 16; ++i) {
+        const float err = fabsf((float) NVFP4_VALUES[i] - x);
+        if (err < best_err) {
+            best_index = (uint8_t) i;
+            best_err = err;
+        }
+    }
+
+    return best_index;
+}
+
+static void set_env(const char * name, const char * value) {
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
 
 static std::vector<float> make_signal(size_t n, float amplitude, float bias, float phase) {
     std::vector<float> out(n);
@@ -22,11 +72,7 @@ static std::vector<float> make_signal(size_t n, float amplitude, float bias, flo
 }
 
 static bool run_store_case(int64_t head_dim, int64_t n_tokens) {
-#if defined(_WIN32)
-    _putenv_s("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-#else
-    setenv("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1", 1);
-#endif
+    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
 
     ggml_init_params params = {
         /* .mem_size   = */ 32 * 1024 * 1024,
@@ -141,7 +187,427 @@ static bool run_store_case(int64_t head_dim, int64_t n_tokens) {
     return true;
 }
 
-int main() {
+static bool compute_store_graph(
+        ggml_backend_t backend,
+        ggml_cgraph * gf,
+        ggml_tensor * v_cur,
+        ggml_tensor * idx,
+        const std::vector<float> & src,
+        const std::vector<int64_t> & idx_data) {
+    ggml_backend_tensor_set(v_cur, src.data(), 0, src.size() * sizeof(float));
+    ggml_backend_tensor_set(idx, idx_data.data(), 0, idx_data.size() * sizeof(int64_t));
+
+    const ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "graph compute failed: %s\n", ggml_status_to_string(status));
+        return false;
+    }
+
+    return true;
+}
+
+static bool run_fast_update_patch_case() {
+    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
+    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE", "1");
+
+    ggml_init_params params = {
+        /* .mem_size   = */ 32 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    const int64_t head_dim = 16;
+    const int64_t kv_size = 16;
+    const int64_t kv_blocks = kv_size / 16;
+    ggml_tensor * v_cache = ggml_new_tensor_3d(ctx, GGML_TYPE_NVFP4, kv_size, head_dim, 1);
+    ggml_tensor * v_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head_dim * kv_blocks, 1);
+
+    ggml_tensor * v_view = ggml_reshape_2d(ctx, v_cache, 16, head_dim * kv_size / 16);
+    ggml_tensor * v_cur_init_3d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, 1, 16);
+    ggml_tensor * idx_init = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, head_dim);
+    ggml_tensor * set_init = ggml_set_rows(ctx, v_view,
+            ggml_reshape_2d(ctx, ggml_reshape_2d(ctx, v_cur_init_3d, head_dim, 16), 16, head_dim),
+            idx_init);
+    ggml_tensor_set_nvfp4_scale(set_init, v_scale);
+
+    ggml_tensor * v_cur_patch_3d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, 1, 1);
+    ggml_tensor * idx_patch = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, head_dim / 16);
+    ggml_tensor * set_patch = ggml_set_rows(ctx, v_view,
+            ggml_reshape_2d(ctx, ggml_reshape_2d(ctx, v_cur_patch_3d, head_dim, 1), 16, head_dim / 16),
+            idx_patch);
+    ggml_tensor_set_nvfp4_scale(set_patch, v_scale);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(gf, set_init);
+    ggml_cgraph * gf_patch = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(gf_patch, set_patch);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<int64_t> idx_data((size_t) head_dim);
+    for (int64_t token = 0; token < 16; ++token) {
+        for (int64_t j = 0; j < head_dim; j += 16) {
+            idx_data[(size_t) token * (size_t) (head_dim / 16) + (size_t) j / 16] = j * kv_size + token;
+        }
+    }
+
+    std::vector<float> initial((size_t) head_dim * 16);
+    for (int64_t token = 0; token < 16; ++token) {
+        for (int64_t row = 0; row < head_dim; ++row) {
+            initial[(size_t) token * (size_t) head_dim + (size_t) row] = 0.15f + 0.03f * (float) token + 0.01f * (float) row;
+        }
+    }
+    initial[7 * head_dim + 3] = 4.0f;
+
+    if (!compute_store_graph(backend, gf, v_cur_init_3d, idx_init, initial, idx_data)) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<block_nvfp4> before((size_t) head_dim * (size_t) kv_blocks);
+    std::vector<float> scale_before((size_t) head_dim * (size_t) kv_blocks);
+    ggml_backend_tensor_get(v_cache, before.data(), 0, before.size() * sizeof(block_nvfp4));
+    ggml_backend_tensor_get(v_scale, scale_before.data(), 0, scale_before.size() * sizeof(float));
+
+    std::vector<float> patch((size_t) head_dim);
+    for (int64_t row = 0; row < head_dim; ++row) {
+        patch[(size_t) row] = 0.02f * (float) (row + 1);
+    }
+    patch[3] = 1.0f;
+
+    std::vector<int64_t> idx_patch_data(1, 5);
+    if (!compute_store_graph(backend, gf_patch, v_cur_patch_3d, idx_patch, patch, idx_patch_data)) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<block_nvfp4> after((size_t) head_dim * (size_t) kv_blocks);
+    std::vector<float> scale_after((size_t) head_dim * (size_t) kv_blocks);
+    ggml_backend_tensor_get(v_cache, after.data(), 0, after.size() * sizeof(block_nvfp4));
+    ggml_backend_tensor_get(v_scale, scale_after.data(), 0, scale_after.size() * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+
+    for (int64_t row = 0; row < head_dim; ++row) {
+        const size_t off = (size_t) row;
+        if (after[off].e != before[off].e || scale_after[off] != scale_before[off]) {
+            std::fprintf(stderr, "fast update changed scale at row=%lld before_e=%u after_e=%u before_scale=%g after_scale=%g\n",
+                    (long long) row, (unsigned) before[off].e, (unsigned) after[off].e, scale_before[off], scale_after[off]);
+            return false;
+        }
+
+        const float input_scale = scale_before[off];
+        const float global_scale = input_scale > 0.0f ? 1.0f / input_scale : 0.0f;
+        const float scale_f = e4m3_to_fp32_half(before[off].e);
+        const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? global_scale / scale_f : 0.0f;
+        const uint8_t expected_q = best_index_nvfp4_ref(patch[(size_t) row] * inv_scale);
+        const uint8_t got_q = (after[off].qs[5 / 2] >> 4) & 0x0F;
+        if (got_q != expected_q) {
+            std::fprintf(stderr, "fast update patched wrong nibble row=%lld got=%u expected=%u\n",
+                    (long long) row, (unsigned) got_q, (unsigned) expected_q);
+            return false;
+        }
+
+        for (int byte = 0; byte < QK_NVFP4 / 2; ++byte) {
+            uint8_t expected_byte = before[off].qs[byte];
+            if (byte == 5 / 2) {
+                expected_byte = (uint8_t) ((expected_byte & 0x0F) | (expected_q << 4));
+            }
+            if (after[off].qs[byte] != expected_byte) {
+                std::fprintf(stderr, "fast update changed unexpected byte row=%lld byte=%d got=%u expected=%u\n",
+                        (long long) row, byte, (unsigned) after[off].qs[byte], (unsigned) expected_byte);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+static bool run_fast_update_fallback_case() {
+    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
+    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE", "1");
+
+    ggml_init_params params = {
+        /* .mem_size   = */ 32 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    const int64_t head_dim = 16;
+    const int64_t kv_size = 16;
+    ggml_tensor * v_cache = ggml_new_tensor_3d(ctx, GGML_TYPE_NVFP4, kv_size, head_dim, 1);
+    ggml_tensor * v_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head_dim, 1);
+
+    ggml_tensor * v_view = ggml_reshape_2d(ctx, v_cache, 16, head_dim * kv_size / 16);
+    ggml_tensor * v_cur_init_3d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, 1, 16);
+    ggml_tensor * idx_init = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, head_dim);
+    ggml_tensor * set_init = ggml_set_rows(ctx, v_view,
+            ggml_reshape_2d(ctx, ggml_reshape_2d(ctx, v_cur_init_3d, head_dim, 16), 16, head_dim),
+            idx_init);
+    ggml_tensor_set_nvfp4_scale(set_init, v_scale);
+
+    ggml_tensor * v_cur_patch_3d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, 1, 1);
+    ggml_tensor * idx_patch = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, head_dim / 16);
+    ggml_tensor * set_patch = ggml_set_rows(ctx, v_view,
+            ggml_reshape_2d(ctx, ggml_reshape_2d(ctx, v_cur_patch_3d, head_dim, 1), 16, head_dim / 16),
+            idx_patch);
+    ggml_tensor_set_nvfp4_scale(set_patch, v_scale);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(gf, set_init);
+    ggml_cgraph * gf_patch = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(gf_patch, set_patch);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<int64_t> idx_data((size_t) head_dim);
+    for (int64_t token = 0; token < 16; ++token) {
+        for (int64_t j = 0; j < head_dim; j += 16) {
+            idx_data[(size_t) token * (size_t) (head_dim / 16) + (size_t) j / 16] = j * kv_size + token;
+        }
+    }
+
+    std::vector<float> initial((size_t) head_dim * 16);
+    for (int64_t token = 0; token < 16; ++token) {
+        for (int64_t row = 0; row < head_dim; ++row) {
+            initial[(size_t) token * (size_t) head_dim + (size_t) row] = 0.1f + 0.02f * (float) token + 0.01f * (float) row;
+        }
+    }
+
+    if (!compute_store_graph(backend, gf, v_cur_init_3d, idx_init, initial, idx_data)) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<block_nvfp4> before((size_t) head_dim);
+    std::vector<float> scale_before((size_t) head_dim);
+    ggml_backend_tensor_get(v_cache, before.data(), 0, before.size() * sizeof(block_nvfp4));
+    ggml_backend_tensor_get(v_scale, scale_before.data(), 0, scale_before.size() * sizeof(float));
+
+    std::vector<float> patch((size_t) head_dim, 0.05f);
+    patch[4] = 8.0f;
+    std::vector<int64_t> idx_patch_data(1, 6);
+    if (!compute_store_graph(backend, gf_patch, v_cur_patch_3d, idx_patch, patch, idx_patch_data)) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<block_nvfp4> after((size_t) head_dim);
+    std::vector<float> scale_after((size_t) head_dim);
+    ggml_backend_tensor_get(v_cache, after.data(), 0, after.size() * sizeof(block_nvfp4));
+    ggml_backend_tensor_get(v_scale, scale_after.data(), 0, scale_after.size() * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+
+    if (scale_after[4] == scale_before[4]) {
+        std::fprintf(stderr, "fast update did not fall back when new value exceeded current block amax\n");
+        return false;
+    }
+
+    float ref_tile[16];
+    const float before_global = scale_before[4] > 0.0f ? 1.0f / scale_before[4] : 0.0f;
+    dequantize_row_nvfp4(&before[4], ref_tile, 16, before_global);
+    ref_tile[6] = patch[4];
+    float amax = 0.0f;
+    for (float v : ref_tile) {
+        amax = fmaxf(amax, fabsf(v));
+    }
+    const float ref_global = amax > 0.0f ? (NVFP4_FP4_MAX * 224.0f / amax) : 0.0f;
+    block_nvfp4 ref_q;
+    quantize_row_nvfp4_ref(ref_tile, &ref_q, 16, ref_global);
+    const float ref_input_scale = ref_global > 0.0f ? 1.0f / ref_global : 0.0f;
+
+    if (after[4].e != ref_q.e || fabsf(scale_after[4] - ref_input_scale) > 1e-7f ||
+            std::memcmp(after[4].qs, ref_q.qs, sizeof(ref_q.qs)) != 0) {
+        std::fprintf(stderr, "fallback re-quant mismatch row=4 got_e=%u ref_e=%u got_scale=%g ref_scale=%g\n",
+                (unsigned) after[4].e, (unsigned) ref_q.e, scale_after[4], ref_input_scale);
+        return false;
+    }
+
+    return true;
+}
+
+static bool run_fast_update_benchmark() {
+    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
+
+    ggml_init_params params = {
+        /* .mem_size   = */ 32 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    const int64_t head_dim = 1024;
+    const int64_t kv_size = 16;
+    ggml_tensor * v_cache = ggml_new_tensor_3d(ctx, GGML_TYPE_NVFP4, kv_size, head_dim, 1);
+    ggml_tensor * v_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head_dim, 1);
+
+    ggml_tensor * v_view = ggml_reshape_2d(ctx, v_cache, 16, head_dim * kv_size / 16);
+    ggml_tensor * v_cur_init_3d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, 1, 16);
+    ggml_tensor * idx_init = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, head_dim);
+    ggml_tensor * set_init = ggml_set_rows(ctx, v_view,
+            ggml_reshape_2d(ctx, ggml_reshape_2d(ctx, v_cur_init_3d, head_dim, 16), 16, head_dim),
+            idx_init);
+    ggml_tensor_set_nvfp4_scale(set_init, v_scale);
+
+    ggml_tensor * v_cur_patch_3d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, 1, 1);
+    ggml_tensor * idx_patch = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, head_dim / 16);
+    ggml_tensor * set_patch = ggml_set_rows(ctx, v_view,
+            ggml_reshape_2d(ctx, ggml_reshape_2d(ctx, v_cur_patch_3d, head_dim, 1), 16, head_dim / 16),
+            idx_patch);
+    ggml_tensor_set_nvfp4_scale(set_patch, v_scale);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(gf, set_init);
+    ggml_cgraph * gf_patch = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(gf_patch, set_patch);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<int64_t> idx_data((size_t) head_dim / 16);
+    idx_data.resize((size_t) head_dim);
+    for (int64_t token = 0; token < 16; ++token) {
+        for (int64_t j = 0; j < head_dim; j += 16) {
+            idx_data[(size_t) token * (size_t) (head_dim / 16) + (size_t) j / 16] = j * kv_size + token;
+        }
+    }
+
+    std::vector<float> initial((size_t) head_dim * 16);
+    for (int64_t token = 0; token < 16; ++token) {
+        for (int64_t row = 0; row < head_dim; ++row) {
+            initial[(size_t) token * (size_t) head_dim + (size_t) row] = 0.2f + 0.01f * (float) (token % 7) + 0.001f * (float) (row % 13);
+        }
+    }
+    if (!compute_store_graph(backend, gf, v_cur_init_3d, idx_init, initial, idx_data)) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> patch((size_t) head_dim);
+    for (int64_t row = 0; row < head_dim; ++row) {
+        patch[(size_t) row] = 0.05f + 0.0005f * (float) (row % 11);
+    }
+    std::vector<int64_t> idx_patch_data((size_t) head_dim / 16);
+    for (int64_t j = 0; j < head_dim; j += 16) {
+        idx_patch_data[(size_t) j / 16] = j * kv_size + 3;
+    }
+
+    const int warmup = 20;
+    const int iters = 200;
+    for (int i = 0; i < warmup; ++i) {
+        if (!compute_store_graph(backend, gf_patch, v_cur_patch_3d, idx_patch, patch, idx_patch_data)) {
+            ggml_backend_buffer_free(buf);
+            ggml_backend_free(backend);
+            ggml_free(ctx);
+            return false;
+        }
+    }
+
+    cudaEvent_t start;
+    cudaEvent_t stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    for (int i = 0; i < iters; ++i) {
+        if (!compute_store_graph(backend, gf_patch, v_cur_patch_3d, idx_patch, patch, idx_patch_data)) {
+            cudaEventDestroy(start);
+            cudaEventDestroy(stop);
+            ggml_backend_buffer_free(buf);
+            ggml_backend_free(backend);
+            ggml_free(ctx);
+            return false;
+        }
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float elapsed_ms = 0.0f;
+    cudaEventElapsedTime(&elapsed_ms, start, stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    const char * fast_env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE");
+    std::printf("test-vcache-nvfp4-store: benchmark fast_update=%s %.3f us/iter (%d iters, head_dim=%lld)\n",
+            fast_env != nullptr ? fast_env : "(unset)",
+            elapsed_ms * 1000.0f / (float) iters, iters, (long long) head_dim);
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+
+    return true;
+}
+
+int main(int argc, char ** argv) {
+    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
+
     int dev_count = 0;
     const cudaError_t dev_err = cudaGetDeviceCount(&dev_count);
     if (dev_err != cudaSuccess || dev_count <= 0) {
@@ -154,7 +620,22 @@ int main() {
         return 0;
     }
 
+    if (argc > 1 && std::strcmp(argv[1], "--benchmark-only") == 0) {
+        return run_fast_update_benchmark() ? 0 : 1;
+    }
+
+    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE", "1");
+
     if (!run_store_case(128, 17)) {
+        return 1;
+    }
+    if (!run_fast_update_patch_case()) {
+        return 1;
+    }
+    if (!run_fast_update_fallback_case()) {
+        return 1;
+    }
+    if (!run_fast_update_benchmark()) {
         return 1;
     }
 
