@@ -122,6 +122,47 @@ For each PPL experiment, save the baseline run script, experiment run script,
 prompt/input reference, raw logs, parsed PPL metrics, and comparison summary in
 the experiment folder.
 
+## llama-bench Baseline
+
+Use this baseline for local `llama-bench` throughput measurements:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+GGML_CUDA_NVFP4_NATIVE=1 \
+  "${ROOT_DIR}/build_cuda/bin/llama-bench" \
+    -m /home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf \
+    --cache-type-k f16 \
+    --cache-type-v f16 \
+    --n-gpu-layers 40 \
+    --batch-size 2048 \
+    --ubatch-size 512 \
+    -t 32 \
+    -p 512 \
+    -n 128
+```
+
+Fixed `llama-bench` arguments:
+
+- Binary default: `${ROOT_DIR}/build_cuda/bin/llama-bench`
+- Model: `/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf`
+- K cache type: `--cache-type-k f16`
+- V cache type: `--cache-type-v f16`
+- GPU layers: `--n-gpu-layers 40`
+- Batch size: `--batch-size 2048`
+- UBatch size: `--ubatch-size 512`
+- Threads: `-t 32`
+- Prompt tokens: `-p 512`
+- Generation tokens: `-n 128`
+
+Fixed `llama-bench` environment:
+
+- `CUDA_VISIBLE_DEVICES=0`
+- `GGML_CUDA_NVFP4_NATIVE=1`
+
+For each benchmark experiment, save the baseline run script, experiment run
+script, raw benchmark output, parsed throughput metrics, and comparison summary
+in the experiment folder.
+
 ## Comparison Rule
 
 Direct comparisons are valid only when the baseline run and experiment run use
