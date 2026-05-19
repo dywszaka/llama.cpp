@@ -12,9 +12,94 @@
 #include <cstring>
 #include <vector>
 
+static constexpr int8_t kvalues_nvfp4_test[16] = {
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12,
+};
+
+static float e4m3_to_f32(uint8_t x) {
+    const uint32_t sign     = (uint32_t) (x & 0x80) << 24;
+    const uint32_t exponent = (x >> 3) & 0x0F;
+    const uint32_t mantissa = x & 0x07;
+
+    uint32_t bits = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            const int leading = __builtin_clz(mantissa);
+            const int shift = leading - 29;
+            const uint32_t man = mantissa << shift;
+            const uint32_t exp = 127 - 6 - shift;
+            bits = sign | (exp << 23) | (man & 0x7) << 20;
+        }
+    } else if (exponent == 0x0F) {
+        bits = mantissa == 0x7 ? (sign | 0x7F800000 | (1u << 22)) : (sign | 0x43E00000);
+    } else {
+        const uint32_t exp = (exponent - 7 + 127) << 23;
+        const uint32_t man = mantissa << (23 - 3);
+        bits = sign | exp | man;
+    }
+
+    float result = 0.0f;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+static uint8_t best_index_e4m3_test(float x) {
+    uint8_t best_index = 0;
+    float best_err = INFINITY;
+    for (int i = 0; i < 256; ++i) {
+        const float v = e4m3_to_f32((uint8_t) i);
+        if (!std::isfinite(v)) {
+            continue;
+        }
+        const float err = fabsf(v - x);
+        if (err < best_err) {
+            best_err = err;
+            best_index = (uint8_t) i;
+        }
+    }
+    return best_index;
+}
+
+static float lt_scale_roundtrip(float x) {
+    return e4m3_to_f32(best_index_e4m3_test(x));
+}
+
 static bool fp4_p_env_enabled() {
     const char * env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV");
     return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+static void dequantize_v_blocks_like_lt(
+        const std::vector<block_nvfp4> & v_q,
+        const std::vector<float> & v_s,
+        std::vector<float> & v_deq,
+        int64_t rows,
+        int64_t kv_size,
+        int64_t blocks) {
+    for (int64_t row = 0; row < rows; ++row) {
+        for (int64_t b = 0; b < blocks; ++b) {
+            const block_nvfp4 & block = v_q[(size_t) row * (size_t) blocks + (size_t) b];
+            const float scale = lt_scale_roundtrip(e4m3_to_f32(block.e) * v_s[(size_t) row * (size_t) blocks + (size_t) b]);
+            for (int j = 0; j < QK_NVFP4 / 2; ++j) {
+                const uint8_t packed = block.qs[j];
+                v_deq[(size_t) row * (size_t) kv_size + (size_t) b * QK_NVFP4 + (size_t) 2 * j + 0] =
+                    0.5f * scale * (float) kvalues_nvfp4_test[packed & 0x0F];
+                v_deq[(size_t) row * (size_t) kv_size + (size_t) b * QK_NVFP4 + (size_t) 2 * j + 1] =
+                    0.5f * scale * (float) kvalues_nvfp4_test[packed >> 4];
+            }
+        }
+    }
+}
+
+static bool fp4_p_lt_env_enabled() {
+    const char * env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV_LT");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+static bool fp4_p_lt_expected_for_kv_size(int64_t kv_size) {
+    return fp4_p_lt_env_enabled() && kv_size >= 512;
 }
 
 static bool run_case() {
@@ -296,6 +381,7 @@ static bool run_real_vcache_view_case(int64_t kv_size) {
     std::vector<block_nvfp4> v_q((size_t) n_embd * (size_t) blocks);
     std::vector<float> v_s((size_t) n_embd * (size_t) blocks);
     std::vector<float> v_deq((size_t) n_embd * (size_t) kv_size);
+    std::vector<float> v_deq_lt((size_t) n_embd * (size_t) kv_size);
     for (int64_t h = 0; h < kv_heads; ++h) {
         for (int64_t d = 0; d < head_dim; ++d) {
             const int64_t row = h * head_dim + d;
@@ -322,6 +408,7 @@ static bool run_real_vcache_view_case(int64_t kv_size) {
             }
         }
     }
+    dequantize_v_blocks_like_lt(v_q, v_s, v_deq_lt, n_embd, kv_size, blocks);
 
     std::vector<float> p_host((size_t) kv_size * (size_t) cols * (size_t) q_heads);
     for (int64_t h = 0; h < q_heads; ++h) {
@@ -375,7 +462,8 @@ static bool run_real_vcache_view_case(int64_t kv_size) {
                 float ref = 0.0f;
                 for (int64_t i = 0; i < kv_size; ++i) {
                     const size_t p_off = (size_t) h * (size_t) cols * (size_t) kv_size + (size_t) c * (size_t) kv_size + (size_t) i;
-                    ref += v_deq[(size_t) row * (size_t) kv_size + (size_t) i] * p_ref[p_off];
+                    const std::vector<float> & v_ref_deq = fp4_p_lt_expected_for_kv_size(kv_size) ? v_deq_lt : v_deq;
+                    ref += v_ref_deq[(size_t) row * (size_t) kv_size + (size_t) i] * p_ref[p_off];
                 }
                 const size_t out_off = (size_t) h * (size_t) cols * (size_t) head_dim + (size_t) c * (size_t) head_dim + (size_t) d;
                 const float got = out_host[out_off];

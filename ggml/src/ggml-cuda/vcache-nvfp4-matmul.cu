@@ -1,5 +1,7 @@
 #include "vcache-nvfp4-matmul.cuh"
 
+#include <cuda_fp8.h>
+
 #include <atomic>
 #include <cstdlib>
 
@@ -8,12 +10,59 @@ static constexpr float GGML_CUDA_VCACHE_NVFP4_E4M3_HALF_MAX = 224.0f;
 static constexpr float GGML_CUDA_VCACHE_NVFP4_GLOBAL_SCALE_MAX =
         GGML_CUDA_VCACHE_NVFP4_FP4_MAX * GGML_CUDA_VCACHE_NVFP4_E4M3_HALF_MAX;
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_P_AMAX_PREPASS_MIN_KV = 2048;
+static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_MIN_KV = 512;
 static constexpr const char * GGML_CUDA_VCACHE_NVFP4_FP4_PV_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV";
+static constexpr const char * GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV_LT";
+
+#if defined(CUBLAS_VERSION)
+#define GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
+#elif defined(CUBLAS_VER_MAJOR)
+#define GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VER_MAJOR >= 13)
+#else
+#define GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS 0
+#endif
+
+static inline int64_t ggml_cuda_vcache_nvfp4_pad_i64(int64_t x, int64_t a) {
+    GGML_ASSERT(a > 0);
+    return ((x + a - 1) / a) * a;
+}
+
+static __host__ __device__ __forceinline__ int64_t ggml_cuda_vcache_nvfp4_scale_tiled_index(
+        int64_t outer,
+        int64_t inner,
+        int64_t n_inner_padded) {
+    const int64_t outer_tile = outer / 128;
+    const int64_t outer_in_tile = outer % 128;
+    const int64_t inner_tile = inner / 4;
+    const int64_t inner_in_tile = inner % 4;
+
+    const int64_t tiles_per_outer_block = n_inner_padded / 4;
+    const int64_t tile_base = (outer_tile * tiles_per_outer_block + inner_tile) * 512;
+    const int64_t tile_offset = (outer_in_tile % 32) * 16 + (outer_in_tile / 32) * 4 + inner_in_tile;
+    return tile_base + tile_offset;
+}
+
+static __device__ __forceinline__ uint8_t ggml_cuda_vcache_nvfp4_lt_scale_from_f32(float scale_f) {
+    if (!(scale_f > 0.0f) || !isfinite(scale_f)) {
+        return 0;
+    }
+
+    return (uint8_t) __nv_cvt_float_to_fp8(scale_f, __NV_SATFINITE, __NV_E4M3);
+}
 
 static bool ggml_cuda_vcache_nvfp4_fp4_pv_enabled() {
     static int cached = -1;
     if (cached < 0) {
         const char * env = getenv(GGML_CUDA_VCACHE_NVFP4_FP4_PV_ENV);
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static bool ggml_cuda_vcache_nvfp4_fp4_pv_lt_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv(GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_ENV);
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
     }
     return cached != 0;
@@ -33,6 +82,22 @@ static void ggml_cuda_vcache_nvfp4_log_fp4_pv_once(bool enabled) {
             env != nullptr ? env : "(unset)",
             enabled ? "enabled, CUDA NVFP4 V-cache p*v quantizes P to dynamic NVFP4 before dot"
                     : "disabled, CUDA NVFP4 V-cache p*v uses F32 P");
+}
+
+static void ggml_cuda_vcache_nvfp4_log_fp4_pv_lt_once(bool enabled) {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    const char * env = getenv(GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_ENV);
+    GGML_LOG_INFO(
+            "%s: %s=%s -> %s\n",
+            __func__,
+            GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_ENV,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, CUDA NVFP4 V-cache p*v uses cuBLASLt Tensor Core FP4 when available"
+                    : "disabled, CUDA NVFP4 V-cache p*v uses custom CUDA dot kernel");
 }
 
 static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_vcache(float x) {
@@ -405,6 +470,368 @@ static __global__ void k_vcache_nvfp4_matmul_fp4_p_4d(
     }
 }
 
+#if GGML_CUDA_HAS_CUBLASLT
+static __global__ void k_stage_vcache_nvfp4_v_for_lt(
+        const block_nvfp4 * __restrict__ v_data,
+        const float * __restrict__ v_scale,
+        uint8_t * __restrict__ out_data,
+        uint8_t * __restrict__ out_scale,
+        int64_t kv_size,
+        int64_t rows,
+        int64_t kv_head,
+        int64_t kv_stream,
+        int64_t v_nb0,
+        int64_t v_nb1,
+        int64_t v_nb2,
+        int64_t v_nb3,
+        int64_t scale_nb0,
+        int64_t scale_row_nb,
+        int64_t scale_head_nb,
+        int64_t scale_stream_nb,
+        int64_t row_data_bytes,
+        int64_t scale_inner_padded) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t n_blocks = kv_size / QK_NVFP4;
+    const int64_t total = rows * n_blocks;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t row = idx / n_blocks;
+    const int64_t block = idx - row * n_blocks;
+    const char * v_base = (const char *) v_data + row * v_nb1 + kv_head * v_nb2 + kv_stream * v_nb3;
+    const char * scale_base = (const char *) v_scale + row * scale_row_nb + kv_head * scale_head_nb + kv_stream * scale_stream_nb;
+
+    const block_nvfp4 vb = *(const block_nvfp4 *) (v_base + block * v_nb0);
+    uint8_t * data_dst = out_data + row * row_data_bytes + block * (QK_NVFP4 / 2);
+#pragma unroll
+    for (int i = 0; i < QK_NVFP4 / 2; ++i) {
+        data_dst[i] = vb.qs[i];
+    }
+
+    const float block_scale = ggml_cuda_e4m3_to_fp32(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
+    const int64_t scale_idx = ggml_cuda_vcache_nvfp4_scale_tiled_index(row, block, scale_inner_padded);
+    out_scale[scale_idx] = ggml_cuda_vcache_nvfp4_lt_scale_from_f32(block_scale);
+}
+
+static __global__ void k_stage_vcache_nvfp4_p_for_lt(
+        const block_nvfp4 * __restrict__ p_q,
+        uint8_t * __restrict__ out_data,
+        uint8_t * __restrict__ out_scale,
+        int64_t kv_size,
+        int64_t cols,
+        int64_t q_head,
+        int64_t q_stream,
+        int64_t q_heads,
+        int64_t row_data_bytes,
+        int64_t scale_inner_padded) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t n_blocks = kv_size / QK_NVFP4;
+    const int64_t total = cols * n_blocks;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t col = idx / n_blocks;
+    const int64_t block = idx - col * n_blocks;
+    const int64_t p_row = (q_stream * q_heads + q_head) * cols + col;
+    const block_nvfp4 pb = p_q[p_row * n_blocks + block];
+
+    uint8_t * data_dst = out_data + col * row_data_bytes + block * (QK_NVFP4 / 2);
+#pragma unroll
+    for (int i = 0; i < QK_NVFP4 / 2; ++i) {
+        data_dst[i] = pb.qs[i];
+    }
+
+    const float block_scale = ggml_cuda_e4m3_to_fp32(pb.e);
+    const int64_t scale_idx = ggml_cuda_vcache_nvfp4_scale_tiled_index(col, block, scale_inner_padded);
+    out_scale[scale_idx] = ggml_cuda_vcache_nvfp4_lt_scale_from_f32(block_scale);
+}
+
+static __global__ void k_store_vcache_nvfp4_lt_all_results(
+        const float * __restrict__ lt_data,
+        const float * __restrict__ p_scale,
+        float * __restrict__ dst_data,
+        int64_t rows,
+        int64_t cols,
+        int64_t lt_cols,
+        int64_t q_heads,
+        int64_t q_streams,
+        int64_t dst_nb1,
+        int64_t dst_nb2,
+        int64_t dst_nb3) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t elems_per_slice = rows * cols;
+    const int64_t slices = q_heads * q_streams;
+    const int64_t total = elems_per_slice * slices;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t slice = idx / elems_per_slice;
+    const int64_t rem = idx - slice * elems_per_slice;
+    const int64_t col = rem / rows;
+    const int64_t row = rem - col * rows;
+    const int64_t q_head = slice % q_heads;
+    const int64_t q_stream = slice / q_heads;
+    const int64_t p_row = slice * cols + col;
+    const size_t lt_off = ((size_t) slice * (size_t) lt_cols + (size_t) col) * (size_t) rows + (size_t) row;
+    const float v = lt_data[lt_off] * p_scale[p_row];
+    char * dst_ptr = (char *) dst_data + row * sizeof(float) + col * dst_nb1 + q_head * dst_nb2 + q_stream * dst_nb3;
+    *(float *) dst_ptr = v;
+}
+
+static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
+        ggml_backend_cuda_context & ctx,
+        const block_nvfp4 * v_data,
+        const float * v_scale,
+        const block_nvfp4 * p_q,
+        const float * p_scale,
+        float * dst_data,
+        int64_t kv_size,
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_heads,
+        int64_t q_heads,
+        int64_t kv_streams,
+        int64_t q_streams,
+        int64_t v_nb0,
+        int64_t v_nb1,
+        int64_t v_nb2,
+        int64_t v_nb3,
+        int64_t scale_nb0,
+        int64_t scale_row_nb,
+        int64_t scale_head_nb,
+        int64_t scale_stream_nb,
+        int64_t dst_nb1,
+        int64_t dst_nb2,
+        int64_t dst_nb3,
+        int64_t r2,
+        int64_t r3) {
+#if GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS
+    if (kv_size < GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_MIN_KV ||
+            kv_size % QK_NVFP4 != 0 || rows <= 0 || cols <= 0 ||
+            kv_heads <= 0 || q_heads <= 0 || kv_streams <= 0 || q_streams <= 0) {
+        return false;
+    }
+
+    cudaStream_t stream = ctx.stream();
+    const int64_t n_blocks = kv_size / QK_NVFP4;
+    const int64_t lt_cols = (cols + 15) & ~15LL;
+    const int64_t row_data_bytes = kv_size / 2;
+    const int64_t scale_inner_padded = ggml_cuda_vcache_nvfp4_pad_i64(n_blocks, 4);
+    const int64_t a_scale_outer_padded = ggml_cuda_vcache_nvfp4_pad_i64(rows, 128);
+    const int64_t b_scale_outer_padded = ggml_cuda_vcache_nvfp4_pad_i64(lt_cols, 128);
+    const int64_t a_data_nbytes = rows * row_data_bytes;
+    const int64_t b_data_nbytes = lt_cols * row_data_bytes;
+    const int64_t a_scale_nbytes = a_scale_outer_padded * scale_inner_padded;
+    const int64_t b_scale_nbytes = b_scale_outer_padded * scale_inner_padded;
+
+    ggml_cuda_pool_alloc<uint8_t> a_data(ctx.pool(), (size_t) a_data_nbytes);
+    ggml_cuda_pool_alloc<uint8_t> a_scale(ctx.pool(), (size_t) a_scale_nbytes);
+    ggml_cuda_pool_alloc<uint8_t> b_data(ctx.pool(), (size_t) b_data_nbytes);
+    ggml_cuda_pool_alloc<uint8_t> b_scale(ctx.pool(), (size_t) b_scale_nbytes);
+    const int64_t lt_slices = q_heads * q_streams;
+    ggml_cuda_pool_alloc<float> lt_dst(ctx.pool(), (size_t) rows * (size_t) lt_cols * (size_t) lt_slices);
+
+    cublasLtMatmulDesc_t op_desc = nullptr;
+    cublasLtMatrixLayout_t a_desc = nullptr;
+    cublasLtMatrixLayout_t b_desc = nullptr;
+    cublasLtMatrixLayout_t c_desc = nullptr;
+    const char * stage = "matmul_desc_create";
+    cublasStatus_t st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cudaDataType_t scale_type = CUDA_R_32F;
+        stage = "matmul_desc_set_scale_type";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_SCALE_TYPE, &scale_type, sizeof(scale_type));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasOperation_t op_t = CUBLAS_OP_T;
+        stage = "matmul_desc_set_transa";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_t, sizeof(op_t));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasOperation_t op_n = CUBLAS_OP_N;
+        stage = "matmul_desc_set_transb";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+        stage = "matmul_desc_set_a_scale_mode";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode, sizeof(scale_mode));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+        stage = "matmul_desc_set_b_scale_mode";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode, sizeof(scale_mode));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const void * a_scale_ptr = a_scale.get();
+        stage = "matmul_desc_set_a_scale_ptr";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_ptr, sizeof(a_scale_ptr));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const void * b_scale_ptr = b_scale.get();
+        stage = "matmul_desc_set_b_scale_ptr";
+        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        stage = "layout_create_a";
+        st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) kv_size, (uint64_t) rows, (int64_t) kv_size);
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        stage = "layout_set_order_a";
+        st = cublasLtMatrixLayoutSetAttribute(a_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        stage = "layout_create_b";
+        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) kv_size, (uint64_t) lt_cols, (int64_t) kv_size);
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        stage = "layout_set_order_b";
+        st = cublasLtMatrixLayoutSetAttribute(b_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        stage = "layout_create_c";
+        st = cublasLtMatrixLayoutCreate(&c_desc, CUDA_R_32F, (uint64_t) rows, (uint64_t) lt_cols, (int64_t) rows);
+    }
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+        stage = "layout_set_order_c";
+        st = cublasLtMatrixLayoutSetAttribute(c_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    }
+
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const int block_size = 256;
+        for (int64_t q_stream = 0; q_stream < q_streams && st == CUBLAS_STATUS_SUCCESS; ++q_stream) {
+            const int64_t kv_stream = q_stream / r3;
+            for (int64_t q_head = 0; q_head < q_heads && st == CUBLAS_STATUS_SUCCESS; ++q_head) {
+                const int64_t kv_head = q_head / r2;
+                CUDA_CHECK(cudaMemsetAsync(a_data.get(), 0, (size_t) a_data_nbytes, stream));
+                CUDA_CHECK(cudaMemsetAsync(a_scale.get(), 0, (size_t) a_scale_nbytes, stream));
+                CUDA_CHECK(cudaMemsetAsync(b_data.get(), 0, (size_t) b_data_nbytes, stream));
+                CUDA_CHECK(cudaMemsetAsync(b_scale.get(), 0, (size_t) b_scale_nbytes, stream));
+
+                const int a_grid = (int) ((rows * n_blocks + block_size - 1) / block_size);
+                k_stage_vcache_nvfp4_v_for_lt<<<a_grid, block_size, 0, stream>>>(
+                        v_data, v_scale, a_data.get(), a_scale.get(),
+                        kv_size, rows, kv_head, kv_stream,
+                        v_nb0, v_nb1, v_nb2, v_nb3,
+                        scale_nb0, scale_row_nb, scale_head_nb, scale_stream_nb,
+                        row_data_bytes, scale_inner_padded);
+                CUDA_CHECK(cudaGetLastError());
+
+                const int b_grid = (int) ((cols * n_blocks + block_size - 1) / block_size);
+                k_stage_vcache_nvfp4_p_for_lt<<<b_grid, block_size, 0, stream>>>(
+                        p_q, b_data.get(), b_scale.get(),
+                        kv_size, cols, q_head, q_stream, q_heads,
+                        row_data_bytes, scale_inner_padded);
+                CUDA_CHECK(cudaGetLastError());
+
+                const float alpha = 1.0f;
+                const float beta = 0.0f;
+                stage = "matmul";
+                st = cublasLtMatmul(
+                        ctx.cublaslt_handle(),
+                        op_desc,
+                        &alpha,
+                        a_data.get(), a_desc,
+                        b_data.get(), b_desc,
+                        &beta,
+                        lt_dst.get() + (size_t) (q_stream * q_heads + q_head) * (size_t) rows * (size_t) lt_cols, c_desc,
+                        lt_dst.get() + (size_t) (q_stream * q_heads + q_head) * (size_t) rows * (size_t) lt_cols, c_desc,
+                        nullptr,
+                        nullptr, 0,
+                        stream);
+            }
+        }
+    }
+
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const int block_size = 256;
+        const int64_t total = rows * cols * lt_slices;
+        const int grid = (int) ((total + block_size - 1) / block_size);
+        k_store_vcache_nvfp4_lt_all_results<<<grid, block_size, 0, stream>>>(
+                lt_dst.get(), p_scale, dst_data, rows, cols, lt_cols, q_heads, q_streams,
+                dst_nb1, dst_nb2, dst_nb3);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    if (c_desc != nullptr) {
+        cublasLtMatrixLayoutDestroy(c_desc);
+    }
+    if (b_desc != nullptr) {
+        cublasLtMatrixLayoutDestroy(b_desc);
+    }
+    if (a_desc != nullptr) {
+        cublasLtMatrixLayoutDestroy(a_desc);
+    }
+    if (op_desc != nullptr) {
+        cublasLtMatmulDescDestroy(op_desc);
+    }
+
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        static std::atomic<bool> logged(false);
+        if (!logged.exchange(true)) {
+            GGML_LOG_WARN(
+                    "%s: cuBLASLt FP4 P*V path failed at %s status=%d (%s); falling back to custom CUDA kernel\n",
+                    __func__, stage, (int) st, cublas_get_error_str(st));
+        }
+        return false;
+    }
+
+    static std::atomic<bool> logged_success(false);
+    if (!logged_success.exchange(true)) {
+        GGML_LOG_INFO(
+                "%s: cuBLASLt FP4 P*V path active rows=%lld cols=%lld padded_cols=%lld kv_size=%lld q_heads=%lld q_streams=%lld\n",
+                __func__,
+                (long long) rows,
+                (long long) cols,
+                (long long) lt_cols,
+                (long long) kv_size,
+                (long long) q_heads,
+                (long long) q_streams);
+    }
+
+    return true;
+#else
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(v_data);
+    GGML_UNUSED(v_scale);
+    GGML_UNUSED(p_q);
+    GGML_UNUSED(p_scale);
+    GGML_UNUSED(dst_data);
+    GGML_UNUSED(kv_size);
+    GGML_UNUSED(rows);
+    GGML_UNUSED(cols);
+    GGML_UNUSED(kv_heads);
+    GGML_UNUSED(q_heads);
+    GGML_UNUSED(kv_streams);
+    GGML_UNUSED(q_streams);
+    GGML_UNUSED(v_nb0);
+    GGML_UNUSED(v_nb1);
+    GGML_UNUSED(v_nb2);
+    GGML_UNUSED(v_nb3);
+    GGML_UNUSED(scale_nb0);
+    GGML_UNUSED(scale_row_nb);
+    GGML_UNUSED(scale_head_nb);
+    GGML_UNUSED(scale_stream_nb);
+    GGML_UNUSED(dst_nb1);
+    GGML_UNUSED(dst_nb2);
+    GGML_UNUSED(dst_nb3);
+    GGML_UNUSED(r2);
+    GGML_UNUSED(r3);
+    static std::atomic<bool> logged(false);
+    if (!logged.exchange(true)) {
+        GGML_LOG_WARN("%s: cuBLASLt FP4 scale-channel attrs unavailable; falling back to custom CUDA kernel\n", __func__);
+    }
+    return false;
+#endif
+}
+#endif
+
 bool ggml_cuda_mul_mat_vcache_nvfp4(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,
@@ -464,6 +891,8 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
 
     const bool fp4_p_enabled = ggml_cuda_vcache_nvfp4_fp4_pv_enabled();
     ggml_cuda_vcache_nvfp4_log_fp4_pv_once(fp4_p_enabled);
+    const bool fp4_p_lt_enabled = fp4_p_enabled && ggml_cuda_vcache_nvfp4_fp4_pv_lt_enabled();
+    ggml_cuda_vcache_nvfp4_log_fp4_pv_lt_once(fp4_p_lt_enabled);
 
     const dim3 grid((uint32_t) rows, (uint32_t) cols, (uint32_t) (q_heads * q_streams));
     if (fp4_p_enabled && kv_size % QK_NVFP4 == 0) {
@@ -503,6 +932,39 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
                 src1->nb[2],
                 src1->nb[3]);
         CUDA_CHECK(cudaGetLastError());
+
+#if GGML_CUDA_HAS_CUBLASLT
+        if (fp4_p_lt_enabled &&
+                ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
+                    ctx,
+                    (const block_nvfp4 *) src0->data,
+                    (const float *) scale->data,
+                    p_q.get(),
+                    p_scale.get(),
+                    (float *) dst->data,
+                    kv_size,
+                    rows,
+                    cols,
+                    kv_heads,
+                    q_heads,
+                    kv_streams,
+                    q_streams,
+                    src0->nb[0],
+                    src0->nb[1],
+                    src0->nb[2],
+                    src0->nb[3],
+                    scale->nb[0],
+                    scale_row_nb,
+                    scale_head_nb,
+                    scale_stream_nb,
+                    dst->nb[1],
+                    dst->nb[2],
+                    dst->nb[3],
+                    r2,
+                    r3)) {
+            return true;
+        }
+#endif
 
         int fp4_block_threads = 16;
         while (fp4_block_threads < n_blocks && fp4_block_threads < 256) {
