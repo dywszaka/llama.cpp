@@ -25,6 +25,17 @@
 - Do not record temporary build directories, one-off validation results, or old commit lists here.
 - If a path or runtime description changes, update the relevant map below in the same commit as the code change.
 
+## Experiment Run Records
+- 每次运行 PPL 实验或用 `llama-server` 启动验证时，都必须在 `experiments/` 下新建一个实验文件夹。
+  - 每个实验或同一组验证 run 使用一个独立文件夹，相关产物都放在该文件夹内。
+  - 记录本次实验实际使用的运行脚本或启动脚本。
+  - `llama-server` 验证需要记录请求数据、请求返回和验证结果。
+  - PPL 实验需要记录运行脚本、输入/config 引用、原始输出日志和汇总后的验证结果。
+- 新实验脚本必须参考 `experiments/EXPERI.md` 中的 baseline 参数。
+  - 只替换实验明确需要变化的参数。
+  - 模型路径、prompt/request 数据、上下文长度、batch 参数、cache 类型、GPU layer 数、线程数、CUDA 设备和 server KV 模式默认都要与 baseline 保持一致。
+  - 如果实验必须改变某个 baseline 参数，需要在该实验文件夹内说明原因，并且不要把结果当作直接 baseline A/B 对比。
+
 ## NVFP4 Runtime Map
 - Model graph binding lives in `src/llama-model.cpp`.
   - NVFP4-specific tensors (`*_input_scale`, `*_weight_scale_2`, etc.) are defined in `src/llama-model.h`.
