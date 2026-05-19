@@ -9,13 +9,123 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cctype>
+#include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 
 //
 // llama_kv_cache_unified
 //
+
+static constexpr const char * LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE";
+static constexpr const char * LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_DEFAULT_PATH = "experiments/qwen3-8b-v-layer-absmax.json";
+static constexpr float LLAMA_NVFP4_VCACHE_FP4_MAX = 6.0f;
+static constexpr float LLAMA_NVFP4_VCACHE_E4M3_HALF_MAX = 224.0f;
+static constexpr float LLAMA_NVFP4_VCACHE_GLOBAL_SCALE_MAX = LLAMA_NVFP4_VCACHE_FP4_MAX * LLAMA_NVFP4_VCACHE_E4M3_HALF_MAX;
+
+static const char * llama_nvfp4_vcache_layer_global_scale_path() {
+    const char * env = getenv(LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_ENV);
+    if (env == nullptr || env[0] == '\0' || env[0] == '0') {
+        return nullptr;
+    }
+    if (env[0] == '1' && env[1] == '\0') {
+        return LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_DEFAULT_PATH;
+    }
+    return env;
+}
+
+static void llama_nvfp4_vcache_log_layer_global_scale_once(bool enabled, const char * path) {
+    static bool logged = false;
+    if (logged) {
+        return;
+    }
+    logged = true;
+
+    LLAMA_LOG_INFO("%s: %s=%s -> %s\n",
+            __func__,
+            LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_ENV,
+            path != nullptr ? path : "(unset)",
+            enabled ? "enabled, NVFP4 V-cache uses fixed per-layer global scale"
+                    : "disabled, NVFP4 V-cache uses per-block external scales");
+}
+
+static bool llama_nvfp4_parse_json_number_after_key(
+        const std::string & text,
+        size_t & pos,
+        const char * key,
+        double & value) {
+    const std::string needle = std::string("\"") + key + "\"";
+    pos = text.find(needle, pos);
+    if (pos == std::string::npos) {
+        return false;
+    }
+
+    pos = text.find(':', pos + needle.size());
+    if (pos == std::string::npos) {
+        return false;
+    }
+    ++pos;
+
+    while (pos < text.size() && std::isspace((unsigned char) text[pos])) {
+        ++pos;
+    }
+
+    const char * begin = text.c_str() + pos;
+    char * end = nullptr;
+    value = std::strtod(begin, &end);
+    if (end == begin) {
+        return false;
+    }
+
+    pos = (size_t) (end - text.c_str());
+    return true;
+}
+
+static std::vector<float> llama_nvfp4_vcache_load_layer_absmax(
+        const char * path,
+        uint32_t n_layer) {
+    std::ifstream file(path);
+    if (!file) {
+        throw std::runtime_error(std::string("failed to open NVFP4 V-cache layer absmax file: ") + path);
+    }
+
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    const std::string text = ss.str();
+
+    std::vector<float> result(n_layer, 0.0f);
+    std::vector<bool> seen(n_layer, false);
+    size_t pos = 0;
+    while (true) {
+        double layer_f = 0.0;
+        if (!llama_nvfp4_parse_json_number_after_key(text, pos, "layer", layer_f)) {
+            break;
+        }
+
+        double absmax_f = 0.0;
+        if (!llama_nvfp4_parse_json_number_after_key(text, pos, "absmax", absmax_f)) {
+            break;
+        }
+
+        const int layer = (int) layer_f;
+        if (layer >= 0 && (uint32_t) layer < n_layer && absmax_f > 0.0 && std::isfinite(absmax_f)) {
+            result[(size_t) layer] = (float) absmax_f;
+            seen[(size_t) layer] = true;
+        }
+    }
+
+    for (uint32_t il = 0; il < n_layer; ++il) {
+        if (!seen[il]) {
+            throw std::runtime_error("missing NVFP4 V-cache layer absmax entry for layer " + std::to_string(il));
+        }
+    }
+
+    return result;
+}
 
 llama_kv_cache_unified::llama_kv_cache_unified(
         const llama_model &  model,
@@ -40,6 +150,9 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     non_flash_fp8_e8m0 = (type_v == GGML_TYPE_FP8_E4M3_E8M0_32 ||
                           type_v == GGML_TYPE_FP8_E4M3_E8M0_16) && !v_trans;
     experimental_nvfp4_vcache = llama_vcache_nvfp4_type_supported(type_v);
+    const char * nvfp4_layer_scale_path = llama_nvfp4_vcache_layer_global_scale_path();
+    nvfp4_vcache_layer_global_scale = experimental_nvfp4_vcache && v_trans && nvfp4_layer_scale_path != nullptr;
+    llama_nvfp4_vcache_log_layer_global_scale_once(nvfp4_vcache_layer_global_scale, nvfp4_layer_scale_path);
 
     // TODO: this is temporary until we support passing reuse layer filters [KV_REUSE]
     auto n_layer_cache = hparams.n_layer;
@@ -49,6 +162,15 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     if (model.arch == LLM_ARCH_GLM4_MOE) {
         // GLM-4.5: Only process up to last layer, skip final NextN layer
         n_layer_cache = hparams.n_layer - hparams.nextn_predict_layers;
+    }
+
+    std::vector<float> nvfp4_layer_absmax;
+    if (nvfp4_vcache_layer_global_scale) {
+        nvfp4_layer_absmax = llama_nvfp4_vcache_load_layer_absmax(nvfp4_layer_scale_path, n_layer_cache);
+        nvfp4_vcache_layer_global_scales.resize(n_layer_cache, 0.0f);
+        for (uint32_t il = 0; il < n_layer_cache; ++il) {
+            nvfp4_vcache_layer_global_scales[il] = LLAMA_NVFP4_VCACHE_GLOBAL_SCALE_MAX / nvfp4_layer_absmax[(size_t) il];
+        }
     }
 
     // create a context for each buffer type
@@ -115,7 +237,7 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         const uint32_t n_embd_v_gqa = !v_trans ? hparams.n_embd_v_gqa(il) : hparams.n_embd_v_gqa_max();
         const uint32_t kv_size_v = use_experimental_nvfp4_vcache_layout() ? GGML_PAD(kv_size, 16u) : kv_size;
         const uint32_t n_v_scale = use_experimental_nvfp4_vcache_layout()
-                ? n_embd_v_gqa * (kv_size_v / 16u)
+                ? (use_nvfp4_vcache_layer_global_scale() ? 1u : n_embd_v_gqa * (kv_size_v / 16u))
                 : 0u;
 
         const char * dev_name = "CPU";
@@ -154,7 +276,7 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         }
         if (use_experimental_nvfp4_vcache_layout()) {
             v_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_v_scale, n_stream);
-            ggml_format_name(v_scale, "cache_v_gscale_l%d", il);
+            ggml_format_name(v_scale, use_nvfp4_vcache_layer_global_scale() ? "cache_v_lgscale_l%d" : "cache_v_gscale_l%d", il);
         }
 
         ggml_format_name(k, "cache_k_l%d", il);
@@ -221,6 +343,17 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         bufs.emplace_back(buf);
     }
 
+    if (use_nvfp4_vcache_layer_global_scale()) {
+        for (const auto & layer : layers) {
+            GGML_ASSERT(layer.v_scale != nullptr);
+            const float absmax = nvfp4_layer_absmax[(size_t) layer.il];
+            const float global_scale = nvfp4_vcache_layer_global_scales[(size_t) layer.il];
+            LLAMA_LOG_INFO("%s: layer %u NVFP4 V-cache global_scale=%g from absmax=%g\n",
+                    __func__, layer.il, (double) global_scale, (double) absmax);
+        }
+        init_nvfp4_vcache_layer_global_scales();
+    }
+
     {
         const size_t memory_size_k = size_k_bytes();
         const size_t memory_size_v = size_v_bytes();
@@ -257,6 +390,7 @@ void llama_kv_cache_unified::clear(bool data) {
         for (auto & buf : bufs) {
             ggml_backend_buffer_clear(buf.get(), 0);
         }
+        init_nvfp4_vcache_layer_global_scales();
     }
 }
 
@@ -1116,6 +1250,25 @@ bool llama_kv_cache_unified::use_experimental_nvfp4_vcache_layout() const {
     return experimental_nvfp4_vcache && v_trans;
 }
 
+bool llama_kv_cache_unified::use_nvfp4_vcache_layer_global_scale() const {
+    return use_experimental_nvfp4_vcache_layout() && nvfp4_vcache_layer_global_scale;
+}
+
+void llama_kv_cache_unified::init_nvfp4_vcache_layer_global_scales() {
+    if (!use_nvfp4_vcache_layer_global_scale()) {
+        return;
+    }
+
+    for (const auto & layer : layers) {
+        GGML_ASSERT(layer.v_scale != nullptr);
+        GGML_ASSERT((size_t) layer.il < nvfp4_vcache_layer_global_scales.size());
+        const float global_scale = nvfp4_vcache_layer_global_scales[(size_t) layer.il];
+        for (uint32_t s = 0; s < n_stream; ++s) {
+            ggml_backend_tensor_set(layer.v_scale_stream[s], &global_scale, 0, sizeof(float));
+        }
+    }
+}
+
 uint32_t llama_kv_cache_unified::get_v_cache_kv_padded() const {
     return use_experimental_nvfp4_vcache_layout() ? GGML_PAD(get_size(), 16u) : get_size();
 }
@@ -1210,6 +1363,18 @@ ggml_tensor * llama_kv_cache_unified::get_v(ggml_context * ctx, int32_t il, uint
     }
 
     if (use_experimental_nvfp4_vcache_layout()) {
+        if (v_scale && use_nvfp4_vcache_layer_global_scale()) {
+            ggml_tensor * res = ggml_view_4d(ctx, v,
+                        n_kv, hparams.n_head_kv(il), hparams.n_embd_head_v, ns,
+                        ggml_row_size(v->type, kv_size_v*hparams.n_embd_head_v),
+                        ggml_row_size(v->type, kv_size_v),
+                        ggml_row_size(v->type, kv_size_v*n_embd_v_gqa_phys),
+                        ggml_row_size(v->type, kv_size_v*n_embd_v_gqa_phys)*sinfo.s0);
+            ggml_tensor * scale = ggml_view_1d(ctx, v_scale, ns, (int64_t) sinfo.s0 * sizeof(float));
+            ggml_tensor_set_nvfp4_scale(res, scale);
+            return res;
+        }
+
         ggml_tensor * res = ggml_view_4d(ctx, v,
                     n_kv, hparams.n_head_kv(il), hparams.n_embd_head_v, ns,
                     ggml_row_size(v->type, kv_size_v*hparams.n_embd_head_v),
@@ -1880,7 +2045,9 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_defrag(
                 ggml_build_forward_expand(gf, ggml_cpy(ctx, view_k_scale_src, view_k_scale_dst));
             }
             if (layer.v_scale) {
-                if (use_experimental_nvfp4_vcache_layout()) {
+                if (use_nvfp4_vcache_layer_global_scale()) {
+                    // The scalar per-layer global scale is independent of cell positions.
+                } else if (use_experimental_nvfp4_vcache_layout()) {
                     const int64_t n_blk = get_v_cache_block_count();
                     const int64_t src_block = i / 16;
                     const int64_t dst_block = id / 16;
@@ -2245,6 +2412,10 @@ void llama_kv_cache_unified::state_write_data(llama_io_write_i & io, const cell_
         for (const auto & layer : layers) {
             auto * v_scale = layer.v_scale_stream[cr.strm];
             GGML_ASSERT(v_scale != nullptr);
+            if (use_nvfp4_vcache_layer_global_scale()) {
+                io.write_tensor(v_scale, 0, sizeof(float));
+                continue;
+            }
             const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(layer.il);
             for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
                 for (const auto & range : cr.data) {
@@ -2492,6 +2663,10 @@ bool llama_kv_cache_unified::state_read_data(llama_io_read_i & io, uint32_t strm
             if (layer.v_scale == nullptr) {
                 LLAMA_LOG_ERROR("%s: missing value scale sidecar for layer %d\n", __func__, layer.il);
                 return false;
+            }
+            if (use_nvfp4_vcache_layer_global_scale()) {
+                ggml_backend_tensor_set(layer.v_scale_stream[strm], io.read(sizeof(float)), 0, sizeof(float));
+                continue;
             }
             const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(layer.il);
             for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {

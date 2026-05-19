@@ -202,6 +202,16 @@ static __device__ __forceinline__ float ggml_cuda_dequantize_nvfp4_value_set_row
     return d * (float) kvalues_nvfp4[q];
 }
 
+static __device__ __forceinline__ float ggml_cuda_dequantize_nvfp4_value_set_rows_global(
+        const block_nvfp4 & block,
+        float global_scale,
+        int lane) {
+    const float d = global_scale > 0.0f ? (ggml_cuda_e4m3_to_fp32_half(block.e) / global_scale) : 0.0f;
+    const uint8_t packed = block.qs[lane / 2];
+    const uint8_t q = (lane & 1) == 0 ? (packed & 0x0F) : (packed >> 4);
+    return d * (float) kvalues_nvfp4[q];
+}
+
 static __global__ void k_set_rows_nvfp4_vcache(
         const float * __restrict__ src0,
         const int64_t * __restrict__ src1,
@@ -212,6 +222,8 @@ static __global__ void k_set_rows_nvfp4_vcache(
         int64_t kv_size_padded,
         int64_t n_blocks,
         int64_t n_row_groups,
+        int64_t rows_per_scale,
+        bool scale_is_global,
         bool fast_update) {
     const int row_local = blockIdx.x;
     const int lane = threadIdx.x;
@@ -246,7 +258,8 @@ static __global__ void k_set_rows_nvfp4_vcache(
         if (lane == 0) {
             fast_update_done = 0;
             const float value = src0[flat_group * QK_NVFP4 + row_in_group];
-            const float input_scale = scale[flat_block];
+            const float input_scale = scale_is_global ? 0.0f : scale[flat_block];
+            const float global_scale = scale_is_global ? scale[row_global / rows_per_scale] : (input_scale > 0.0f ? 1.0f / input_scale : 0.0f);
             const block_nvfp4 block = dst[flat_block];
             const float block_scale_f = ggml_cuda_e4m3_to_fp32_half(block.e);
             float current_amax_q = 0.0f;
@@ -255,12 +268,13 @@ static __global__ void k_set_rows_nvfp4_vcache(
                 current_amax_q = fmaxf(current_amax_q, fabsf((float) kvalues_nvfp4[packed & 0x0F]));
                 current_amax_q = fmaxf(current_amax_q, fabsf((float) kvalues_nvfp4[packed >> 4]));
             }
-            const float current_amax = current_amax_q * block_scale_f * input_scale;
+            const float current_amax = scale_is_global ?
+                (global_scale > 0.0f ? current_amax_q * block_scale_f / global_scale : 0.0f) :
+                current_amax_q * block_scale_f * input_scale;
 
-            if (input_scale > 0.0f && block_scale_f > 0.0f &&
-                    isfinite(input_scale) && isfinite(block_scale_f) && isfinite(value) &&
+            if ((scale_is_global ? global_scale > 0.0f : input_scale > 0.0f) && block_scale_f > 0.0f &&
+                    isfinite(scale_is_global ? global_scale : input_scale) && isfinite(block_scale_f) && isfinite(value) &&
                     fabsf(value) <= current_amax) {
-                const float global_scale = 1.0f / input_scale;
                 const float inv_scale = global_scale / block_scale_f;
                 const uint8_t q = ggml_cuda_best_index_nvfp4_set_rows(value * inv_scale);
                 const int byte = in_block / 2;
@@ -282,9 +296,13 @@ static __global__ void k_set_rows_nvfp4_vcache(
     auto load_block = [&](int64_t row_global, int64_t block_idx) {
         if (lane < QK_NVFP4) {
             const int64_t flat_block = row_global * n_blocks + block_idx;
-            const float input_scale = scale[flat_block];
             const block_nvfp4 block = dst[flat_block];
-            tile[lane] = ggml_cuda_dequantize_nvfp4_value_set_rows(block, input_scale, lane);
+            if (scale_is_global) {
+                tile[lane] = ggml_cuda_dequantize_nvfp4_value_set_rows_global(block, scale[row_global / rows_per_scale], lane);
+            } else {
+                const float input_scale = scale[flat_block];
+                tile[lane] = ggml_cuda_dequantize_nvfp4_value_set_rows(block, input_scale, lane);
+            }
         }
     };
 
@@ -302,12 +320,15 @@ static __global__ void k_set_rows_nvfp4_vcache(
         }
 
         const float amax = reduction[0];
-        const float global_scale = (amax > 0.0f && isfinite(amax)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax) : 0.0f;
+        const float global_scale = scale_is_global ? scale[row_global / rows_per_scale] :
+            ((amax > 0.0f && isfinite(amax)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax) : 0.0f);
         float block_scale_f = 0.0f;
 
         if (lane == 0) {
-            const float input_scale = (global_scale != 0.0f && isfinite(global_scale)) ? (1.0f / global_scale) : 0.0f;
-            scale[row_global * n_blocks + block_idx] = input_scale;
+            if (!scale_is_global) {
+                const float input_scale = (global_scale != 0.0f && isfinite(global_scale)) ? (1.0f / global_scale) : 0.0f;
+                scale[row_global * n_blocks + block_idx] = input_scale;
+            }
 
             const float scale_f = (global_scale != 0.0f) ? (global_scale * (amax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
             const uint8_t scale_q = ggml_cuda_best_index_e4m3_set_rows(scale_f);
@@ -528,6 +549,11 @@ static void ggml_cuda_op_set_rows_nvfp4_vcache(
     const int64_t n_row_groups = n_rows_local / QK_NVFP4;
     const int64_t n_tokens = src1->ne[0] / n_row_groups;
     const int64_t n_blocks = kv_size_padded / QK_NVFP4;
+    const int64_t n_scales = ggml_nelements(v_scale);
+    const bool scale_is_global = v_scale->ne[0] == 1 && n_scales > 0 &&
+        (v_cache->ne[2] == n_scales || n_rows_local % n_scales == 0);
+    const int64_t rows_per_scale = scale_is_global ?
+        (v_cache->ne[2] == n_scales ? n_rows_local : n_rows_local / n_scales) : 0;
     const bool fast_update = ggml_cuda_nvfp4_vcache_fast_update_enabled();
 
     GGML_ASSERT(kv_size_padded % QK_NVFP4 == 0);
@@ -551,6 +577,8 @@ static void ggml_cuda_op_set_rows_nvfp4_vcache(
                 kv_size_padded,
                 n_blocks,
                 n_row_groups,
+                rows_per_scale,
+                scale_is_global,
                 fast_update);
     }
     CUDA_CHECK(cudaGetLastError());

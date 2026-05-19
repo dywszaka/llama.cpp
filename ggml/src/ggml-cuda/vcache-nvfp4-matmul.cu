@@ -162,11 +162,21 @@ static bool ggml_cuda_match_vcache_nvfp4_scale_layout(
         int64_t & streams,
         int64_t & scale_row_nb,
         int64_t & scale_head_nb,
-        int64_t & scale_stream_nb) {
+        int64_t & scale_stream_nb,
+        bool & scale_is_global) {
     blocks = src0->ne[0] / QK_NVFP4;
     rows = src0->ne[1];
     heads = src0->ne[2];
     streams = src0->ne[3];
+    scale_is_global = false;
+
+    if (ggml_nelements(scale) == streams) {
+        scale_row_nb = 0;
+        scale_head_nb = 0;
+        scale_stream_nb = streams > 1 ? scale->nb[0] : 0;
+        scale_is_global = true;
+        return true;
+    }
 
     if (scale->ne[0] == blocks &&
         scale->ne[1] == rows &&
@@ -333,6 +343,7 @@ static __global__ void k_vcache_nvfp4_matmul_4d(
         int64_t scale_row_nb,
         int64_t scale_head_nb,
         int64_t scale_stream_nb,
+        bool scale_is_global,
         int64_t p_nb1,
         int64_t p_nb2,
         int64_t p_nb3,
@@ -354,6 +365,7 @@ static __global__ void k_vcache_nvfp4_matmul_4d(
 
     const char * v_base = (const char *) v_data + row * v_nb1 + kv_head * v_nb2 + kv_stream * v_nb3;
     const char * scale_base = (const char *) v_scale + row * scale_row_nb + kv_head * scale_head_nb + kv_stream * scale_stream_nb;
+    const float v_global_scale = scale_is_global ? *(const float *) ((const char *) v_scale + kv_stream * scale_stream_nb) : 0.0f;
 
     float thread_sum = 0.0f;
     for (int64_t lane = threadIdx.x; lane < kv_size; lane += blockDim.x) {
@@ -361,10 +373,11 @@ static __global__ void k_vcache_nvfp4_matmul_4d(
         const int64_t in_block = lane % QK_NVFP4;
 
         const block_nvfp4 * v_block_ptr = (const block_nvfp4 *) (v_base + block * v_nb0);
-        const float input_scale = *(const float *) (scale_base + block * scale_nb0);
 
         const block_nvfp4 vb = *v_block_ptr;
-        const float d = ggml_cuda_e4m3_to_fp32_half(vb.e) * input_scale;
+        const float d = scale_is_global ?
+            (v_global_scale > 0.0f ? ggml_cuda_e4m3_to_fp32_half(vb.e) / v_global_scale : 0.0f) :
+            ggml_cuda_e4m3_to_fp32_half(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
         const uint8_t packed = vb.qs[in_block / 2];
         const uint8_t q = (in_block & 1) == 0 ? (packed & 0x0F) : (packed >> 4);
         const float v = d * (float) kvalues_nvfp4[q];
@@ -412,6 +425,7 @@ static __global__ void k_vcache_nvfp4_matmul_fp4_p_4d(
         int64_t scale_row_nb,
         int64_t scale_head_nb,
         int64_t scale_stream_nb,
+        bool scale_is_global,
         int64_t dst_nb1,
         int64_t dst_nb2,
         int64_t dst_nb3,
@@ -432,6 +446,7 @@ static __global__ void k_vcache_nvfp4_matmul_fp4_p_4d(
     const int64_t p_row = (stream * q_heads + head) * cols + col;
     const char * v_base = (const char *) v_data + row * v_nb1 + kv_head * v_nb2 + kv_stream * v_nb3;
     const char * scale_base = (const char *) v_scale + row * scale_row_nb + kv_head * scale_head_nb + kv_stream * scale_stream_nb;
+    const float v_global_scale = scale_is_global ? *(const float *) ((const char *) v_scale + kv_stream * scale_stream_nb) : 0.0f;
     const block_nvfp4 * p_row_q = p_q + p_row * n_blocks;
     const float p_row_scale = p_scale[p_row];
 
@@ -440,7 +455,9 @@ static __global__ void k_vcache_nvfp4_matmul_fp4_p_4d(
         const block_nvfp4 * v_block_ptr = (const block_nvfp4 *) (v_base + block * v_nb0);
         const block_nvfp4 vb = *v_block_ptr;
         const block_nvfp4 pb = p_row_q[block];
-        const float v_d = ggml_cuda_e4m3_to_fp32_half(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
+        const float v_d = scale_is_global ?
+            (v_global_scale > 0.0f ? ggml_cuda_e4m3_to_fp32_half(vb.e) / v_global_scale : 0.0f) :
+            ggml_cuda_e4m3_to_fp32_half(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
         const float p_d = ggml_cuda_e4m3_to_fp32_half(pb.e) * p_row_scale;
         const float d = v_d * p_d;
 
@@ -488,6 +505,7 @@ static __global__ void k_stage_vcache_nvfp4_v_for_lt(
         int64_t scale_row_nb,
         int64_t scale_head_nb,
         int64_t scale_stream_nb,
+        bool scale_is_global,
         int64_t row_data_bytes,
         int64_t scale_inner_padded) {
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
@@ -501,6 +519,7 @@ static __global__ void k_stage_vcache_nvfp4_v_for_lt(
     const int64_t block = idx - row * n_blocks;
     const char * v_base = (const char *) v_data + row * v_nb1 + kv_head * v_nb2 + kv_stream * v_nb3;
     const char * scale_base = (const char *) v_scale + row * scale_row_nb + kv_head * scale_head_nb + kv_stream * scale_stream_nb;
+    const float v_global_scale = scale_is_global ? *(const float *) ((const char *) v_scale + kv_stream * scale_stream_nb) : 0.0f;
 
     const block_nvfp4 vb = *(const block_nvfp4 *) (v_base + block * v_nb0);
     uint8_t * data_dst = out_data + row * row_data_bytes + block * (QK_NVFP4 / 2);
@@ -509,7 +528,9 @@ static __global__ void k_stage_vcache_nvfp4_v_for_lt(
         data_dst[i] = vb.qs[i];
     }
 
-    const float block_scale = ggml_cuda_e4m3_to_fp32(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
+    const float block_scale = scale_is_global ?
+        (v_global_scale > 0.0f ? ggml_cuda_e4m3_to_fp32(vb.e) / v_global_scale : 0.0f) :
+        ggml_cuda_e4m3_to_fp32(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
     const int64_t scale_idx = ggml_cuda_vcache_nvfp4_scale_tiled_index(row, block, scale_inner_padded);
     out_scale[scale_idx] = ggml_cuda_vcache_nvfp4_lt_scale_from_f32(block_scale);
 }
@@ -603,6 +624,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
         int64_t scale_row_nb,
         int64_t scale_head_nb,
         int64_t scale_stream_nb,
+        bool scale_is_global,
         int64_t dst_nb1,
         int64_t dst_nb2,
         int64_t dst_nb3,
@@ -719,7 +741,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
                         v_data, v_scale, a_data.get(), a_scale.get(),
                         kv_size, rows, kv_head, kv_stream,
                         v_nb0, v_nb1, v_nb2, v_nb3,
-                        scale_nb0, scale_row_nb, scale_head_nb, scale_stream_nb,
+                        scale_nb0, scale_row_nb, scale_head_nb, scale_stream_nb, scale_is_global,
                         row_data_bytes, scale_inner_padded);
                 CUDA_CHECK(cudaGetLastError());
 
@@ -853,7 +875,8 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     int64_t scale_row_nb = 0;
     int64_t scale_head_nb = 0;
     int64_t scale_stream_nb = 0;
-    if (!ggml_cuda_match_vcache_nvfp4_scale_layout(src0, scale, blocks, rows, kv_heads, kv_streams, scale_row_nb, scale_head_nb, scale_stream_nb)) {
+    bool scale_is_global = false;
+    if (!ggml_cuda_match_vcache_nvfp4_scale_layout(src0, scale, blocks, rows, kv_heads, kv_streams, scale_row_nb, scale_head_nb, scale_stream_nb, scale_is_global)) {
         return false;
     }
 
@@ -957,6 +980,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
                     scale_row_nb,
                     scale_head_nb,
                     scale_stream_nb,
+                    scale_is_global,
                     dst->nb[1],
                     dst->nb[2],
                     dst->nb[3],
@@ -991,6 +1015,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
                 scale_row_nb,
                 scale_head_nb,
                 scale_stream_nb,
+                scale_is_global,
                 dst->nb[1],
                 dst->nb[2],
                 dst->nb[3],
@@ -1021,6 +1046,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
             scale_row_nb,
             scale_head_nb,
             scale_stream_nb,
+            scale_is_global,
             src1->nb[1],
             src1->nb[2],
             src1->nb[3],

@@ -223,6 +223,8 @@ private:
     bool has_k_scale = false;
     bool non_flash_fp8_e8m0 = false;
     bool experimental_nvfp4_vcache = false;
+    bool nvfp4_vcache_layer_global_scale = false;
+    std::vector<float> nvfp4_vcache_layer_global_scales;
     ggml_type type_v_cache = GGML_TYPE_F16;
 
     const uint32_t n_seq_max = 1;
@@ -305,6 +307,8 @@ private:
 
     bool use_contiguous_v_slots() const;
     bool use_experimental_nvfp4_vcache_layout() const;
+    bool use_nvfp4_vcache_layer_global_scale() const;
+    void init_nvfp4_vcache_layer_global_scales();
 
     uint32_t get_v_cache_kv_padded() const;
     uint32_t get_v_cache_block_count() const;
