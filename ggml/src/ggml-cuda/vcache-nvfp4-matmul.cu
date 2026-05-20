@@ -58,6 +58,15 @@ static void ggml_cuda_vcache_nvfp4_log_fp4_pv_once() {
             __func__);
 }
 
+static void ggml_cuda_vcache_nvfp4_log_matmul_path_once(const char * path) {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_INFO("%s: CUDA NVFP4 V-cache p*v matmul path=%s\n", __func__, path);
+}
+
 static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_vcache(float x) {
     uint8_t best_index = 0;
     float best_err = fabsf((float) kvalues_nvfp4[0] - x);
@@ -853,6 +862,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
                 dst->nb[3],
                 r2,
                 r3)) {
+        ggml_cuda_vcache_nvfp4_log_matmul_path_once("cublasLt-fp4");
         return true;
     }
 #endif
@@ -861,6 +871,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     while (fp4_block_threads < n_blocks && fp4_block_threads < 256) {
         fp4_block_threads *= 2;
     }
+    ggml_cuda_vcache_nvfp4_log_matmul_path_once("custom-cuda-fp4");
     k_vcache_nvfp4_matmul_fp4_p_4d<<<grid, dim3((uint32_t) fp4_block_threads, 1, 1), 0, ctx.stream()>>>(
             (const block_nvfp4 *) src0->data,
             (const float *) scale->data,
