@@ -3,7 +3,6 @@
 #include <cuda_fp8.h>
 
 #include <atomic>
-#include <cstdlib>
 
 static constexpr float GGML_CUDA_VCACHE_NVFP4_FP4_MAX = 6.0f;
 static constexpr float GGML_CUDA_VCACHE_NVFP4_E4M3_HALF_MAX = 224.0f;
@@ -11,8 +10,6 @@ static constexpr float GGML_CUDA_VCACHE_NVFP4_GLOBAL_SCALE_MAX =
         GGML_CUDA_VCACHE_NVFP4_FP4_MAX * GGML_CUDA_VCACHE_NVFP4_E4M3_HALF_MAX;
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_P_AMAX_PREPASS_MIN_KV = 2048;
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_MIN_KV = 512;
-static constexpr const char * GGML_CUDA_VCACHE_NVFP4_FP4_PV_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV";
-static constexpr const char * GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV_LT";
 
 #if defined(CUBLAS_VERSION)
 #define GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
@@ -50,54 +47,15 @@ static __device__ __forceinline__ uint8_t ggml_cuda_vcache_nvfp4_lt_scale_from_f
     return (uint8_t) __nv_cvt_float_to_fp8(scale_f, __NV_SATFINITE, __NV_E4M3);
 }
 
-static bool ggml_cuda_vcache_nvfp4_fp4_pv_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv(GGML_CUDA_VCACHE_NVFP4_FP4_PV_ENV);
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
-static bool ggml_cuda_vcache_nvfp4_fp4_pv_lt_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv(GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_ENV);
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
-static void ggml_cuda_vcache_nvfp4_log_fp4_pv_once(bool enabled) {
+static void ggml_cuda_vcache_nvfp4_log_fp4_pv_once() {
     static std::atomic<bool> logged(false);
     if (logged.exchange(true)) {
         return;
     }
 
-    const char * env = getenv(GGML_CUDA_VCACHE_NVFP4_FP4_PV_ENV);
     GGML_LOG_INFO(
-            "%s: %s=%s -> %s\n",
-            __func__,
-            GGML_CUDA_VCACHE_NVFP4_FP4_PV_ENV,
-            env != nullptr ? env : "(unset)",
-            enabled ? "enabled, CUDA NVFP4 V-cache p*v quantizes P to dynamic NVFP4 before dot"
-                    : "disabled, CUDA NVFP4 V-cache p*v uses F32 P");
-}
-
-static void ggml_cuda_vcache_nvfp4_log_fp4_pv_lt_once(bool enabled) {
-    static std::atomic<bool> logged(false);
-    if (logged.exchange(true)) {
-        return;
-    }
-
-    const char * env = getenv(GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_ENV);
-    GGML_LOG_INFO(
-            "%s: %s=%s -> %s\n",
-            __func__,
-            GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_ENV,
-            env != nullptr ? env : "(unset)",
-            enabled ? "enabled, CUDA NVFP4 V-cache p*v uses cuBLASLt Tensor Core FP4 when available"
-                    : "disabled, CUDA NVFP4 V-cache p*v uses custom CUDA dot kernel");
+            "%s: CUDA NVFP4 V-cache p*v quantizes P to dynamic NVFP4 by default; using cuBLASLt FP4 when available, otherwise custom CUDA dot kernel\n",
+            __func__);
 }
 
 static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_vcache(float x) {
@@ -320,87 +278,6 @@ static __global__ void k_quantize_p_rows_nvfp4_dynamic(
 
     if (active && (lane & 1) == 0) {
         p_q[p_row * (kv_size / QK_NVFP4) + block].qs[lane / 2] = q | (q_peer << 4);
-    }
-}
-
-static __global__ void k_vcache_nvfp4_matmul_4d(
-        const block_nvfp4 * __restrict__ v_data,
-        const float * __restrict__ v_scale,
-        const float * __restrict__ p_data,
-        float * __restrict__ dst_data,
-        int64_t kv_size,
-        int64_t rows,
-        int64_t cols,
-        int64_t kv_heads,
-        int64_t q_heads,
-        int64_t kv_streams,
-        int64_t q_streams,
-        int64_t v_nb0,
-        int64_t v_nb1,
-        int64_t v_nb2,
-        int64_t v_nb3,
-        int64_t scale_nb0,
-        int64_t scale_row_nb,
-        int64_t scale_head_nb,
-        int64_t scale_stream_nb,
-        bool scale_is_global,
-        int64_t p_nb1,
-        int64_t p_nb2,
-        int64_t p_nb3,
-        int64_t dst_nb1,
-        int64_t dst_nb2,
-        int64_t dst_nb3,
-        int64_t r2,
-        int64_t r3) {
-    const int64_t row = blockIdx.x;
-    const int64_t col = blockIdx.y;
-    const int64_t head = blockIdx.z % q_heads;
-    const int64_t stream = blockIdx.z / q_heads;
-    const int64_t kv_head = head / r2;
-    const int64_t kv_stream = stream / r3;
-
-    if (row >= rows || col >= cols || head >= q_heads || stream >= q_streams || kv_head >= kv_heads || kv_stream >= kv_streams) {
-        return;
-    }
-
-    const char * v_base = (const char *) v_data + row * v_nb1 + kv_head * v_nb2 + kv_stream * v_nb3;
-    const char * scale_base = (const char *) v_scale + row * scale_row_nb + kv_head * scale_head_nb + kv_stream * scale_stream_nb;
-    const float v_global_scale = scale_is_global ? *(const float *) ((const char *) v_scale + kv_stream * scale_stream_nb) : 0.0f;
-
-    float thread_sum = 0.0f;
-    for (int64_t lane = threadIdx.x; lane < kv_size; lane += blockDim.x) {
-        const int64_t block = lane / QK_NVFP4;
-        const int64_t in_block = lane % QK_NVFP4;
-
-        const block_nvfp4 * v_block_ptr = (const block_nvfp4 *) (v_base + block * v_nb0);
-
-        const block_nvfp4 vb = *v_block_ptr;
-        const float d = scale_is_global ?
-            (v_global_scale > 0.0f ? ggml_cuda_e4m3_to_fp32_half(vb.e) / v_global_scale : 0.0f) :
-            ggml_cuda_e4m3_to_fp32_half(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
-        const uint8_t packed = vb.qs[in_block / 2];
-        const uint8_t q = (in_block & 1) == 0 ? (packed & 0x0F) : (packed >> 4);
-        const float v = d * (float) kvalues_nvfp4[q];
-
-        const char * p_ptr = (const char *) p_data + lane * sizeof(float) + col * p_nb1 + head * p_nb2 + stream * p_nb3;
-        const float p = *(const float *) p_ptr;
-        thread_sum += v * p;
-    }
-
-    __shared__ float sum[256];
-    sum[threadIdx.x] = thread_sum;
-    __syncthreads();
-
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride) {
-            sum[threadIdx.x] += sum[threadIdx.x + stride];
-        }
-        __syncthreads();
-    }
-
-    if (threadIdx.x == 0) {
-        char * dst_ptr = (char *) dst_data + row * sizeof(float) + col * dst_nb1 + head * dst_nb2 + stream * dst_nb3;
-        *(float *) dst_ptr = sum[0];
     }
 }
 
@@ -897,7 +774,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
         return false;
     }
 
-    if (kv_size <= 0) {
+    if (kv_size <= 0 || kv_size % QK_NVFP4 != 0) {
         return false;
     }
 
@@ -907,46 +784,20 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
 
     const int64_t r2 = q_heads / kv_heads;
     const int64_t r3 = q_streams / kv_streams;
-    int block_threads = 16;
-    while (block_threads < kv_size && block_threads < 256) {
-        block_threads *= 2;
-    }
-
-    const bool fp4_p_enabled = ggml_cuda_vcache_nvfp4_fp4_pv_enabled();
-    ggml_cuda_vcache_nvfp4_log_fp4_pv_once(fp4_p_enabled);
-    const bool fp4_p_lt_enabled = fp4_p_enabled && ggml_cuda_vcache_nvfp4_fp4_pv_lt_enabled();
-    ggml_cuda_vcache_nvfp4_log_fp4_pv_lt_once(fp4_p_lt_enabled);
+    ggml_cuda_vcache_nvfp4_log_fp4_pv_once();
 
     const dim3 grid((uint32_t) rows, (uint32_t) cols, (uint32_t) (q_heads * q_streams));
-    if (fp4_p_enabled && kv_size % QK_NVFP4 == 0) {
-        const int64_t n_blocks = kv_size / QK_NVFP4;
-        const int64_t p_rows = cols * q_heads * q_streams;
-        ggml_cuda_pool_alloc<block_nvfp4> p_q(ctx.pool(), (size_t) p_rows * (size_t) n_blocks);
-        const bool use_amax_prepass = kv_size >= GGML_CUDA_VCACHE_NVFP4_FP4_P_AMAX_PREPASS_MIN_KV;
-        ggml_cuda_pool_alloc<float> p_amax(ctx.pool(), use_amax_prepass ? (size_t) p_rows : 0);
-        ggml_cuda_pool_alloc<float> p_scale(ctx.pool(), (size_t) p_rows);
-        if (use_amax_prepass) {
-            const int p_amax_threads = 256;
-            k_p_rows_abs_max_f32<<<(uint32_t) p_rows, p_amax_threads, 0, ctx.stream()>>>(
-                    (const float *) src1->data,
-                    p_amax.get(),
-                    kv_size,
-                    cols,
-                    q_heads,
-                    q_streams,
-                    src1->nb[1],
-                    src1->nb[2],
-                    src1->nb[3]);
-            CUDA_CHECK(cudaGetLastError());
-        }
-
-        const dim3 q_grid((uint32_t) n_blocks, (uint32_t) cols, (uint32_t) (q_heads * q_streams));
-        const dim3 q_block(WARP_SIZE, 1, 1);
-        k_quantize_p_rows_nvfp4_dynamic<<<q_grid, q_block, 0, ctx.stream()>>>(
+    const int64_t n_blocks = kv_size / QK_NVFP4;
+    const int64_t p_rows = cols * q_heads * q_streams;
+    ggml_cuda_pool_alloc<block_nvfp4> p_q(ctx.pool(), (size_t) p_rows * (size_t) n_blocks);
+    const bool use_amax_prepass = kv_size >= GGML_CUDA_VCACHE_NVFP4_FP4_P_AMAX_PREPASS_MIN_KV;
+    ggml_cuda_pool_alloc<float> p_amax(ctx.pool(), use_amax_prepass ? (size_t) p_rows : 0);
+    ggml_cuda_pool_alloc<float> p_scale(ctx.pool(), (size_t) p_rows);
+    if (use_amax_prepass) {
+        const int p_amax_threads = 256;
+        k_p_rows_abs_max_f32<<<(uint32_t) p_rows, p_amax_threads, 0, ctx.stream()>>>(
                 (const float *) src1->data,
-                use_amax_prepass ? p_amax.get() : nullptr,
-                p_q.get(),
-                p_scale.get(),
+                p_amax.get(),
                 kv_size,
                 cols,
                 q_heads,
@@ -955,46 +806,27 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
                 src1->nb[2],
                 src1->nb[3]);
         CUDA_CHECK(cudaGetLastError());
+    }
+
+    const dim3 q_grid((uint32_t) n_blocks, (uint32_t) cols, (uint32_t) (q_heads * q_streams));
+    const dim3 q_block(WARP_SIZE, 1, 1);
+    k_quantize_p_rows_nvfp4_dynamic<<<q_grid, q_block, 0, ctx.stream()>>>(
+            (const float *) src1->data,
+            use_amax_prepass ? p_amax.get() : nullptr,
+            p_q.get(),
+            p_scale.get(),
+            kv_size,
+            cols,
+            q_heads,
+            q_streams,
+            src1->nb[1],
+            src1->nb[2],
+            src1->nb[3]);
+    CUDA_CHECK(cudaGetLastError());
 
 #if GGML_CUDA_HAS_CUBLASLT
-        if (fp4_p_lt_enabled &&
-                ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
-                    ctx,
-                    (const block_nvfp4 *) src0->data,
-                    (const float *) scale->data,
-                    p_q.get(),
-                    p_scale.get(),
-                    (float *) dst->data,
-                    kv_size,
-                    rows,
-                    cols,
-                    kv_heads,
-                    q_heads,
-                    kv_streams,
-                    q_streams,
-                    src0->nb[0],
-                    src0->nb[1],
-                    src0->nb[2],
-                    src0->nb[3],
-                    scale->nb[0],
-                    scale_row_nb,
-                    scale_head_nb,
-                    scale_stream_nb,
-                    scale_is_global,
-                    dst->nb[1],
-                    dst->nb[2],
-                    dst->nb[3],
-                    r2,
-                    r3)) {
-            return true;
-        }
-#endif
-
-        int fp4_block_threads = 16;
-        while (fp4_block_threads < n_blocks && fp4_block_threads < 256) {
-            fp4_block_threads *= 2;
-        }
-        k_vcache_nvfp4_matmul_fp4_p_4d<<<grid, dim3((uint32_t) fp4_block_threads, 1, 1), 0, ctx.stream()>>>(
+    if (ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
+                ctx,
                 (const block_nvfp4 *) src0->data,
                 (const float *) scale->data,
                 p_q.get(),
@@ -1020,16 +852,20 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
                 dst->nb[2],
                 dst->nb[3],
                 r2,
-                r3);
-        CUDA_CHECK(cudaGetLastError());
+                r3)) {
         return true;
     }
+#endif
 
-    const dim3 block((uint32_t) block_threads, 1, 1);
-    k_vcache_nvfp4_matmul_4d<<<grid, block, 0, ctx.stream()>>>(
+    int fp4_block_threads = 16;
+    while (fp4_block_threads < n_blocks && fp4_block_threads < 256) {
+        fp4_block_threads *= 2;
+    }
+    k_vcache_nvfp4_matmul_fp4_p_4d<<<grid, dim3((uint32_t) fp4_block_threads, 1, 1), 0, ctx.stream()>>>(
             (const block_nvfp4 *) src0->data,
             (const float *) scale->data,
-            (const float *) src1->data,
+            p_q.get(),
+            p_scale.get(),
             (float *) dst->data,
             kv_size,
             rows,
@@ -1047,9 +883,6 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
             scale_head_nb,
             scale_stream_nb,
             scale_is_global,
-            src1->nb[1],
-            src1->nb[2],
-            src1->nb[3],
             dst->nb[1],
             dst->nb[2],
             dst->nb[3],

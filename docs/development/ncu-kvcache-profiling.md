@@ -97,14 +97,14 @@ Expected evidence:
   means the run fell back to a non-native path or did not hit the intended K
   cache path.
 
-### 3. V-cache NVFP4 custom FP4 P*V
+### 3. V-cache NVFP4 FP4 P*V
 
 The current NVFP4 V-cache runtime requires `flash_attn=0`, `--kv-unified`,
-KQV offload enabled, and the experiment switch:
+KQV offload enabled, and the V-cache experiment switch. Its p*v matmul
+dynamically quantizes P rows to NVFP4 by default:
 
 ```bash
 LLAMA_EXPERIMENT_NVFP4_VCACHE=1 \
-LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV=1 \
 scripts/profile-llama-server-ncu.sh \
   --name v-nvfp4-fp4-pv \
   --cache-type-k f16 \
@@ -117,21 +117,18 @@ Expected evidence:
 
 - `server.log` contains:
   - `LLAMA_EXPERIMENT_NVFP4_VCACHE=1 -> enabled`;
-  - `LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV=1 -> enabled`;
-  - `LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV_LT=(unset) -> disabled`, unless the
-    Lt switch is enabled.
+  - `ggml_cuda_vcache_nvfp4_log_fp4_pv_once: CUDA NVFP4 V-cache p*v quantizes
+    P to dynamic NVFP4 by default`.
 - `server.log` shows `type_v = nvfp4`.
 - `ncu` includes V-cache NVFP4 store kernels and P quantization kernels.
-- For the custom path, expect custom CUDA kernels from
-  `vcache-nvfp4-matmul.cu`; this proves P is dynamically quantized to FP4
-  before dotting with NVFP4 V, but it is not the cuBLASLt Tensor Core path.
+- If cuBLASLt FP4 is unavailable for the shape or toolkit, expect custom CUDA
+  kernels from `vcache-nvfp4-matmul.cu`; this still proves P is dynamically
+  quantized to FP4 before dotting with NVFP4 V.
 
 ### 4. V-cache NVFP4 cuBLASLt FP4 P*V
 
 ```bash
 LLAMA_EXPERIMENT_NVFP4_VCACHE=1 \
-LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV=1 \
-LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV_LT=1 \
 scripts/profile-llama-server-ncu.sh \
   --name v-nvfp4-fp4-pv-lt \
   --cache-type-k f16 \
@@ -142,8 +139,7 @@ scripts/profile-llama-server-ncu.sh \
 
 Expected evidence:
 
-- The two V-cache switches above are enabled in `server.log`.
-- `LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV_LT=1 -> enabled` appears.
+- `LLAMA_EXPERIMENT_NVFP4_VCACHE=1 -> enabled` appears in `server.log`.
 - A one-shot active log from `vcache-nvfp4-matmul.cu` indicates successful
   cuBLASLt FP4 P*V use. If Lt is unavailable or returns unsupported, the code can
   fall back to the custom CUDA dot path, so check logs before trusting only a

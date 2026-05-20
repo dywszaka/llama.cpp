@@ -53,7 +53,7 @@ Add scalar-scale coverage for real V-cache view cases. The reference dequantizes
 
 **Step 2: Run test to verify it fails**
 
-Run: `LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV=1 LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV_LT=1 build_cuda/bin/test-vcache-nvfp4-matmul`
+Run: `build_cuda/bin/test-vcache-nvfp4-matmul`
 
 Expected: failure because matmul currently requires per-block scale layout.
 
