@@ -4,7 +4,7 @@
 
 **Goal:** Add an experimental NVFP4 V-cache mode that uses one fixed per-layer global scale from a layer absmax JSON instead of per-block external F32 scales.
 
-**Architecture:** Keep the existing per-block scale path as the default. When `LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE` points to a JSON file, KV cache initialization allocates one F32 scale value per layer/stream and stores `global_scale = GGML_CUDA_VCACHE_NVFP4_GLOBAL_SCALE_MAX / layer_absmax[layer]`. CUDA set_rows and P*V kernels detect scalar scale layout and interpret it as `global_scale`; legacy multi-element scale tensors continue to mean per-block `input_scale`.
+**Architecture:** Keep the existing per-block scale path as the default. When `LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE` points to a JSON file, KV cache initialization allocates one F32 scale value per layer/stream and stores `global_scale = GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / layer_absmax[layer]`. CUDA set_rows and P*V kernels detect scalar scale layout and interpret it as `global_scale`; legacy multi-element scale tensors continue to mean per-block `input_scale`.
 
 **Tech Stack:** llama.cpp KV cache graph code, ggml CUDA set_rows kernels, NVFP4 V-cache custom matmul, cuBLASLt FP4 P*V path, CUDA focused tests.
 
@@ -90,7 +90,7 @@ When enabled and experimental NVFP4 V-cache layout is active, allocate `v_scale`
 
 **Step 3: Initialize scale values**
 
-After buffer allocation/clear, set each layer stream scalar to `GGML_CUDA_VCACHE_NVFP4_GLOBAL_SCALE_MAX / absmax[layer]`.
+After buffer allocation/clear, set each layer stream scalar to `GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / absmax[layer]`.
 
 **Step 4: Preserve graph attachments**
 

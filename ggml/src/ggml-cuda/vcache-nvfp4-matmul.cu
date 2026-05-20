@@ -1,13 +1,7 @@
 #include "vcache-nvfp4-matmul.cuh"
 
-#include <cuda_fp8.h>
-
 #include <atomic>
 
-static constexpr float GGML_CUDA_VCACHE_NVFP4_FP4_MAX = 6.0f;
-static constexpr float GGML_CUDA_VCACHE_NVFP4_E4M3_HALF_MAX = 224.0f;
-static constexpr float GGML_CUDA_VCACHE_NVFP4_GLOBAL_SCALE_MAX =
-        GGML_CUDA_VCACHE_NVFP4_FP4_MAX * GGML_CUDA_VCACHE_NVFP4_E4M3_HALF_MAX;
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_P_AMAX_PREPASS_MIN_KV = 2048;
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_MIN_KV = 512;
 
@@ -18,34 +12,6 @@ static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_MIN_KV = 512;
 #else
 #define GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS 0
 #endif
-
-static inline int64_t ggml_cuda_vcache_nvfp4_pad_i64(int64_t x, int64_t a) {
-    GGML_ASSERT(a > 0);
-    return ((x + a - 1) / a) * a;
-}
-
-static __host__ __device__ __forceinline__ int64_t ggml_cuda_vcache_nvfp4_scale_tiled_index(
-        int64_t outer,
-        int64_t inner,
-        int64_t n_inner_padded) {
-    const int64_t outer_tile = outer / 128;
-    const int64_t outer_in_tile = outer % 128;
-    const int64_t inner_tile = inner / 4;
-    const int64_t inner_in_tile = inner % 4;
-
-    const int64_t tiles_per_outer_block = n_inner_padded / 4;
-    const int64_t tile_base = (outer_tile * tiles_per_outer_block + inner_tile) * 512;
-    const int64_t tile_offset = (outer_in_tile % 32) * 16 + (outer_in_tile / 32) * 4 + inner_in_tile;
-    return tile_base + tile_offset;
-}
-
-static __device__ __forceinline__ uint8_t ggml_cuda_vcache_nvfp4_lt_scale_from_f32(float scale_f) {
-    if (!(scale_f > 0.0f) || !isfinite(scale_f)) {
-        return 0;
-    }
-
-    return (uint8_t) __nv_cvt_float_to_fp8(scale_f, __NV_SATFINITE, __NV_E4M3);
-}
 
 static void ggml_cuda_vcache_nvfp4_log_fp4_pv_once() {
     static std::atomic<bool> logged(false);
@@ -266,7 +232,7 @@ static __global__ void k_quantize_p_rows_nvfp4_dynamic(
         row_amax = __shfl_sync(0xFFFFFFFF, row_amax, 0, WARP_SIZE);
     }
     const float global_scale = (row_amax > 0.0f && isfinite(row_amax)) ?
-            (GGML_CUDA_VCACHE_NVFP4_GLOBAL_SCALE_MAX / row_amax) : 0.0f;
+            (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / row_amax) : 0.0f;
     if (lane == 0) {
         p_scale[p_row] = global_scale != 0.0f ? (1.0f / global_scale) : 0.0f;
     }
@@ -274,7 +240,7 @@ static __global__ void k_quantize_p_rows_nvfp4_dynamic(
     float scale_f = 0.0f;
     if (lane == 0) {
         const float block_scale = (global_scale != 0.0f) ?
-            (global_scale * (vmax / GGML_CUDA_VCACHE_NVFP4_FP4_MAX)) : 0.0f;
+            (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
         const uint8_t scale_q = ggml_cuda_best_index_e4m3_vcache(block_scale);
         p_q[p_row * (kv_size / QK_NVFP4) + block].e = scale_q;
         scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
@@ -417,8 +383,8 @@ static __global__ void k_stage_vcache_nvfp4_v_for_lt(
     const float block_scale = scale_is_global ?
         (v_global_scale > 0.0f ? ggml_cuda_e4m3_to_fp32(vb.e) / v_global_scale : 0.0f) :
         ggml_cuda_e4m3_to_fp32(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
-    const int64_t scale_idx = ggml_cuda_vcache_nvfp4_scale_tiled_index(row, block, scale_inner_padded);
-    out_scale[scale_idx] = ggml_cuda_vcache_nvfp4_lt_scale_from_f32(block_scale);
+    const int64_t scale_idx = ggml_cuda_nvfp4_scale_tiled_index(row, block, scale_inner_padded);
+    out_scale[scale_idx] = ggml_cuda_nvfp4_lt_scale_from_f32(block_scale);
 }
 
 static __global__ void k_stage_vcache_nvfp4_p_for_lt(
@@ -451,8 +417,8 @@ static __global__ void k_stage_vcache_nvfp4_p_for_lt(
     }
 
     const float block_scale = ggml_cuda_e4m3_to_fp32(pb.e);
-    const int64_t scale_idx = ggml_cuda_vcache_nvfp4_scale_tiled_index(col, block, scale_inner_padded);
-    out_scale[scale_idx] = ggml_cuda_vcache_nvfp4_lt_scale_from_f32(block_scale);
+    const int64_t scale_idx = ggml_cuda_nvfp4_scale_tiled_index(col, block, scale_inner_padded);
+    out_scale[scale_idx] = ggml_cuda_nvfp4_lt_scale_from_f32(block_scale);
 }
 
 static __global__ void k_store_vcache_nvfp4_lt_all_results(
@@ -527,9 +493,9 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
     const int64_t n_blocks = kv_size / QK_NVFP4;
     const int64_t lt_cols = (cols + 15) & ~15LL;
     const int64_t row_data_bytes = kv_size / 2;
-    const int64_t scale_inner_padded = ggml_cuda_vcache_nvfp4_pad_i64(n_blocks, 4);
-    const int64_t a_scale_outer_padded = ggml_cuda_vcache_nvfp4_pad_i64(rows, 128);
-    const int64_t b_scale_outer_padded = ggml_cuda_vcache_nvfp4_pad_i64(lt_cols, 128);
+    const int64_t scale_inner_padded = ggml_cuda_nvfp4_pad_i64(n_blocks, 4);
+    const int64_t a_scale_outer_padded = ggml_cuda_nvfp4_pad_i64(rows, 128);
+    const int64_t b_scale_outer_padded = ggml_cuda_nvfp4_pad_i64(lt_cols, 128);
     const int64_t a_data_nbytes = rows * row_data_bytes;
     const int64_t b_data_nbytes = lt_cols * row_data_bytes;
     const int64_t a_scale_nbytes = a_scale_outer_padded * scale_inner_padded;

@@ -11,7 +11,6 @@ Start every run from the `llama-server` baseline in `EXPERI.md`:
 
 - Model: `/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf`
 - `CUDA_VISIBLE_DEVICES=0`
-- `GGML_CUDA_NVFP4_NATIVE=1`
 - `--n_gpu_layers 40`
 - `--batch-size 2048`
 - `--ubatch-size 512`

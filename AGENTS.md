@@ -51,7 +51,7 @@
   - CPU-side activation roundtrip helper is in `src/llama-nvfp4.cpp`; it converts the bound input scale into `global_scale = 1 / input_scale`, quantizes to NVFP4 with the reference path, then dequantizes back to F32 before matmul.
 - CUDA execution path:
   - Main dispatch is in `ggml/src/ggml-cuda/ggml-cuda.cu`.
-  - If `GGML_CUDA_NVFP4_NATIVE` is enabled and tensor types are `src0=NVFP4`, `src1=F32`, `dst=F32`, CUDA first attempts the native path `ggml_cuda_mul_mat_nvfp4_native()`.
+  - If tensor types are `src0=NVFP4`, `src1=F32`, `dst=F32`, CUDA first attempts the native path `ggml_cuda_mul_mat_nvfp4_native()`.
   - Native implementation is in `ggml/src/ggml-cuda/nvfp4-matmul.cu`.
     - Reads `input_scale` from the bound mul-mat node and converts it to `global_scale = 1 / input_scale`.
     - Quantizes the F32 activation matrix to temporary NVFP4 on device with `quantize_row_nvfp4_kernel`.

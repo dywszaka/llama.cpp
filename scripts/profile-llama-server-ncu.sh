@@ -34,7 +34,6 @@ Options:
 
 Useful environment switches:
   CUDA_VISIBLE_DEVICES=0
-  GGML_CUDA_NVFP4_NATIVE=1
   LLAMA_EXPERIMENT_NVFP4_VCACHE=1
   LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE=experiments/qwen3-8b-v-layer-absmax.json
   GGML_CUDA_DISABLE_GRAPHS=1      Diagnostic only; record that this changes baseline env.
@@ -131,7 +130,6 @@ EOF
 fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export GGML_CUDA_NVFP4_NATIVE="${GGML_CUDA_NVFP4_NATIVE:-1}"
 export LLAMA_STDOUT_FILE="${LLAMA_STDOUT_FILE:-${server_log}}"
 
 env | LC_ALL=C sort | grep -E '^(CUDA_VISIBLE_DEVICES|GGML_|LLAMA_)=' > "${out_dir}/env.txt" || true
@@ -186,7 +184,6 @@ full_cmd=("${ncu_cmd[@]}" "${server_cmd[@]}")
   echo "set -euo pipefail"
   echo "cd $(printf '%q' "${ROOT_DIR}")"
   echo "export CUDA_VISIBLE_DEVICES=$(printf '%q' "${CUDA_VISIBLE_DEVICES}")"
-  echo "export GGML_CUDA_NVFP4_NATIVE=$(printf '%q' "${GGML_CUDA_NVFP4_NATIVE}")"
   echo "export LLAMA_STDOUT_FILE=$(printf '%q' "${LLAMA_STDOUT_FILE}")"
   while IFS='=' read -r k v; do
     [[ -z "${k}" ]] && continue

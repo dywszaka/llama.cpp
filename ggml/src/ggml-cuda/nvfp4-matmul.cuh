@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.cuh"
+#include "nvfp4-common.cuh"
 
 bool ggml_cuda_mul_mat_nvfp4_native(
         ggml_backend_cuda_context & ctx,

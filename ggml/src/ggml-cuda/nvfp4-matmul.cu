@@ -3,8 +3,6 @@
 #include "ggml-backend.h"
 #include "../ggml-quants.h"
 
-#include <cuda_fp8.h>
-
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -13,10 +11,6 @@
 #include <vector>
 
 namespace {
-
-static constexpr float GGML_CUDA_NVFP4_FP4_MAX = 6.0f;
-static constexpr float GGML_CUDA_NVFP4_E4M3_HALF_MAX = 224.0f;
-static constexpr float GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX = GGML_CUDA_NVFP4_FP4_MAX * GGML_CUDA_NVFP4_E4M3_HALF_MAX;
 
 #if defined(CUBLAS_VERSION)
 #define GGML_CUDA_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
@@ -443,34 +437,9 @@ struct ggml_cuda_nvfp4_split_matrix {
     int64_t scale_outer_padded = 0;
 };
 
-static inline int64_t ggml_cuda_pad_i64(int64_t x, int64_t a) {
-    GGML_ASSERT(a > 0);
-    return ((x + a - 1) / a) * a;
-}
-
-static __host__ __device__ __forceinline__ int64_t ggml_cuda_nvfp4_scale_tiled_index(
-        int64_t outer,
-        int64_t inner,
-        int64_t n_inner_padded) {
-    // cuBLASLt VEC16_UE4M3 scale tiling: [outer, inner] -> 128x4 tiled order.
-    const int64_t outer_tile = outer / 128;
-    const int64_t outer_in_tile = outer % 128;
-    const int64_t inner_tile = inner / 4;
-    const int64_t inner_in_tile = inner % 4;
-
-    const int64_t tiles_per_outer_block = n_inner_padded / 4;
-    const int64_t tile_base = (outer_tile * tiles_per_outer_block + inner_tile) * 512;
-    const int64_t tile_offset = (outer_in_tile % 32) * 16 + (outer_in_tile / 32) * 4 + inner_in_tile;
-    return tile_base + tile_offset;
-}
-
 static __device__ __forceinline__ uint8_t ggml_cuda_nvfp4_lt_scale_from_ggml_scale_byte(uint8_t ggml_e) {
     const float scale_f = ggml_cuda_e4m3_to_fp32(ggml_e);
-    if (!(scale_f > 0.0f) || !isfinite(scale_f)) {
-        return 0;
-    }
-
-    return (uint8_t) __nv_cvt_float_to_fp8(scale_f, __NV_SATFINITE, __NV_E4M3);
+    return ggml_cuda_nvfp4_lt_scale_from_f32(scale_f);
 }
 
 static __global__ void ggml_cuda_nvfp4_split_blocks_kernel(
@@ -522,8 +491,8 @@ static void ggml_cuda_nvfp4_split_blocks_cuda(
 
     const int64_t nblk_k = ne_k / QK_NVFP4;
     const int64_t row_data_bytes = ne_k / 2;
-    const int64_t inner_padded = ggml_cuda_pad_i64(nblk_k, 4);
-    const int64_t outer_padded = ggml_cuda_pad_i64(n_outer_alloc, 128);
+    const int64_t inner_padded = ggml_cuda_nvfp4_pad_i64(nblk_k, 4);
+    const int64_t outer_padded = ggml_cuda_nvfp4_pad_i64(n_outer_alloc, 128);
 
     const size_t dn = (size_t) n_outer_alloc * (size_t) row_data_bytes;
     const size_t sn = (size_t) outer_padded * (size_t) inner_padded;
@@ -606,7 +575,7 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
     }
 
     const size_t data_nbytes = (size_t) n_outer * (size_t) ne_k / 2;
-    const size_t scale_nbytes = (size_t) ggml_cuda_pad_i64(n_outer, 128) * (size_t) ggml_cuda_pad_i64(ne_k / QK_NVFP4, 4);
+    const size_t scale_nbytes = (size_t) ggml_cuda_nvfp4_pad_i64(n_outer, 128) * (size_t) ggml_cuda_nvfp4_pad_i64(ne_k / QK_NVFP4, 4);
 
     void * data_repacked = nullptr;
     void * scale_repacked = nullptr;
@@ -857,8 +826,8 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
     cudaStream_t stream = ctx.stream();
     const int64_t nblk_k = ne10 / QK_NVFP4;
-    const int64_t scale_inner_padded = ggml_cuda_pad_i64(nblk_k, 4);
-    const int64_t scale_outer_padded_b = ggml_cuda_pad_i64(ne11_padded, 128);
+    const int64_t scale_inner_padded = ggml_cuda_nvfp4_pad_i64(nblk_k, 4);
+    const int64_t scale_outer_padded_b = ggml_cuda_nvfp4_pad_i64(ne11_padded, 128);
 
     float out_scale = 1.0f;
     if (const ggml_tensor * scale = ggml_mul_mat_get_nvfp4_weight_scale(dst)) {
@@ -1755,7 +1724,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
             auto load_src0_repacked_col = [&](int64_t out_col, scale_probe_mode mode, std::vector<block_nvfp4> & out_blocks) {
                 out_blocks.resize((size_t) nblk);
                 const int64_t row_data_bytes = ne10 / 2;
-                const int64_t transposed_inner_padded = ggml_cuda_pad_i64(ne01, 4);
+                const int64_t transposed_inner_padded = ggml_cuda_nvfp4_pad_i64(ne01, 4);
                 for (int64_t inner = 0; inner < nblk; ++inner) {
                     int64_t scale_idx = 0;
                     switch (mode) {
@@ -1796,7 +1765,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
             auto load_src0_repacked_scale_col = [&](int64_t out_col, scale_probe_mode mode, std::vector<uint8_t> & out_scales) {
                 out_scales.resize((size_t) nblk);
-                const int64_t transposed_inner_padded = ggml_cuda_pad_i64(ne01, 4);
+                const int64_t transposed_inner_padded = ggml_cuda_nvfp4_pad_i64(ne01, 4);
                 for (int64_t inner = 0; inner < nblk; ++inner) {
                     int64_t scale_idx = 0;
                     switch (mode) {
