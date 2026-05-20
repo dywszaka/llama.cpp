@@ -20,6 +20,9 @@ subject of the experiment.
   - an experiment run that changes only the experiment parameter or switch.
 - Store each experiment under a dedicated folder in `experiments/`, including
   scripts, request/input data, raw outputs, responses, and summarized results.
+- Name experiment folders with a UTC timestamp first, using the
+  `YYYYMMDDThhmmssZ` format such as `20260520T024947Z`, followed by a short
+  experiment identifier, so records sort chronologically and stay easy to scan.
 - Environment variables not listed in a baseline command are not part of the
   baseline. Add them only when an experiment needs them, and document why.
 
