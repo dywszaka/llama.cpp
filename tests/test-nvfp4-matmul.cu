@@ -854,11 +854,9 @@ static bool run_case_backend_batched_dynamic_rhs(
     ggml_backend_tensor_set(b, b_fp32.data(), 0, b_fp32.size() * sizeof(float));
 
 #if defined(_WIN32)
-    _putenv_s("GGML_CUDA_NVFP4_NATIVE", "1");
     _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
     _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
 #else
-    setenv("GGML_CUDA_NVFP4_NATIVE", "1", 1);
     setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
     setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
 #endif
@@ -1052,11 +1050,9 @@ static bool run_case_backend_batched_dynamic_rhs_permuted_lhs(
     ggml_backend_tensor_set(b, b_fp32.data(), 0, b_fp32.size() * sizeof(float));
 
 #if defined(_WIN32)
-    _putenv_s("GGML_CUDA_NVFP4_NATIVE", "1");
     _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
     _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
 #else
-    setenv("GGML_CUDA_NVFP4_NATIVE", "1", 1);
     setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
     setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
 #endif

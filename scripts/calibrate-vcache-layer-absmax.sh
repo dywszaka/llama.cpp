@@ -30,7 +30,6 @@ Options:
 
 Environment:
   CUDA_VISIBLE_DEVICES       Default: 0
-  GGML_CUDA_NVFP4_NATIVE     Default: 1
 EOF
 }
 
@@ -107,7 +106,6 @@ if ((${#extra_args[@]} > 0)); then
 fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export GGML_CUDA_NVFP4_NATIVE="${GGML_CUDA_NVFP4_NATIVE:-1}"
 
 echo "calibration command:"
 quote_cmd "${cmd[@]}"

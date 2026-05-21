@@ -1,4 +1,4 @@
-#include "nvfp4-kq.cuh"
+#include "nvfp4-8-kq.cuh"
 
 #include <algorithm>
 #include <cmath>

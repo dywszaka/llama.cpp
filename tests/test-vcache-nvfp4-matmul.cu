@@ -4,6 +4,7 @@
 
 #include "../ggml/src/ggml-quants.h"
 
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 
 #include <cmath>
@@ -66,9 +67,16 @@ static float lt_scale_roundtrip(float x) {
     return e4m3_to_f32(best_index_e4m3_test(x));
 }
 
-static bool fp4_p_env_enabled() {
-    const char * env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV");
-    return env != nullptr && env[0] != '\0' && env[0] != '0';
+#if defined(CUBLAS_VERSION)
+#define TEST_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
+#elif defined(CUBLAS_VER_MAJOR)
+#define TEST_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VER_MAJOR >= 13)
+#else
+#define TEST_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS 0
+#endif
+
+static bool expect_lt_reference_for_kv_size(int64_t kv_size) {
+    return TEST_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS && kv_size >= 512;
 }
 
 static void dequantize_v_blocks_like_lt(
@@ -113,15 +121,6 @@ static void dequantize_v_blocks_scalar_like_lt(
             }
         }
     }
-}
-
-static bool fp4_p_lt_env_enabled() {
-    const char * env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV_LT");
-    return env != nullptr && env[0] != '\0' && env[0] != '0';
-}
-
-static bool fp4_p_lt_expected_for_kv_size(int64_t kv_size) {
-    return fp4_p_lt_env_enabled() && kv_size >= 512;
 }
 
 static bool run_case() {
@@ -208,7 +207,7 @@ static bool run_case() {
                 ref += v_deq[(size_t) r * (size_t) kv_size + (size_t) i] * p_host[(size_t) c * (size_t) kv_size + (size_t) i];
             }
             const float got = out_host[(size_t) c * (size_t) rows + (size_t) r];
-            const float tol = fp4_p_env_enabled() ? 1.25f : 0.25f;
+            const float tol = 1.25f;
             if (fabsf(got - ref) > tol) {
                 std::fprintf(stderr, "matmul mismatch r=%lld c=%lld got=%g ref=%g\n",
                         (long long) r, (long long) c, got, ref);
@@ -325,7 +324,7 @@ static bool run_permuted_case() {
                 }
                 const size_t out_off = (size_t) h * (size_t) cols * (size_t) head_dim + (size_t) c * (size_t) head_dim + (size_t) d;
                 const float got = out_host[out_off];
-                const float tol = fp4_p_env_enabled() ? 1.25f : 0.25f;
+                const float tol = 1.25f;
                 if (fabsf(got - ref) > tol) {
                     std::fprintf(stderr, "permuted matmul mismatch h=%lld d=%lld c=%lld got=%g ref=%g\n",
                             (long long) h, (long long) d, (long long) c, got, ref);
@@ -451,21 +450,19 @@ static bool run_real_vcache_view_case(int64_t kv_size, bool scalar_global_scale 
         }
     }
     std::vector<float> p_ref = p_host;
-    if (fp4_p_env_enabled()) {
-        std::vector<block_nvfp4> p_q((size_t) cols * (size_t) q_heads * (size_t) blocks);
-        for (int64_t h = 0; h < q_heads; ++h) {
-            for (int64_t c = 0; c < cols; ++c) {
-                const size_t row_off = (size_t) h * (size_t) cols * (size_t) kv_size + (size_t) c * (size_t) kv_size;
-                float amax = 0.0f;
-                for (int64_t i = 0; i < kv_size; ++i) {
-                    amax = fmaxf(amax, fabsf(p_host[row_off + (size_t) i]));
-                }
-                const float global = amax > 0.0f ? (6.0f * 224.0f / amax) : 0.0f;
-                for (int64_t b = 0; b < blocks; ++b) {
-                    const size_t q_off = ((size_t) h * (size_t) cols + (size_t) c) * (size_t) blocks + (size_t) b;
-                    quantize_row_nvfp4_ref(p_host.data() + row_off + (size_t) b * 16, p_q.data() + q_off, 16, global);
-                    dequantize_row_nvfp4(p_q.data() + q_off, p_ref.data() + row_off + (size_t) b * 16, 16, global);
-                }
+    std::vector<block_nvfp4> p_q((size_t) cols * (size_t) q_heads * (size_t) blocks);
+    for (int64_t h = 0; h < q_heads; ++h) {
+        for (int64_t c = 0; c < cols; ++c) {
+            const size_t row_off = (size_t) h * (size_t) cols * (size_t) kv_size + (size_t) c * (size_t) kv_size;
+            float amax = 0.0f;
+            for (int64_t i = 0; i < kv_size; ++i) {
+                amax = fmaxf(amax, fabsf(p_host[row_off + (size_t) i]));
+            }
+            const float global = amax > 0.0f ? (6.0f * 224.0f / amax) : 0.0f;
+            for (int64_t b = 0; b < blocks; ++b) {
+                const size_t q_off = ((size_t) h * (size_t) cols + (size_t) c) * (size_t) blocks + (size_t) b;
+                quantize_row_nvfp4_ref(p_host.data() + row_off + (size_t) b * 16, p_q.data() + q_off, 16, global);
+                dequantize_row_nvfp4(p_q.data() + q_off, p_ref.data() + row_off + (size_t) b * 16, 16, global);
             }
         }
     }
@@ -496,7 +493,7 @@ static bool run_real_vcache_view_case(int64_t kv_size, bool scalar_global_scale 
                 float ref = 0.0f;
                 for (int64_t i = 0; i < kv_size; ++i) {
                     const size_t p_off = (size_t) h * (size_t) cols * (size_t) kv_size + (size_t) c * (size_t) kv_size + (size_t) i;
-                    const std::vector<float> & v_ref_deq = fp4_p_lt_expected_for_kv_size(kv_size) ? v_deq_lt : v_deq;
+                    const std::vector<float> & v_ref_deq = expect_lt_reference_for_kv_size(kv_size) ? v_deq_lt : v_deq;
                     ref += v_ref_deq[(size_t) row * (size_t) kv_size + (size_t) i] * p_ref[p_off];
                 }
                 const size_t out_off = (size_t) h * (size_t) cols * (size_t) head_dim + (size_t) c * (size_t) head_dim + (size_t) d;
@@ -625,21 +622,19 @@ static bool run_set_rows_then_matmul_case(bool scalar_global_scale) {
         }
     }
     std::vector<float> p_ref = p_host;
-    if (fp4_p_env_enabled()) {
-        std::vector<block_nvfp4> p_q((size_t) cols * (size_t) q_heads * (size_t) blocks);
-        for (int64_t h = 0; h < q_heads; ++h) {
-            for (int64_t c = 0; c < cols; ++c) {
-                const size_t row_off = (size_t) h * (size_t) cols * (size_t) kv_size + (size_t) c * (size_t) kv_size;
-                float amax = 0.0f;
-                for (int64_t i = 0; i < kv_size; ++i) {
-                    amax = fmaxf(amax, fabsf(p_host[row_off + (size_t) i]));
-                }
-                const float global = amax > 0.0f ? (6.0f * 224.0f / amax) : 0.0f;
-                for (int64_t b = 0; b < blocks; ++b) {
-                    const size_t q_off = ((size_t) h * (size_t) cols + (size_t) c) * (size_t) blocks + (size_t) b;
-                    quantize_row_nvfp4_ref(p_host.data() + row_off + (size_t) b * QK_NVFP4, p_q.data() + q_off, QK_NVFP4, global);
-                    dequantize_row_nvfp4(p_q.data() + q_off, p_ref.data() + row_off + (size_t) b * QK_NVFP4, QK_NVFP4, global);
-                }
+    std::vector<block_nvfp4> p_q((size_t) cols * (size_t) q_heads * (size_t) blocks);
+    for (int64_t h = 0; h < q_heads; ++h) {
+        for (int64_t c = 0; c < cols; ++c) {
+            const size_t row_off = (size_t) h * (size_t) cols * (size_t) kv_size + (size_t) c * (size_t) kv_size;
+            float amax = 0.0f;
+            for (int64_t i = 0; i < kv_size; ++i) {
+                amax = fmaxf(amax, fabsf(p_host[row_off + (size_t) i]));
+            }
+            const float global = amax > 0.0f ? (6.0f * 224.0f / amax) : 0.0f;
+            for (int64_t b = 0; b < blocks; ++b) {
+                const size_t q_off = ((size_t) h * (size_t) cols + (size_t) c) * (size_t) blocks + (size_t) b;
+                quantize_row_nvfp4_ref(p_host.data() + row_off + (size_t) b * QK_NVFP4, p_q.data() + q_off, QK_NVFP4, global);
+                dequantize_row_nvfp4(p_q.data() + q_off, p_ref.data() + row_off + (size_t) b * QK_NVFP4, QK_NVFP4, global);
             }
         }
     }
@@ -676,7 +671,7 @@ static bool run_set_rows_then_matmul_case(bool scalar_global_scale) {
     std::vector<float> v_deq((size_t) n_embd * (size_t) kv_size);
     ggml_backend_tensor_get(v_cache, v_q.data(), 0, v_q.size() * sizeof(block_nvfp4));
     if (scalar_global_scale) {
-        if (fp4_p_lt_expected_for_kv_size(kv_size)) {
+        if (expect_lt_reference_for_kv_size(kv_size)) {
             dequantize_v_blocks_scalar_like_lt(v_q, fixed_global, v_deq, n_embd, kv_size, blocks);
         } else {
             for (int64_t row = 0; row < n_embd; ++row) {
@@ -686,7 +681,7 @@ static bool run_set_rows_then_matmul_case(bool scalar_global_scale) {
         }
     } else {
         ggml_backend_tensor_get(v_scale_base, v_s.data(), 0, v_s.size() * sizeof(float));
-        if (fp4_p_lt_expected_for_kv_size(kv_size)) {
+        if (expect_lt_reference_for_kv_size(kv_size)) {
             dequantize_v_blocks_like_lt(v_q, v_s, v_deq, n_embd, kv_size, blocks);
         } else {
             for (int64_t row = 0; row < n_embd; ++row) {
@@ -850,9 +845,8 @@ static bool run_real_vcache_view_benchmark(int64_t kv_size = 512) {
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
-    const char * fp4_env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV");
-    std::printf("test-vcache-nvfp4-matmul: benchmark kv_size=%lld fp4_p_env=%s %.3f us/iter (%d iters)\n",
-            (long long) kv_size, fp4_env != nullptr ? fp4_env : "(unset)", elapsed_ms * 1000.0f / (float) iters, iters);
+    std::printf("test-vcache-nvfp4-matmul: benchmark kv_size=%lld fp4_p=default %.3f us/iter (%d iters)\n",
+            (long long) kv_size, elapsed_ms * 1000.0f / (float) iters, iters);
 
     ggml_backend_buffer_free(buf);
     ggml_backend_free(backend);

@@ -51,8 +51,8 @@
   - CPU-side activation roundtrip helper is in `src/llama-nvfp4.cpp`; it converts the bound input scale into `global_scale = 1 / input_scale`, quantizes to NVFP4 with the reference path, then dequantizes back to F32 before matmul.
 - CUDA execution path:
   - Main dispatch is in `ggml/src/ggml-cuda/ggml-cuda.cu`.
-  - If `GGML_CUDA_NVFP4_NATIVE` is enabled and tensor types are `src0=NVFP4`, `src1=F32`, `dst=F32`, CUDA first attempts the native path `ggml_cuda_mul_mat_nvfp4_native()`.
-  - Native implementation is in `ggml/src/ggml-cuda/nvfp4-matmul.cu`.
+  - If tensor types are `src0=NVFP4`, `src1=F32`, `dst=F32`, CUDA first attempts the native path `ggml_cuda_mul_mat_nvfp4_native()`.
+  - Native implementation is in `ggml/src/ggml-cuda/nvfp4/nvfp4-matmul.cu`.
     - Reads `input_scale` from the bound mul-mat node and converts it to `global_scale = 1 / input_scale`.
     - Quantizes the F32 activation matrix to temporary NVFP4 on device with `quantize_row_nvfp4_kernel`.
     - Splits packed NVFP4 blocks into separate data and scale channels before calling `cublasLtMatmul`.
@@ -61,10 +61,10 @@
   - The nibble packing fix in `quantize_row_nvfp4_kernel` is critical: all lanes must participate in the warp shuffle, and only even lanes store packed bytes.
 - CUDA NVFP4 flash-attention experiments are split between graph flags and CUDA implementation.
   - Graph flag selection is in `src/llama-graph.cpp`.
-  - CUDA execution lives in `ggml/src/ggml-cuda/fattn-nvfp4.cu`.
+  - CUDA execution lives in `ggml/src/ggml-cuda/nvfp4/fattn-nvfp4.cu`.
   - Current related env switches include `GGML_CUDA_NVFP4_FATTN`, `GGML_CUDA_NVFP4_FATTN_NO_FALLBACK`, `GGML_CUDA_NVFP4_FATTN_NO_Q_SMOOTH`, `GGML_CUDA_NVFP4_FATTN_NO_K_SMOOTH`, `GGML_CUDA_NVFP4_FATTN_Q_DYNAMIC`, `GGML_CUDA_NVFP4_FATTN_P_DIRECT`, and `GGML_CUDA_NVFP4_FATTN_DEBUG`.
-- CUDA NVFP4 V-cache p*v experiments live in `ggml/src/ggml-cuda/vcache-nvfp4-matmul.cu`.
-  - `LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV=1` makes the V-cache p*v matmul dynamically quantize P rows to NVFP4 before dotting with NVFP4 V. It defaults off and logs its enabled/disabled state once.
+- CUDA NVFP4 V-cache p*v experiments live in `ggml/src/ggml-cuda/nvfp4/vcache-nvfp4-matmul.cu`.
+  - The V-cache p*v matmul dynamically quantizes P rows to NVFP4 by default before dotting with NVFP4 V. It logs the default FP4-P behavior once.
 - CUDA fallback path:
   - If native NVFP4 is not applicable or fails, execution falls back to the general quantized matmul path in `ggml/src/ggml-cuda/mmq.cu`.
   - In that path, the F32 activation is quantized to `Q8_1`, then the kernel uses the NVFP4-specific device dot product `vec_dot_nvfp4_q8_1` from `ggml/src/ggml-cuda/vecdotq.cuh`.
@@ -77,7 +77,7 @@
   - `llama_decode begin/end` in `tools/server/server.cpp`
   - `sampled token: tok=...` in `tools/server/server.cpp`
   - `ggml_compute_forward_get_rows_f32 ... firstN=...` in `ggml/src/ggml-cpu/ops.cpp`
-  - `NVFP4 layout diagnostic for ...` in `ggml/src/ggml-cuda/nvfp4-matmul.cu`
+  - `NVFP4 layout diagnostic for ...` in `ggml/src/ggml-cuda/nvfp4/nvfp4-matmul.cu`
 - Implementation pattern: `#ifndef NDEBUG`.
 - Experiment switch confirmation logs are allowed in Release only when they print once and are useful for confirming runtime behavior.
 
