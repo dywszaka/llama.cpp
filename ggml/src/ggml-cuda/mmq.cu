@@ -1,8 +1,8 @@
+#include "cuda-log.cuh"
 #include "mmq.cuh"
 #include "quantize.cuh"
 #include "ggml-impl.h"
 
-#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -83,83 +83,6 @@ static bool ggml_cuda_can_log(cudaStream_t stream) {
     cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
     const cudaError_t err = cudaStreamIsCapturing(stream, &status);
     return err == cudaSuccess && status == cudaStreamCaptureStatusNone;
-}
-
-static void ggml_cuda_log_nvfp4_block(const block_nvfp4 & block, const ggml_tensor * dst) {
-    char buf[512];
-    int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s nvfp4 scale_u8=%u vals:",
-            __func__, dst ? ggml_get_name(dst) : "unknown", (unsigned) block.e);
-    for (int i = 0; i < QK_NVFP4/2 && off > 0 && off < (int) sizeof(buf); ++i) {
-        const uint8_t q = block.qs[i];
-        off += std::snprintf(buf + off, sizeof(buf) - off, " %u %u",
-                (unsigned) (q & 0x0F), (unsigned) (q >> 4));
-    }
-    GGML_LOG_INFO("%s\n", buf);
-}
-
-static void ggml_cuda_log_f32_first4(const char * label, const float vals[4], const ggml_tensor * dst) {
-    // GGML_LOG_INFO("%s: dst=%s %s first4=%.9g %.9g %.9g %.9g\n",
-    //         __func__, dst ? ggml_get_name(dst) : "unknown", label,
-    //         vals[0], vals[1], vals[2], vals[3]);
-}
-
-static const char * ggml_cuda_mmq_layout_name(mmq_q8_1_ds_layout layout) {
-    switch (layout) {
-        case MMQ_Q8_1_DS_LAYOUT_D4:
-            return "D4";
-        case MMQ_Q8_1_DS_LAYOUT_DS4:
-            return "DS4";
-        case MMQ_Q8_1_DS_LAYOUT_D2S6:
-            return "D2S6";
-        default:
-            return "unknown";
-    }
-}
-
-static void ggml_cuda_log_block_q8_1_mmq(const block_q8_1_mmq & block, ggml_type type_x, const ggml_tensor * dst) {
-    const mmq_q8_1_ds_layout layout = mmq_get_q8_1_ds_layout(type_x);
-    GGML_LOG_INFO("%s: dst=%s block_q8_1_mmq layout=%s\n",
-            __func__, dst ? ggml_get_name(dst) : "unknown", ggml_cuda_mmq_layout_name(layout));
-
-    switch (layout) {
-        case MMQ_Q8_1_DS_LAYOUT_D4:
-            GGML_LOG_INFO("%s: dst=%s d4=%.9g %.9g %.9g %.9g\n",
-                    __func__, dst ? ggml_get_name(dst) : "unknown",
-                    block.d4[0], block.d4[1], block.d4[2], block.d4[3]);
-            break;
-        case MMQ_Q8_1_DS_LAYOUT_DS4: {
-            const uint16_t * u16 = reinterpret_cast<const uint16_t *>(block.ds4);
-            char buf[256];
-            int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s ds4_u16:",
-                    __func__, dst ? ggml_get_name(dst) : "unknown");
-            for (int i = 0; i < 8 && off > 0 && off < (int) sizeof(buf); ++i) {
-                off += std::snprintf(buf + off, sizeof(buf) - off, " %u", (unsigned) u16[i]);
-            }
-            GGML_LOG_INFO("%s\n", buf);
-        } break;
-        case MMQ_Q8_1_DS_LAYOUT_D2S6: {
-            const uint16_t * u16 = reinterpret_cast<const uint16_t *>(block.d2s6);
-            char buf[256];
-            int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s d2s6_u16:",
-                    __func__, dst ? ggml_get_name(dst) : "unknown");
-            for (int i = 0; i < 8 && off > 0 && off < (int) sizeof(buf); ++i) {
-                off += std::snprintf(buf + off, sizeof(buf) - off, " %u", (unsigned) u16[i]);
-            }
-            GGML_LOG_INFO("%s\n", buf);
-        } break;
-        default:
-            break;
-    }
-
-    for (int i = 0; i < 4*QK8_1; i += 32) {
-        char buf[512];
-        int off = std::snprintf(buf, sizeof(buf), "%s: dst=%s qs[%d..%d]:",
-                __func__, dst ? ggml_get_name(dst) : "unknown", i, i + 31);
-        for (int j = i; j < i + 32 && off > 0 && off < (int) sizeof(buf); ++j) {
-            off += std::snprintf(buf + off, sizeof(buf) - off, " %d", (int) block.qs[j]);
-        }
-        GGML_LOG_INFO("%s\n", buf);
-    }
 }
 
 void ggml_cuda_mul_mat_q(

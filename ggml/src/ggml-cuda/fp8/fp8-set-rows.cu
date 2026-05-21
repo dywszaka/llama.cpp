@@ -17,29 +17,6 @@ bool ggml_cuda_fp8_e4m3_e8m0_32_e4m2_experiment_enabled() {
     return cached != 0;
 }
 
-void ggml_cuda_log_fp8_e4m3_e8m0_32_e4m2_set_rows_once(const ggml_tensor * dst, bool enabled) {
-    static int logged_enabled = 0;
-    static int logged_disabled = 0;
-
-    int * logged = enabled ? &logged_enabled : &logged_disabled;
-    if (*logged != 0) {
-        return;
-    }
-    *logged = 1;
-
-    const char * env = getenv("GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2");
-    GGML_LOG_INFO(
-            "%s: GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2=%s -> %s; dst=%s type=%s ne=[%lld,%lld,%lld,%lld]\n",
-            __func__,
-            env != nullptr ? env : "(unset)",
-            enabled ? "enabled, CUDA set_rows will mask FP8 mantissa low bit (E4M2 experiment)"
-                    : "disabled, CUDA set_rows keeps FP8 E4M3",
-            ggml_get_name(dst),
-            ggml_type_name(dst->type),
-            (long long) dst->ne[0], (long long) dst->ne[1],
-            (long long) dst->ne[2], (long long) dst->ne[3]);
-}
-
 static __device__ void quantize_f32_fp8_e4m3_e8m0_32_e4m2_block(const float * __restrict__ x, block_fp8_e4m3_e8m0_32 * __restrict__ y) {
     quantize_f32_fp8_e4m3_e8m0_32_block(x, y, true);
 }

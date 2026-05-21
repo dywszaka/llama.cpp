@@ -1,6 +1,7 @@
 #include "cpy.cuh"
-#include "dequantize.cuh"
 #include "cpy-utils.cuh"
+#include "cuda-log.cuh"
+#include "dequantize.cuh"
 #if defined(GGML_USE_MUSA) && defined(GGML_MUSA_MUDNN_COPY)
 #include "ggml-musa/mudnn.cuh"
 #endif // GGML_USE_MUSA && GGML_MUSA_MUDNN_COPY
@@ -139,42 +140,6 @@ static bool ggml_cuda_fp8_e4m3_e8m0_32_e4m2_experiment_enabled() {
         cached = (env != nullptr && atoi(env) != 0) ? 1 : 0;
     }
     return cached != 0;
-}
-
-static void ggml_cuda_log_fp8_e4m3_e8m0_32_e4m2_cpy_once(
-        const char * path,
-        const ggml_tensor * src0,
-        const ggml_tensor * src1,
-        bool enabled) {
-    static int logged_f32_q_enabled = 0;
-    static int logged_f32_q_disabled = 0;
-    static int logged_repack_enabled = 0;
-    static int logged_repack_disabled = 0;
-
-    const bool is_repack = strcmp(path, "transpose_permute_repack") == 0;
-    int * logged = is_repack
-            ? (enabled ? &logged_repack_enabled : &logged_repack_disabled)
-            : (enabled ? &logged_f32_q_enabled : &logged_f32_q_disabled);
-
-    if (*logged != 0) {
-        return;
-    }
-    *logged = 1;
-
-    const char * env = getenv("GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2");
-    GGML_LOG_INFO(
-            "%s: path=%s GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2=%s -> %s; src=%s type=%s dst=%s type=%s dst_ne=[%lld,%lld,%lld,%lld]\n",
-            __func__,
-            path,
-            env != nullptr ? env : "(unset)",
-            enabled ? "enabled, CUDA cpy will mask FP8 mantissa low bit (E4M2 experiment)"
-                    : "disabled, CUDA cpy keeps FP8 E4M3",
-            ggml_get_name(src0),
-            ggml_type_name(src0->type),
-            ggml_get_name(src1),
-            ggml_type_name(src1->type),
-            (long long) src1->ne[0], (long long) src1->ne[1],
-            (long long) src1->ne[2], (long long) src1->ne[3]);
 }
 
 template <typename block_t, int qk>

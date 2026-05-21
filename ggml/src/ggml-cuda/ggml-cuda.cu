@@ -16,6 +16,7 @@
 #include "ggml-cuda/conv2d-transpose.cuh"
 #include "ggml-cuda/convert.cuh"
 #include "ggml-cuda/count-equal.cuh"
+#include "ggml-cuda/cuda-log.cuh"
 #include "ggml-cuda/cpy.cuh"
 #include "ggml-cuda/cross-entropy-loss.cuh"
 #include "ggml-cuda/diagmask.cuh"
@@ -2129,59 +2130,6 @@ static bool ggml_cuda_fp8_e8m0_native_no_fallback() {
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
     }
     return cached != 0;
-}
-
-static const char * ggml_cuda_tensor_name(const ggml_tensor * t) {
-    return t != nullptr ? ggml_get_name(t) : "";
-}
-
-static bool ggml_cuda_name_contains(const ggml_tensor * t, const char * needle) {
-    return std::strstr(ggml_cuda_tensor_name(t), needle) != nullptr;
-}
-
-static int ggml_cuda_mul_mat_kqvp_kind(const ggml_tensor * dst) {
-    if (ggml_cuda_name_contains(dst, "kqv") || ggml_cuda_name_contains(dst, "KQV")) {
-        return 2;
-    }
-    if (ggml_cuda_name_contains(dst, "kq") || ggml_cuda_name_contains(dst, "KQ")) {
-        return 1;
-    }
-    return 0;
-}
-
-static void ggml_cuda_log_mul_mat_kqvp_once(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst) {
-    static std::atomic<bool> qk_logged(false);
-    static std::atomic<bool> pv_logged(false);
-
-    const int kind = ggml_cuda_mul_mat_kqvp_kind(dst);
-    if (kind == 0) {
-        return;
-    }
-
-    const char * label = kind == 1 ? "q*k" : "p*v";
-    std::atomic<bool> & logged = kind == 1 ? qk_logged : pv_logged;
-    if (logged.exchange(true)) {
-        return;
-    }
-
-    GGML_LOG_INFO(
-            "%s: %s src0{name=%s type=%s ne=[%lld,%lld,%lld,%lld]} "
-            "src1{name=%s type=%s ne=[%lld,%lld,%lld,%lld]} "
-            "dst{name=%s type=%s ne=[%lld,%lld,%lld,%lld]}\n",
-            __func__,
-            label,
-            src0 != nullptr ? ggml_get_name(src0) : "(null)",
-            src0 != nullptr ? ggml_type_name(src0->type) : "(null)",
-            src0 != nullptr ? (long long) src0->ne[0] : 0, src0 != nullptr ? (long long) src0->ne[1] : 0,
-            src0 != nullptr ? (long long) src0->ne[2] : 0, src0 != nullptr ? (long long) src0->ne[3] : 0,
-            src1 != nullptr ? ggml_get_name(src1) : "(null)",
-            src1 != nullptr ? ggml_type_name(src1->type) : "(null)",
-            src1 != nullptr ? (long long) src1->ne[0] : 0, src1 != nullptr ? (long long) src1->ne[1] : 0,
-            src1 != nullptr ? (long long) src1->ne[2] : 0, src1 != nullptr ? (long long) src1->ne[3] : 0,
-            dst != nullptr ? ggml_get_name(dst) : "(null)",
-            dst != nullptr ? ggml_type_name(dst->type) : "(null)",
-            dst != nullptr ? (long long) dst->ne[0] : 0, dst != nullptr ? (long long) dst->ne[1] : 0,
-            dst != nullptr ? (long long) dst->ne[2] : 0, dst != nullptr ? (long long) dst->ne[3] : 0);
 }
 
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {

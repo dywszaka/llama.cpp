@@ -1,5 +1,6 @@
 #include "set-rows.cuh"
 #include "cpy-utils.cuh"
+#include "cuda-log.cuh"
 #include "fp8/fp8-set-rows.cuh"
 #include "nvfp4/nvfp4-set-rows.cuh"
 #include "nvfp4/vcache-nvfp4-set-rows.cuh"

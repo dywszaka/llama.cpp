@@ -1,5 +1,7 @@
 #include "vcache-nvfp4-set-rows.cuh"
 
+#include "../cuda-log.cuh"
+
 #include <cstdlib>
 
 static constexpr const char * GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE";
@@ -20,23 +22,6 @@ bool ggml_cuda_nvfp4_vcache_fast_update_enabled() {
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
     }
     return cached != 0;
-}
-
-void ggml_cuda_log_nvfp4_vcache_fast_update_once(bool enabled) {
-    static int logged = 0;
-    if (logged != 0) {
-        return;
-    }
-    logged = 1;
-
-    const char * env = getenv(GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV);
-    GGML_LOG_INFO(
-            "%s: %s=%s -> %s\n",
-            __func__,
-            GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV,
-            env != nullptr ? env : "(unset)",
-            enabled ? "enabled, CUDA NVFP4 V-cache set_rows may patch single-token updates without requantizing the block"
-                    : "disabled");
 }
 
 bool ggml_cuda_is_nvfp4_vcache_transposed_set_rows(

@@ -9,7 +9,6 @@ bool ggml_cuda_is_nvfp4_vcache_transposed_set_rows(
         const ggml_tensor * dst);
 
 bool ggml_cuda_nvfp4_vcache_fast_update_enabled();
-void ggml_cuda_log_nvfp4_vcache_fast_update_once(bool enabled);
 
 void ggml_cuda_op_set_rows_nvfp4_vcache(
         ggml_backend_cuda_context & ctx,
