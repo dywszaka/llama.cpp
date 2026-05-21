@@ -27,7 +27,7 @@
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
-#include "ggml-cuda/nvfp4/nvfp4-kq.cuh"
+#include "ggml-cuda/nvfp4/nvfp4-8-kq.cuh"
 #include "ggml-cuda/nvfp4/nvfp4-matmul.cuh"
 #include "ggml-cuda/nvfp4/vcache-nvfp4-matmul.cuh"
 #include "ggml-cuda/norm.cuh"
