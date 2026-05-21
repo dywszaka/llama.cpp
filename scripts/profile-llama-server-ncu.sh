@@ -187,7 +187,6 @@ full_cmd=("${ncu_cmd[@]}" "${server_cmd[@]}")
   echo "export LLAMA_STDOUT_FILE=$(printf '%q' "${LLAMA_STDOUT_FILE}")"
   while IFS='=' read -r k v; do
     [[ -z "${k}" ]] && continue
-    [[ "${k}" == "GGML_CUDA_NVFP4_NATIVE" ]] && continue
     [[ "${k}" == "LLAMA_STDOUT_FILE" ]] && continue
     echo "export ${k}=$(printf '%q' "${v}")"
   done < <(env | LC_ALL=C sort | grep -E '^(GGML_|LLAMA_EXPERIMENT_)=' || true)
