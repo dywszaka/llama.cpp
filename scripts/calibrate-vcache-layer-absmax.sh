@@ -9,14 +9,14 @@ Run an offline f16/f16 baseline decode over calibration text, collect Vcur layer
 activation absmax values, and write a compact JSON file for
 LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE.
 
-Defaults follow EXPERI.md's local baseline unless the option is explicitly
+Defaults follow expt-baseline.md's local baseline unless the option is explicitly
 overridden.
 
 Options:
   --out FILE                 Compact output JSON, default: experiments/qwen3-8b-v-layer-absmax.json
   --raw-out FILE             Raw calibration report, default: <out>.raw.json
   --bin FILE                 Calibration binary, default: build_cuda/bin/llama-vcache-calibration
-  --model FILE               GGUF model, default: Qwen3 8B NVFP4 model from EXPERI.md
+  --model FILE               GGUF model, default: Qwen3 8B NVFP4 model from expt-baseline.md
   --calib-text FILE          One prompt per line, default: tools/vcache-calibration/calibration-prompts.txt
   --ctx-size N               Context size, default: 512
   --batch-size N             Logical batch size, default: 512

@@ -6,6 +6,7 @@
   - New experiment switches must default to off.
   - Switch definitions must be centralized in one clear place.
   - The centralized definition must document what each switch does and what behavior it enables.
+  - When code adds a new environment-variable switch, record it in `expt-switch-env.md`; when code removes an environment-variable switch, remove it from that file.
 - Switch usage should be consolidated behind one helper/function per switch whenever possible.
   - Avoid checking the same switch directly in many unrelated call sites.
   - Keep switch plumbing narrow and easy to audit.
@@ -31,7 +32,7 @@
   - Record the exact run script or startup script used for the experiment.
   - For `llama-server` validations, record the request payload/data, the server response, server logs, and the validation result.
   - For PPL experiments, record the run scripts, input/config references, raw output logs, parsed metrics, and summarized validation result.
-- New experiment scripts must start from the baseline parameters documented in `EXPERI.md`.
+- New experiment scripts must start from the baseline parameters documented in `expt-baseline.md`.
   - Replace only the parameters required by the experiment.
   - Keep model path, prompt/request data, context size, batch sizes, cache types, GPU layer count, thread count, CUDA device, and server KV mode aligned with the baseline by default.
   - If an experiment must change a baseline parameter, document the reason in the experiment folder and do not treat the result as a direct baseline A/B comparison unless that parameter is the explicit subject of the experiment.

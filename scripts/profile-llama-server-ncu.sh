@@ -9,14 +9,14 @@ Launch llama-server under NVIDIA Nsight Compute, send one fixed completion
 request, and save the server logs, request/response, NCU report, and exact run
 metadata under experiments/.
 
-Defaults follow EXPERI.md's llama-server baseline:
+Defaults follow expt-baseline.md's llama-server baseline:
   --cache-type-k f16 --cache-type-v f16 --kv-unified
 
 Options:
   --name NAME                 Run name, default: baseline-f16-f16
   --out-dir DIR              Artifact directory, default: experiments/ncu-<timestamp>-<name>
   --bin PATH                 llama-server binary, default: build_cuda/bin/llama-server
-  --model PATH               GGUF model, default: qwen3-8b-nvfp4.gguf path from EXPERI.md
+  --model PATH               GGUF model, default: qwen3-8b-nvfp4.gguf path from expt-baseline.md
   --host HOST                Server host, default: 127.0.0.1
   --port PORT                Server port, default: 8080
   --cache-type-k TYPE        K cache type, default: f16
@@ -199,7 +199,7 @@ cat > "${out_dir}/summary.md" <<EOF
 # NCU llama-server profile: ${name}
 
 - Created: ${timestamp}
-- Baseline contract: see \`EXPERI.md\`
+- Baseline contract: see \`expt-baseline.md\`
 - K cache: \`${cache_type_k}\`
 - V cache: \`${cache_type_v}\`
 - NCU set: \`${ncu_set}\`

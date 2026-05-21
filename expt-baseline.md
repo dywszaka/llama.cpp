@@ -30,7 +30,6 @@ subject of the experiment.
 
 - Model: `/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf`
 - CUDA device: `CUDA_VISIBLE_DEVICES=0`
-- Native NVFP4 matmul: `GGML_CUDA_NVFP4_NATIVE=1`
 - GPU layers: `--n_gpu_layers 40`
 - CPU threads: `-t 32`
 - K cache type: `--cache-type-k f16`
@@ -42,7 +41,6 @@ Use this baseline for NVFP4 CUDA `llama-server` startup validation:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-GGML_CUDA_NVFP4_NATIVE=1 \
 LLAMA_STDOUT_FILE="${WORKSPACE}/gpu.log" \
   "${WORKSPACE}/build_cuda/bin/llama-server" \
     -m /home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf \
@@ -78,7 +76,6 @@ Fixed `llama-server` arguments:
 Fixed `llama-server` environment:
 
 - `CUDA_VISIBLE_DEVICES=0`
-- `GGML_CUDA_NVFP4_NATIVE=1`
 - `LLAMA_STDOUT_FILE=${WORKSPACE}/gpu.log`
 
 For each `llama-server` validation, save the startup script, request payload,
@@ -90,7 +87,6 @@ Use this baseline for PPL experiments:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-GGML_CUDA_NVFP4_NATIVE=1 \
   "${ROOT_DIR}/build_cuda/bin/llama-perplexity" \
     -m /home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf \
     -f "${ROOT_DIR}/data/wikitext/wikitext-2-raw/wiki.test.raw" \
@@ -119,7 +115,6 @@ Fixed `llama-perplexity` arguments:
 Fixed `llama-perplexity` environment:
 
 - `CUDA_VISIBLE_DEVICES=0`
-- `GGML_CUDA_NVFP4_NATIVE=1`
 
 For each PPL experiment, save the baseline run script, experiment run script,
 prompt/input reference, raw logs, parsed PPL metrics, and comparison summary in
@@ -131,7 +126,6 @@ Use this baseline for local `llama-bench` throughput measurements:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-GGML_CUDA_NVFP4_NATIVE=1 \
   "${ROOT_DIR}/build_cuda/bin/llama-bench" \
     -m /home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf \
     --cache-type-k f16 \
@@ -160,7 +154,6 @@ Fixed `llama-bench` arguments:
 Fixed `llama-bench` environment:
 
 - `CUDA_VISIBLE_DEVICES=0`
-- `GGML_CUDA_NVFP4_NATIVE=1`
 
 For each benchmark experiment, save the baseline run script, experiment run
 script, raw benchmark output, parsed throughput metrics, and comparison summary

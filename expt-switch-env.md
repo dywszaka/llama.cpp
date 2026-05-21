@@ -50,11 +50,3 @@ Enables CUDA NVFP4 V-cache single-token fast update. Default: off.
 When enabled, CUDA set_rows may patch single-token updates without
 requantizing the whole 16-token V-cache block.
 
-### `LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV`
-
-Enables dynamic NVFP4 quantization of P before V-cache P*V. Default: off.
-
-### `LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV_LT`
-
-Enables the cuBLASLt Tensor Core FP4 P*V path when
-`LLAMA_EXPERIMENT_NVFP4_VCACHE_FP4_PV=1` is also enabled. Default: off.

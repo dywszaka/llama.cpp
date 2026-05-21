@@ -7,7 +7,7 @@ quantization path is actually active compared with the f16/f16 baseline.
 
 ## Baseline rule
 
-Start every run from the `llama-server` baseline in `EXPERI.md`:
+Start every run from the `llama-server` baseline in `expt-baseline.md`:
 
 - Model: `/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf`
 - `CUDA_VISIBLE_DEVICES=0`
