@@ -7,7 +7,7 @@ Usage: scripts/calibrate-vcache-layer-absmax.sh [options] [-- extra llama-vcache
 
 Run an offline f16/f16 baseline decode over calibration text, collect Vcur layer
 activation absmax values, and write a compact JSON file for
-LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE.
+LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE.
 
 Defaults follow expt-baseline.md's local baseline unless the option is explicitly
 overridden.

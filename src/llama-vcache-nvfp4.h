@@ -5,7 +5,6 @@
 struct llama_cparams;
 struct ggml_tensor;
 
-bool llama_vcache_nvfp4_experiment_enabled();
 void llama_vcache_nvfp4_log_once();
 
 const char * llama_vcache_nvfp4_layer_global_scale_path();

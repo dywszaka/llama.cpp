@@ -82,8 +82,6 @@ static std::vector<float> make_signal(size_t n, float amplitude, float bias, flo
 }
 
 static bool run_store_case(int64_t head_dim, int64_t n_tokens) {
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-
     ggml_init_params params = {
         /* .mem_size   = */ 32 * 1024 * 1024,
         /* .mem_buffer = */ nullptr,
@@ -198,8 +196,7 @@ static bool run_store_case(int64_t head_dim, int64_t n_tokens) {
 }
 
 static bool run_scalar_global_scale_store_case() {
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE", "0");
+    set_env("LLAMA_NVFP4_VCACHE_FAST_UPDATE", "0");
 
     ggml_init_params params = {
         /* .mem_size   = */ 32 * 1024 * 1024,
@@ -330,8 +327,7 @@ static bool run_scalar_global_scale_store_case() {
 }
 
 static bool run_scalar_global_scale_multi_stream_store_case() {
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE", "0");
+    set_env("LLAMA_NVFP4_VCACHE_FAST_UPDATE", "0");
 
     ggml_init_params params = {
         /* .mem_size   = */ 32 * 1024 * 1024,
@@ -480,8 +476,7 @@ static bool compute_store_graph(
 }
 
 static bool run_fast_update_patch_case() {
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE", "1");
+    set_env("LLAMA_NVFP4_VCACHE_FAST_UPDATE", "1");
 
     ggml_init_params params = {
         /* .mem_size   = */ 32 * 1024 * 1024,
@@ -622,8 +617,7 @@ static bool run_fast_update_patch_case() {
 }
 
 static bool run_fast_update_fallback_case() {
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE", "1");
+    set_env("LLAMA_NVFP4_VCACHE_FAST_UPDATE", "1");
 
     ggml_init_params params = {
         /* .mem_size   = */ 32 * 1024 * 1024,
@@ -750,8 +744,6 @@ static bool run_fast_update_fallback_case() {
 }
 
 static bool run_fast_update_benchmark() {
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-
     ggml_init_params params = {
         /* .mem_size   = */ 32 * 1024 * 1024,
         /* .mem_buffer = */ nullptr,
@@ -866,7 +858,7 @@ static bool run_fast_update_benchmark() {
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
-    const char * fast_env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE");
+    const char * fast_env = getenv("LLAMA_NVFP4_VCACHE_FAST_UPDATE");
     std::printf("test-vcache-nvfp4-store: benchmark fast_update=%s %.3f us/iter (%d iters, head_dim=%lld)\n",
             fast_env != nullptr ? fast_env : "(unset)",
             elapsed_ms * 1000.0f / (float) iters, iters, (long long) head_dim);
@@ -879,8 +871,6 @@ static bool run_fast_update_benchmark() {
 }
 
 int main(int argc, char ** argv) {
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-
     int dev_count = 0;
     const cudaError_t dev_err = cudaGetDeviceCount(&dev_count);
     if (dev_err != cudaSuccess || dev_count <= 0) {
@@ -897,7 +887,7 @@ int main(int argc, char ** argv) {
         return run_fast_update_benchmark() ? 0 : 1;
     }
 
-    set_env("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE", "1");
+    set_env("LLAMA_NVFP4_VCACHE_FAST_UPDATE", "1");
 
     if (!run_store_case(128, 17)) {
         return 1;

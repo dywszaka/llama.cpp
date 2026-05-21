@@ -178,9 +178,9 @@ void ggml_cuda_log_nvfp4_vcache_fast_update_once(bool enabled) {
     }
     logged = 1;
 
-    const char * env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE");
+    const char * env = getenv("LLAMA_NVFP4_VCACHE_FAST_UPDATE");
     GGML_LOG_INFO(
-            "%s: LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE=%s -> %s\n",
+            "%s: LLAMA_NVFP4_VCACHE_FAST_UPDATE=%s -> %s\n",
             __func__,
             env != nullptr ? env : "(unset)",
             enabled ? "enabled, CUDA NVFP4 V-cache set_rows may patch single-token updates without requantizing the block"

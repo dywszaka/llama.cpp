@@ -518,8 +518,6 @@ static bool run_real_vcache_view_case(int64_t kv_size, bool scalar_global_scale 
 }
 
 static bool run_set_rows_then_matmul_case(bool scalar_global_scale) {
-    setenv("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1", 1);
-
     ggml_init_params params = {
         /* .mem_size   = */ 96 * 1024 * 1024,
         /* .mem_buffer = */ nullptr,

@@ -8,9 +8,8 @@
 
 namespace {
 
-constexpr const char * LLAMA_EXPERIMENT_NVFP4_VCACHE_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE";
-constexpr const char * LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE";
-constexpr const char * LLAMA_EXPERIMENT_NVFP4_VCACHE_PER_BLOCK_SCALE_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_PER_BLOCK_SCALE";
+constexpr const char * LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_ENV = "LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE";
+constexpr const char * LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE_ENV = "LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE";
 constexpr const char * LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_DEFAULT_PATH = "experiments/qwen3-8b-v-layer-absmax.json";
 constexpr float LLAMA_NVFP4_VCACHE_FP4_MAX = 6.0f;
 constexpr float LLAMA_NVFP4_VCACHE_E4M3_HALF_MAX = 224.0f;
@@ -24,14 +23,6 @@ bool env_flag_enabled(const char * name) {
 
 }
 
-bool llama_vcache_nvfp4_experiment_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        cached = env_flag_enabled(LLAMA_EXPERIMENT_NVFP4_VCACHE_ENV) ? 1 : 0;
-    }
-    return cached != 0;
-}
-
 void llama_vcache_nvfp4_log_once() {
     static std::atomic<bool> logged(false);
     if (logged.exchange(true)) {
@@ -39,17 +30,12 @@ void llama_vcache_nvfp4_log_once() {
     }
 
     LLAMA_LOG_INFO(
-            "%s: %s=%s -> %s\n",
-            __func__,
-            LLAMA_EXPERIMENT_NVFP4_VCACHE_ENV,
-            llama_vcache_nvfp4_experiment_enabled() ? "1" : "0",
-            llama_vcache_nvfp4_experiment_enabled()
-                ? "enabled (experimental NVFP4 V-cache path)"
-                : "disabled");
+            "%s: NVFP4 V-cache runtime path is requested by type_v=nvfp4; required runtime settings are flash_attn=0, offload_kqv=1, kv_unified=1\n",
+            __func__);
 }
 
 const char * llama_vcache_nvfp4_layer_global_scale_path() {
-    const char * env = getenv(LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_ENV);
+    const char * env = getenv(LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_ENV);
     if (env == nullptr || env[0] == '\0' || env[0] == '0') {
         return nullptr;
     }
@@ -60,7 +46,7 @@ const char * llama_vcache_nvfp4_layer_global_scale_path() {
 }
 
 bool llama_vcache_nvfp4_per_block_scale_enabled() {
-    return env_flag_enabled(LLAMA_EXPERIMENT_NVFP4_VCACHE_PER_BLOCK_SCALE_ENV);
+    return env_flag_enabled(LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE_ENV);
 }
 
 float llama_vcache_nvfp4_default_v_global_absmax() {
@@ -84,12 +70,12 @@ void llama_vcache_nvfp4_log_scale_mode_once(bool nvfp4_vcache_active) {
     LLAMA_LOG_INFO(
             "%s: %s=%s, %s=%s -> %s\n",
             __func__,
-            LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_ENV,
+            LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE_ENV,
             layer_path != nullptr ? layer_path : "(unset)",
-            LLAMA_EXPERIMENT_NVFP4_VCACHE_PER_BLOCK_SCALE_ENV,
+            LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE_ENV,
             llama_vcache_nvfp4_per_block_scale_enabled() ? "1" : "0",
-            per_layer ? "enabled, NVFP4 V-cache uses experimental per-layer JSON global scales"
-                      : per_block ? "enabled, NVFP4 V-cache uses experimental per-block external scales"
+            per_layer ? "enabled, NVFP4 V-cache uses per-layer JSON global scales"
+                      : per_block ? "enabled, NVFP4 V-cache uses per-block external scales"
                                   : nvfp4_vcache_active ? "disabled, NVFP4 V-cache uses default per-tensor global scale"
                                                         : "inactive, NVFP4 V-cache scale mode not used");
 }
@@ -100,10 +86,6 @@ bool llama_vcache_nvfp4_type_supported(ggml_type type_v) {
 
 bool llama_vcache_nvfp4_runtime_supported(const llama_cparams & cparams, ggml_type type_v) {
     if (!llama_vcache_nvfp4_type_supported(type_v)) {
-        return false;
-    }
-
-    if (!llama_vcache_nvfp4_experiment_enabled()) {
         return false;
     }
 

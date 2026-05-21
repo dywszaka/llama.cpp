@@ -69,7 +69,7 @@ static __device__ __forceinline__ uint8_t ggml_cuda_best_index_e4m3_vcache(float
     return best_index;
 }
 
-static bool ggml_cuda_is_experimental_vcache_nvfp4_tensor(const ggml_tensor * src0) {
+static bool ggml_cuda_is_vcache_nvfp4_tensor(const ggml_tensor * src0) {
     if (src0 == nullptr || src0->type != GGML_TYPE_NVFP4) {
         return false;
     }
@@ -711,7 +711,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
         const ggml_tensor * src0,
         const ggml_tensor * src1,
         ggml_tensor * dst) {
-    if (!ggml_cuda_is_experimental_vcache_nvfp4_tensor(src0)) {
+    if (!ggml_cuda_is_vcache_nvfp4_tensor(src0)) {
         return false;
     }
 

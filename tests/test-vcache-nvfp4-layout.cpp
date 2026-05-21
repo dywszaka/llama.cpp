@@ -4,12 +4,6 @@
 #include <cstdio>
 
 static bool run_case() {
-#if defined(_WIN32)
-    _putenv_s("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1");
-#else
-    setenv("LLAMA_EXPERIMENT_NVFP4_VCACHE", "1", 1);
-#endif
-
     ggml_init_params params = {
         /* .mem_size   = */ 8 * 1024 * 1024,
         /* .mem_buffer = */ nullptr,
@@ -61,7 +55,7 @@ static bool run_case() {
     const bool can_mul = (v->ne[0] == kq->ne[0]) && (kq->ne[2] % v->ne[2] == 0) && (kq->ne[3] % v->ne[3] == 0);
 
     if (!can_mul) {
-        std::fprintf(stderr, "expected permuted experimental NVFP4 V layout to stay mul_mat-compatible\n");
+        std::fprintf(stderr, "expected permuted NVFP4 V-cache layout to stay mul_mat-compatible\n");
         ggml_free(ctx);
         return false;
     }

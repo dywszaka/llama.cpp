@@ -18163,7 +18163,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
     llama_memory_i * res;
     // Transposed V cache writes are scalar set_rows() writes. Block-quantized
     // cache types need full block rows, so keep them in the non-transposed layout,
-    // except for the experimental NVFP4 V-cache path which has its own store logic.
+    // except for the NVFP4 V-cache path which has its own store logic.
     const bool nvfp4_vcache_transposed = llama_vcache_nvfp4_should_transpose_store(cparams, params.type_v);
     const bool non_flash_block_v = !cparams.flash_attn && ggml_blck_size(params.type_v) > 1 && !nvfp4_vcache_transposed;
     const bool attn_v_trans = !cparams.flash_attn && (!non_flash_block_v || nvfp4_vcache_transposed);

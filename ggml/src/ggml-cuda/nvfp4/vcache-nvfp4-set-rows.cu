@@ -4,16 +4,7 @@
 
 #include <cstdlib>
 
-static constexpr const char * GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV = "LLAMA_EXPERIMENT_NVFP4_VCACHE_FAST_UPDATE";
-
-static bool ggml_cuda_nvfp4_vcache_experiment_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("LLAMA_EXPERIMENT_NVFP4_VCACHE");
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
+static constexpr const char * GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV = "LLAMA_NVFP4_VCACHE_FAST_UPDATE";
 
 bool ggml_cuda_nvfp4_vcache_fast_update_enabled() {
     static int cached = -1;
@@ -28,10 +19,6 @@ bool ggml_cuda_is_nvfp4_vcache_transposed_set_rows(
         const ggml_tensor * src0,
         const ggml_tensor * src1,
         const ggml_tensor * dst) {
-    if (!ggml_cuda_nvfp4_vcache_experiment_enabled()) {
-        return false;
-    }
-
     if (dst->type != GGML_TYPE_NVFP4 || src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_I64) {
         return false;
     }

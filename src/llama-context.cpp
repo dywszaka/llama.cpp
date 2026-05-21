@@ -2334,8 +2334,8 @@ llama_context * llama_init_from_model(
         nvfp4_vcache_cparams.offload_kqv = params.offload_kqv;
         nvfp4_vcache_cparams.kv_unified = params.kv_unified;
         if (!llama_vcache_nvfp4_runtime_supported(nvfp4_vcache_cparams, params.type_v)) {
-            LLAMA_LOG_ERROR("%s: NVFP4 V cache requires %s=1, flash_attn=0, offload_kqv=1, and kv_unified=1\n",
-                    __func__, "LLAMA_EXPERIMENT_NVFP4_VCACHE");
+            LLAMA_LOG_ERROR("%s: NVFP4 V cache requires flash_attn=0, offload_kqv=1, and kv_unified=1\n",
+                    __func__);
             return nullptr;
         }
     }

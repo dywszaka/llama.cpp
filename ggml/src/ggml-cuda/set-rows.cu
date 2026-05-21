@@ -10,7 +10,7 @@
 
 typedef void (*set_rows_kernel_t)(const char * src, char * dst);
 
-bool ggml_cuda_is_experimental_nvfp4_vcache_set_rows_node(const ggml_tensor * dst) {
+bool ggml_cuda_is_nvfp4_vcache_set_rows_node(const ggml_tensor * dst) {
     if (dst == nullptr || dst->op != GGML_OP_SET_ROWS) {
         return false;
     }

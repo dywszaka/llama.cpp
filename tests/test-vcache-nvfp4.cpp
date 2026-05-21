@@ -38,6 +38,7 @@ int main() {
 
     cparams.flash_attn = false;
     cparams.offload_kqv = true;
+    cparams.kv_unified = false;
 
     if (!expect(llama_vcache_nvfp4_type_supported(GGML_TYPE_NVFP4), "NVFP4 type should be supported")) {
         return 1;
@@ -51,11 +52,20 @@ int main() {
         return 1;
     }
 
-    if (!expect(llama_vcache_nvfp4_token_padding(cparams, GGML_TYPE_NVFP4) == 1u, "runtime-disabled NVFP4 token padding should stay 1")) {
+    if (!expect(llama_vcache_nvfp4_token_padding(cparams, GGML_TYPE_NVFP4) == 1u, "kv_unified=0 should keep NVFP4 V-cache token padding disabled")) {
         return 1;
     }
 
-    if (!expect(!llama_vcache_nvfp4_runtime_supported(cparams, GGML_TYPE_NVFP4), "runtime path should stay disabled when experiment switch is off")) {
+    if (!expect(!llama_vcache_nvfp4_runtime_supported(cparams, GGML_TYPE_NVFP4), "kv_unified=0 must disable NVFP4 V-cache runtime path")) {
+        return 1;
+    }
+
+    cparams.kv_unified = true;
+    if (!expect(llama_vcache_nvfp4_token_padding(cparams, GGML_TYPE_NVFP4) == 16u, "NVFP4 V-cache token padding should use 16 slots")) {
+        return 1;
+    }
+
+    if (!expect(llama_vcache_nvfp4_runtime_supported(cparams, GGML_TYPE_NVFP4), "type_v=NVFP4 should enable the V-cache runtime path when runtime settings are compatible")) {
         return 1;
     }
 
@@ -70,8 +80,8 @@ int main() {
         return 1;
     }
 
-    set_env_var("LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE", nullptr);
-    set_env_var("LLAMA_EXPERIMENT_NVFP4_VCACHE_PER_BLOCK_SCALE", nullptr);
+    set_env_var("LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE", nullptr);
+    set_env_var("LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE", nullptr);
     if (!expect(llama_vcache_nvfp4_layer_global_scale_path() == nullptr, "default V-cache scale path should not use a per-layer JSON file")) {
         return 1;
     }
@@ -85,13 +95,13 @@ int main() {
         return 1;
     }
 
-    set_env_var("LLAMA_EXPERIMENT_NVFP4_VCACHE_PER_BLOCK_SCALE", "1");
-    if (!expect(llama_vcache_nvfp4_per_block_scale_enabled(), "per-block V-cache scale experiment switch should enable old scale path")) {
+    set_env_var("LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE", "1");
+    if (!expect(llama_vcache_nvfp4_per_block_scale_enabled(), "per-block V-cache scale switch should enable the old scale path")) {
         return 1;
     }
 
-    set_env_var("LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE", "1");
-    if (!expect(llama_vcache_nvfp4_layer_global_scale_path() != nullptr, "per-layer V-cache scale experiment switch should select a JSON path")) {
+    set_env_var("LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE", "1");
+    if (!expect(llama_vcache_nvfp4_layer_global_scale_path() != nullptr, "per-layer V-cache scale switch should select a JSON path")) {
         return 1;
     }
 

@@ -64,7 +64,7 @@
   - Graph flag selection is in `src/llama-graph.cpp`.
   - CUDA execution lives in `ggml/src/ggml-cuda/nvfp4/fattn-nvfp4.cu`.
   - Current related env switches include `GGML_CUDA_NVFP4_FATTN`, `GGML_CUDA_NVFP4_FATTN_NO_FALLBACK`, `GGML_CUDA_NVFP4_FATTN_NO_Q_SMOOTH`, `GGML_CUDA_NVFP4_FATTN_NO_K_SMOOTH`, `GGML_CUDA_NVFP4_FATTN_Q_DYNAMIC`, `GGML_CUDA_NVFP4_FATTN_P_DIRECT`, and `GGML_CUDA_NVFP4_FATTN_DEBUG`.
-- CUDA NVFP4 V-cache p*v experiments live in `ggml/src/ggml-cuda/nvfp4/vcache-nvfp4-matmul.cu`.
+- CUDA NVFP4 V-cache p*v matmul lives in `ggml/src/ggml-cuda/nvfp4/vcache-nvfp4-matmul.cu`.
   - The V-cache p*v matmul dynamically quantizes P rows to NVFP4 by default before dotting with NVFP4 V. It logs the default FP4-P behavior once.
 - CUDA fallback path:
   - If native NVFP4 is not applicable or fails, execution falls back to the general quantized matmul path in `ggml/src/ggml-cuda/mmq.cu`.

@@ -34,8 +34,7 @@ Options:
 
 Useful environment switches:
   CUDA_VISIBLE_DEVICES=0
-  LLAMA_EXPERIMENT_NVFP4_VCACHE=1
-  LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE=experiments/qwen3-8b-v-layer-absmax.json
+  LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE=experiments/qwen3-8b-v-layer-absmax.json
   GGML_CUDA_DISABLE_GRAPHS=1      Diagnostic only; record that this changes baseline env.
 EOF
 }
@@ -189,7 +188,7 @@ full_cmd=("${ncu_cmd[@]}" "${server_cmd[@]}")
     [[ -z "${k}" ]] && continue
     [[ "${k}" == "LLAMA_STDOUT_FILE" ]] && continue
     echo "export ${k}=$(printf '%q' "${v}")"
-  done < <(env | LC_ALL=C sort | grep -E '^(GGML_|LLAMA_EXPERIMENT_)=' || true)
+  done < <(env | LC_ALL=C sort | grep -E '^(GGML_|LLAMA_EXPERIMENT_|LLAMA_NVFP4_)=' || true)
   quote_cmd "${full_cmd[@]}"
 } > "${out_dir}/run-ncu-server.sh"
 chmod +x "${out_dir}/run-ncu-server.sh"
@@ -212,9 +211,9 @@ cat > "${out_dir}/summary.md" <<EOF
 
 ## Interpretation Checklist
 - Confirm server args and env in \`run-ncu-server.sh\` and \`env.txt\`.
-- Confirm cache types and one-shot experiment logs in \`server.log\`.
+- Confirm cache types and one-shot runtime logs in \`server.log\`.
 - Inspect \`ncu-details.csv\` / \`ncu-raw.csv\` for relevant quantization, staging, and GEMM kernels.
-- Compare this folder against a f16/f16 baseline folder with the same request and unchanged baseline parameters except the experiment switch or cache type under test.
+- Compare this folder against a f16/f16 baseline folder with the same request and unchanged baseline parameters except the switch or cache type under test.
 EOF
 
 echo "artifact directory: ${out_dir}"
