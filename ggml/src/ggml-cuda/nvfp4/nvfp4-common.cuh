@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common.cuh"
+#include "../common.cuh"
 
 #include <cuda_fp8.h>
 

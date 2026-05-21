@@ -60,7 +60,7 @@ Expected: failure because matmul currently requires per-block scale layout.
 ### Task 4: Implement Scalar Matmul Path
 
 **Files:**
-- Modify: `ggml/src/ggml-cuda/vcache-nvfp4-matmul.cu`
+- Modify: `ggml/src/ggml-cuda/nvfp4/vcache-nvfp4-matmul.cu`
 
 **Step 1: Accept scalar scale layout**
 

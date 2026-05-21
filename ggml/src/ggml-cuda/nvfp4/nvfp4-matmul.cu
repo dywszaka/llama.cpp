@@ -1,7 +1,7 @@
 #include "nvfp4-matmul.cuh"
 
 #include "ggml-backend.h"
-#include "../ggml-quants.h"
+#include "../../ggml-quants.h"
 
 #include <atomic>
 #include <cmath>
