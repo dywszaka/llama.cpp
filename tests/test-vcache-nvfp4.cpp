@@ -1,7 +1,9 @@
 #include "../src/llama-vcache-nvfp4.h"
 #include "../src/llama-cparams.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 static bool expect(bool cond, const char * msg) {
     if (!cond) {
@@ -9,6 +11,26 @@ static bool expect(bool cond, const char * msg) {
         return false;
     }
     return true;
+}
+
+static bool expect_close(float actual, float expected, float tol, const char * msg) {
+    if (std::fabs(actual - expected) > tol) {
+        std::fprintf(stderr, "%s: actual=%g expected=%g\n", msg, (double) actual, (double) expected);
+        return false;
+    }
+    return true;
+}
+
+static void set_env_var(const char * name, const char * value) {
+#if defined(_WIN32)
+    _putenv_s(name, value != nullptr ? value : "");
+#else
+    if (value != nullptr) {
+        setenv(name, value, 1);
+    } else {
+        unsetenv(name);
+    }
+#endif
 }
 
 int main() {
@@ -45,6 +67,31 @@ int main() {
     cparams.flash_attn = false;
     cparams.offload_kqv = false;
     if (!expect(!llama_vcache_nvfp4_runtime_supported(cparams, GGML_TYPE_NVFP4), "offload_kqv=0 must disable NVFP4 V-cache runtime path")) {
+        return 1;
+    }
+
+    set_env_var("LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE", nullptr);
+    set_env_var("LLAMA_EXPERIMENT_NVFP4_VCACHE_PER_BLOCK_SCALE", nullptr);
+    if (!expect(llama_vcache_nvfp4_layer_global_scale_path() == nullptr, "default V-cache scale path should not use a per-layer JSON file")) {
+        return 1;
+    }
+    if (!expect(!llama_vcache_nvfp4_per_block_scale_enabled(), "default V-cache scale path should not use per-block external scales")) {
+        return 1;
+    }
+    if (!expect_close(llama_vcache_nvfp4_default_v_global_absmax(), 80.428f, 1e-6f, "default V-cache absmax should use wiki P90")) {
+        return 1;
+    }
+    if (!expect_close(llama_vcache_nvfp4_default_v_global_scale(), 1344.0f / 80.428f, 1e-5f, "default V-cache global scale should derive from wiki P90")) {
+        return 1;
+    }
+
+    set_env_var("LLAMA_EXPERIMENT_NVFP4_VCACHE_PER_BLOCK_SCALE", "1");
+    if (!expect(llama_vcache_nvfp4_per_block_scale_enabled(), "per-block V-cache scale experiment switch should enable old scale path")) {
+        return 1;
+    }
+
+    set_env_var("LLAMA_EXPERIMENT_NVFP4_VCACHE_LAYER_GLOBAL_SCALE", "1");
+    if (!expect(llama_vcache_nvfp4_layer_global_scale_path() != nullptr, "per-layer V-cache scale experiment switch should select a JSON path")) {
         return 1;
     }
 
