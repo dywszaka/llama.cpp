@@ -1,0 +1,7 @@
+run,test,cache_k,cache_v,fast_update,n_prompt,n_gen,avg_ts,stddev_ts,avg_ns,stddev_ns,kv_unified,script_output,build_commit,build_number,gpu_info
+baseline,pp,f16,f16,,512,0,4181.247904,20.28134,122453789,594774,False,01-baseline.json,4ffe94f03,6270,NVIDIA GeForce RTX 5090
+baseline,tg,f16,f16,,0,128,86.104619,6.575477,1494329983,127123645,False,01-baseline.json,4ffe94f03,6270,NVIDIA GeForce RTX 5090
+nvfp4-fast-update-off,pp,f16,nvfp4,false,512,0,3094.56103,7.512258,165452357,402070,True,02-nvfp4-fast-update-off.json,4ffe94f03,6270,NVIDIA GeForce RTX 5090
+nvfp4-fast-update-off,tg,f16,nvfp4,false,0,128,80.13004,3.079076,1599394976,64785989,True,02-nvfp4-fast-update-off.json,4ffe94f03,6270,NVIDIA GeForce RTX 5090
+nvfp4-fast-update-on,pp,f16,nvfp4,true,512,0,3093.273719,10.042615,165521830,538539,True,03-nvfp4-fast-update-on.json,4ffe94f03,6270,NVIDIA GeForce RTX 5090
+nvfp4-fast-update-on,tg,f16,nvfp4,true,0,128,80.017194,3.102121,1601687445,65493915,True,03-nvfp4-fast-update-on.json,4ffe94f03,6270,NVIDIA GeForce RTX 5090

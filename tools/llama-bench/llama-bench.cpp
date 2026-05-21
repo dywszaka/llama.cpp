@@ -255,6 +255,7 @@ struct cmd_params {
     std::vector<llama_split_mode>    split_mode;
     std::vector<int>                 main_gpu;
     std::vector<bool>                no_kv_offload;
+    std::vector<bool>                kv_unified;
     std::vector<bool>                flash_attn;
     std::vector<std::vector<float>>  tensor_split;
     std::vector<std::vector<llama_model_tensor_buft_override>> tensor_buft_overrides;
@@ -292,6 +293,7 @@ static const cmd_params cmd_params_defaults = {
     /* split_mode           */ { LLAMA_SPLIT_MODE_LAYER },
     /* main_gpu             */ { 0 },
     /* no_kv_offload        */ { false },
+    /* kv_unified           */ { false },
     /* flash_attn           */ { false },
     /* tensor_split         */ { std::vector<float>(llama_max_devices(), 0.0f) },
     /* tensor_buft_overrides*/ { std::vector<llama_model_tensor_buft_override>{ { nullptr, nullptr } } },
@@ -367,6 +369,8 @@ static void print_usage(int /* argc */, char ** argv) {
            join(cmd_params_defaults.main_gpu, ",").c_str());
     printf("  -nkvo, --no-kv-offload <0|1>              (default: %s)\n",
            join(cmd_params_defaults.no_kv_offload, ",").c_str());
+    printf("  -kvu, --kv-unified <0|1>                  (default: %s)\n",
+           join(cmd_params_defaults.kv_unified, ",").c_str());
     printf("  -fa, --flash-attn <0|1>                   (default: %s)\n",
            join(cmd_params_defaults.flash_attn, ",").c_str());
     printf("  -mmp, --mmap <0|1>                        (default: %s)\n",
@@ -384,7 +388,7 @@ static void print_usage(int /* argc */, char ** argv) {
         "'first-last' or 'first-last+step' or 'first-last*mult'.\n");
 }
 
-static ggml_type ggml_type_from_name(const std::string & s, bool allow_nvfp4 = true) {
+static ggml_type ggml_type_from_name_common(const std::string & s) {
     if (s == "f16") {
         return GGML_TYPE_F16;
     }
@@ -409,14 +413,38 @@ static ggml_type ggml_type_from_name(const std::string & s, bool allow_nvfp4 = t
     if (s == "iq4_nl") {
         return GGML_TYPE_IQ4_NL;
     }
-    if (allow_nvfp4 && s == "nvfp4") {
+
+    return GGML_TYPE_COUNT;
+}
+
+static ggml_type ggml_type_from_name_k_cache(const std::string & s) {
+    const ggml_type type = ggml_type_from_name_common(s);
+    if (type != GGML_TYPE_COUNT) {
+        return type;
+    }
+    if (s == "nvfp4") {
         return GGML_TYPE_NVFP4;
     }
-    if (allow_nvfp4 && s == "nvfp4_8") {
+    if (s == "nvfp4_8") {
         return GGML_TYPE_NVFP4_8;
     }
-    if (!allow_nvfp4 && s == "fp8_e4m3_e8m0_32") {
+
+    return GGML_TYPE_COUNT;
+}
+
+static ggml_type ggml_type_from_name_v_cache(const std::string & s) {
+    const ggml_type type = ggml_type_from_name_common(s);
+    if (type != GGML_TYPE_COUNT) {
+        return type;
+    }
+    if (s == "nvfp4") {
+        return GGML_TYPE_NVFP4;
+    }
+    if (s == "fp8_e4m3_e8m0_32") {
         return GGML_TYPE_FP8_E4M3_E8M0_32;
+    }
+    if (s == "fp8_e4m3_e8m0_16") {
+        return GGML_TYPE_FP8_E4M3_E8M0_16;
     }
 
     return GGML_TYPE_COUNT;
@@ -511,7 +539,7 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
 
                 std::vector<ggml_type> types;
                 for (const auto & t : p) {
-                    ggml_type gt = ggml_type_from_name(t);
+                    ggml_type gt = ggml_type_from_name_k_cache(t);
                     if (gt == GGML_TYPE_COUNT) {
                         invalid_param = true;
                         break;
@@ -531,7 +559,7 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
 
                 std::vector<ggml_type> types;
                 for (const auto & t : p) {
-                    ggml_type gt = ggml_type_from_name(t, false);
+                    ggml_type gt = ggml_type_from_name_v_cache(t);
                     if (gt == GGML_TYPE_COUNT) {
                         invalid_param = true;
                         break;
@@ -629,6 +657,13 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = string_split<bool>(argv[i], split_delim);
                 params.no_kv_offload.insert(params.no_kv_offload.end(), p.begin(), p.end());
+            } else if (arg == "-kvu" || arg == "--kv-unified") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<bool>(argv[i], split_delim);
+                params.kv_unified.insert(params.kv_unified.end(), p.begin(), p.end());
             } else if (arg == "--numa") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -876,6 +911,9 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
     if (params.no_kv_offload.empty()) {
         params.no_kv_offload = cmd_params_defaults.no_kv_offload;
     }
+    if (params.kv_unified.empty()) {
+        params.kv_unified = cmd_params_defaults.kv_unified;
+    }
     if (params.flash_attn.empty()) {
         params.flash_attn = cmd_params_defaults.flash_attn;
     }
@@ -929,6 +967,7 @@ struct cmd_params_instance {
     llama_split_mode   split_mode;
     int                main_gpu;
     bool               no_kv_offload;
+    bool               kv_unified;
     bool               flash_attn;
     std::vector<float> tensor_split;
     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
@@ -1018,6 +1057,7 @@ struct cmd_params_instance {
         cparams.type_v       = type_v;
         cparams.defrag_thold = defrag_thold;
         cparams.offload_kqv  = !no_kv_offload;
+        cparams.kv_unified   = kv_unified;
         cparams.flash_attn   = flash_attn;
         cparams.embeddings   = embeddings;
         cparams.op_offload   = !no_op_offload;
@@ -1048,6 +1088,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
     for (const auto & tv : params.type_v)
     for (const auto & defrag_thold : params.defrag_thold)
     for (const auto & nkvo : params.no_kv_offload)
+    for (const auto & kvu : params.kv_unified)
     for (const auto & fa : params.flash_attn)
     for (const auto & nt : params.n_threads)
     for (const auto & cm : params.cpu_mask)
@@ -1077,6 +1118,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .split_mode   = */ sm,
                 /* .main_gpu     = */ mg,
                 /* .no_kv_offload= */ nkvo,
+                /* .kv_unified   = */ kvu,
                 /* .flash_attn   = */ fa,
                 /* .tensor_split = */ ts,
                 /* .tensor_buft_overrides = */ ot,
@@ -1110,6 +1152,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .split_mode   = */ sm,
                 /* .main_gpu     = */ mg,
                 /* .no_kv_offload= */ nkvo,
+                /* .kv_unified   = */ kvu,
                 /* .flash_attn   = */ fa,
                 /* .tensor_split = */ ts,
                 /* .tensor_buft_overrides = */ ot,
@@ -1143,6 +1186,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .split_mode   = */ sm,
                 /* .main_gpu     = */ mg,
                 /* .no_kv_offload= */ nkvo,
+                /* .kv_unified   = */ kvu,
                 /* .flash_attn   = */ fa,
                 /* .tensor_split = */ ts,
                 /* .tensor_buft_overrides = */ ot,
@@ -1180,6 +1224,7 @@ struct test {
     llama_split_mode         split_mode;
     int                      main_gpu;
     bool                     no_kv_offload;
+    bool                     kv_unified;
     bool                     flash_attn;
     std::vector<float>       tensor_split;
     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
@@ -1215,6 +1260,7 @@ struct test {
         split_mode     = inst.split_mode;
         main_gpu       = inst.main_gpu;
         no_kv_offload  = inst.no_kv_offload;
+        kv_unified     = inst.kv_unified;
         flash_attn     = inst.flash_attn;
         tensor_split   = inst.tensor_split;
         tensor_buft_overrides = inst.tensor_buft_overrides;
@@ -1265,8 +1311,8 @@ struct test {
             "build_commit", "build_number", "cpu_info",       "gpu_info",   "backends",     "model_filename",
             "model_type",   "model_size",   "model_n_params", "n_batch",    "n_ubatch",     "n_threads",
             "cpu_mask",     "cpu_strict",   "poll",           "type_k",     "type_v",       "n_gpu_layers",
-            "split_mode",   "main_gpu",     "no_kv_offload",  "flash_attn", "tensor_split", "tensor_buft_overrides",
-            "defrag_thold",
+            "split_mode",   "main_gpu",     "no_kv_offload",  "kv_unified", "flash_attn", "tensor_split",
+            "tensor_buft_overrides", "defrag_thold",
             "use_mmap",     "embeddings",   "no_op_offload",   "n_prompt",       "n_gen",      "n_depth",      "test_time",
             "avg_ns",       "stddev_ns",    "avg_ts",         "stddev_ts",
         };
@@ -1282,7 +1328,7 @@ struct test {
             field == "avg_ns" || field == "stddev_ns" || field == "no_op_offload") {
             return INT;
         }
-        if (field == "f16_kv" || field == "no_kv_offload" || field == "cpu_strict" || field == "flash_attn" ||
+        if (field == "f16_kv" || field == "no_kv_offload" || field == "kv_unified" || field == "cpu_strict" || field == "flash_attn" ||
             field == "use_mmap" || field == "embeddings") {
             return BOOL;
         }
@@ -1350,6 +1396,7 @@ struct test {
                                             split_mode_str(split_mode),
                                             std::to_string(main_gpu),
                                             std::to_string(no_kv_offload),
+                                            std::to_string(kv_unified),
                                             std::to_string(flash_attn),
                                             tensor_split_str,
                                             tensor_buft_overrides_str,
@@ -1567,6 +1614,9 @@ struct markdown_printer : public printer {
         if (field == "flash_attn") {
             return "fa";
         }
+        if (field == "kv_unified") {
+            return "kvu";
+        }
         if (field == "use_mmap") {
             return "mmap";
         }
@@ -1631,6 +1681,9 @@ struct markdown_printer : public printer {
         }
         if (params.no_kv_offload.size() > 1 || params.no_kv_offload != cmd_params_defaults.no_kv_offload) {
             fields.emplace_back("no_kv_offload");
+        }
+        if (params.kv_unified.size() > 1 || params.kv_unified != cmd_params_defaults.kv_unified) {
+            fields.emplace_back("kv_unified");
         }
         if (params.flash_attn.size() > 1 || params.flash_attn != cmd_params_defaults.flash_attn) {
             fields.emplace_back("flash_attn");
