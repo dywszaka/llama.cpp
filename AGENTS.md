@@ -1,36 +1,38 @@
 # Project Agent Instructions
 
+## Reusable Agent Guidance
+- General agent workflow, documentation hygiene, switch, logging, and validation rules live in `docs/development/agent-workflow.md`.
+- General experiment artifact, baseline/comparison, and evidence rules live in `docs/development/experiment-records.md`.
+- This file contains llama.cpp-specific instructions, especially for NVFP4, CUDA, KV-cache, local experiment switches, validation, and repository-local documentation contracts.
+- If a reusable guideline needs local specialization, follow the local llama.cpp-specific rule in this file or in the repository-local documents listed below.
+
+## llama.cpp Local Contracts
+- Environment-variable experiment switches are tracked in `expt-switch-env.md`.
+  - When code adds a new environment-variable switch, record it there.
+  - When code removes an environment-variable switch, remove it from that file.
+- Baseline runtime parameters for local experiments are documented in `expt-baseline.md`.
+- Experiment and validation artifacts live under `experiments/`.
+- Repository-specific development guides include:
+  - `docs/development/ncu-kvcache-profiling.md` for Nsight Compute KV-cache profiling;
+  - `docs/development/nvfp4-k-cache.md` for NVFP4 K-cache details;
+  - `docs/development/debugging-tests.md` for local test debugging.
+
 ## Project Coding Policy
 - Treat most code changes in this repository as experimental unless the user explicitly says otherwise.
-- Every new experiment must be gated by a switch.
-  - New experiment switches must default to off.
-  - Switch definitions must be centralized in one clear place.
-  - The centralized definition must document what each switch does and what behavior it enables.
-  - When code adds a new environment-variable switch, record it in `expt-switch-env.md`; when code removes an environment-variable switch, remove it from that file.
-- Switch usage should be consolidated behind one helper/function per switch whenever possible.
-  - Avoid checking the same switch directly in many unrelated call sites.
-  - Keep switch plumbing narrow and easy to audit.
-  - Existing historical switches may predate this policy; when touching them, migrate toward centralized helpers and documentation instead of adding more scattered `getenv()` checks.
-- Switch effectiveness must be confirmed by logs.
-  - Log whether each switch is enabled or disabled.
-  - The confirmation log should print only once during service startup or first runtime use.
-  - Avoid noisy per-token, per-request, or per-kernel repeated logging.
-- After code validation passes, commit the verified change.
-- Follow SOLID principles when coding:
-  - Keep experiment control separate from core algorithm code.
-  - Prefer small functions with one reason to change.
-  - Depend on narrow helper APIs instead of scattering environment/config parsing.
+- Follow the switch policy in `docs/development/agent-workflow.md`; in this repository, every new experiment must be gated by a switch and new experiment switches must default to off.
+- Keep switch plumbing narrow and easy to audit. Existing historical switches may predate this policy; when touching them, migrate toward centralized helpers and documentation instead of adding more scattered `getenv()` checks.
+- Confirm switch effectiveness with once-only enabled/disabled logs during service startup or first runtime use.
+- When a commit has been requested, create it only after code validation passes.
+- Keep experiment control separate from core algorithm code, prefer small functions with one reason to change, and depend on narrow helper APIs instead of scattering environment/config parsing.
 
 ## Documentation Hygiene
-- Keep this file as durable project guidance, not a dated session log.
-- Do not record temporary build directories, one-off validation results, or old commit lists here.
-- If a path or runtime description changes, update the relevant map below in the same commit as the code change.
+- Follow `docs/development/agent-workflow.md` for reusable documentation hygiene.
+- Keep this file focused on durable llama.cpp project guidance and update the runtime map below when a path or runtime description changes.
 
 ## Experiment Run Records
+- Follow `docs/development/experiment-records.md` for reusable experiment record and evidence rules.
 - For every PPL experiment or `llama-server` startup validation, create a dedicated experiment folder under `experiments/`.
-  - Use one folder per experiment or validation run family, and keep all related artifacts in that folder.
-  - Record the exact run script or startup script used for the experiment.
-  - For `llama-server` validations, record the request payload/data, the server response, server logs, and the validation result.
+  - For `llama-server` validations, record the request payload/data, server response, server logs, and validation result.
   - For PPL experiments, record the run scripts, input/config references, raw output logs, parsed metrics, and summarized validation result.
 - New experiment scripts must start from the baseline parameters documented in `expt-baseline.md`.
   - Replace only the parameters required by the experiment.
@@ -74,7 +76,8 @@
   - For correctness-sensitive debugging, prefer the explicit NVFP4 matmul path (CPU roundtrip or CUDA native/fallback matmul path), not unrelated generic dequant-only paths.
 
 ## Logging Policy
-- Release builds should not contain high-volume debug logs. These historical noisy logs are expected to stay Debug-only:
+- Follow `docs/development/agent-workflow.md` for reusable logging and diagnostic policy.
+- These historical noisy logs are expected to stay Debug-only:
   - `llama_decode begin/end` in `tools/server/server.cpp`
   - `sampled token: tok=...` in `tools/server/server.cpp`
   - `ggml_compute_forward_get_rows_f32 ... firstN=...` in `ggml/src/ggml-cpu/ops.cpp`
@@ -85,6 +88,7 @@
 - Experiment switch confirmation logs are allowed in Release only when they print once and are useful for confirming runtime behavior.
 
 ## Validation Guidance
+- Follow `docs/development/agent-workflow.md` for reusable validation reporting rules.
 - For NVFP4 native CUDA matmul changes, prefer running `test-nvfp4-matmul` from the active CUDA build directory when the local GPU/toolkit supports it.
 - For NVFP4 flash-attention or KV-cache changes, run the nearest focused CUDA tests first, then a small server or perplexity smoke test if behavior changes.
 - Document skipped validation explicitly in the final response when local hardware, toolkit, or build availability prevents a test.
