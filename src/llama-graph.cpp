@@ -11,7 +11,16 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+
+static bool llama_env_flag_enabled(const char * name) {
+    const char * value = std::getenv(name);
+    return value != nullptr &&
+        std::strcmp(value, "0") != 0 &&
+        std::strcmp(value, "false") != 0 &&
+        std::strcmp(value, "FALSE") != 0;
+}
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
@@ -1227,8 +1236,15 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * sinks,
              float     kq_scale,
              int       il) const {
-    const bool v_trans = v->nb[1] > v->nb[2];
-    ggml_tensor * k_scale = (ggml_tensor *) ggml_tensor_get_nvfp4_scale(k);
+    ggml_tensor * k_scale = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_scale(k));
+    ggml_tensor * v_scale = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_scale(v));
+    const bool v_is_nvfp4_cache =
+            v->type == GGML_TYPE_NVFP4 &&
+            v_scale != nullptr &&
+            v_scale->type == GGML_TYPE_F32 &&
+            v->ne[0] % 16 == 0 &&
+            v_scale->ne[0] == v->ne[0] / 16;
+    const bool v_trans = v_is_nvfp4_cache || v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
     const auto n_stream = k->ne[3];
@@ -1238,6 +1254,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     q = ggml_permute(ctx0, q, 0, 2, 1, 3);
     k = ggml_permute(ctx0, k, 0, 2, 1, 3);
     v = ggml_permute(ctx0, v, 0, 2, 1, 3);
+    if (k_scale) {
+        ggml_tensor_set_nvfp4_scale(k, k_scale);
+    }
+    if (v_scale) {
+        ggml_tensor_set_nvfp4_scale(v, v_scale);
+    }
 
     const auto n_kv = k->ne[1];
 
@@ -1263,9 +1285,20 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
 
+        int32_t flash_flags = 0;
         if (v->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
-            const int32_t flags = 1;
-            memcpy((int32_t *) cur->op_params + 4, &flags, sizeof(flags));
+            flash_flags |= GGML_FLASH_ATTN_FLAG_FP8_P_E4M3_E8M0;
+        }
+        if (llama_env_flag_enabled("GGML_CUDA_NVFP4_FATTN") &&
+                (k->type == GGML_TYPE_F16 ||
+                 (k->type == GGML_TYPE_NVFP4 && llama_env_flag_enabled("GGML_CUDA_NVFP4_FATTN_NO_K_SMOOTH"))) &&
+                v->type == GGML_TYPE_F16) {
+            flash_flags |= GGML_FLASH_ATTN_FLAG_NVFP4_QKVP;
+            flash_flags |= GGML_FLASH_ATTN_FLAG_NVFP4_P_TWOLEVEL;
+            flash_flags |= GGML_FLASH_ATTN_FLAG_NVFP4_SMOOTH_QK;
+        }
+        if (flash_flags != 0) {
+            ggml_flash_attn_ext_set_flags(cur, flash_flags);
         }
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);

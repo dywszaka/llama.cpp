@@ -16,19 +16,21 @@
 #include "ggml-cuda/conv2d-transpose.cuh"
 #include "ggml-cuda/convert.cuh"
 #include "ggml-cuda/count-equal.cuh"
+#include "ggml-cuda/cuda-log.cuh"
 #include "ggml-cuda/cpy.cuh"
 #include "ggml-cuda/cross-entropy-loss.cuh"
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/fattn.cuh"
-#include "ggml-cuda/fp8-e8m0-matmul.cuh"
+#include "ggml-cuda/fp8/fp8-e8m0-matmul.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
-#include "ggml-cuda/nvfp4-kq.cuh"
-#include "ggml-cuda/nvfp4-matmul.cuh"
+#include "ggml-cuda/nvfp4/nvfp4-8-kq.cuh"
+#include "ggml-cuda/nvfp4/nvfp4-matmul.cuh"
+#include "ggml-cuda/nvfp4/vcache-nvfp4-matmul.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
 #include "ggml-cuda/opt-step-sgd.cuh"
@@ -65,6 +67,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <float.h>
 #include <initializer_list>
 #include <limits>
@@ -2102,15 +2105,6 @@ static void ggml_cuda_mul_mat_batched_cublas(ggml_backend_cuda_context & ctx, co
     }
 }
 
-static bool ggml_cuda_nvfp4_native_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE");
-        cached = (env == nullptr || env[0] == '\0' || env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
 static bool ggml_cuda_nvfp4_8_kq_cublaslt_enabled() {
     static int cached = -1;
     if (cached < 0) {
@@ -2139,6 +2133,8 @@ static bool ggml_cuda_fp8_e8m0_native_no_fallback() {
 }
 
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    ggml_cuda_log_mul_mat_kqvp_once(src0, src1, dst);
+
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
     // If src0 is a temporary compute buffer it may have some padding that needs to be cleared for mul_mat_vec_q or mul_mat_q.
@@ -2188,7 +2184,15 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     }
 
     if (!split &&
-        ggml_cuda_nvfp4_native_enabled() &&
+        src0->type == GGML_TYPE_NVFP4 &&
+        src1->type == GGML_TYPE_F32 &&
+        dst->type == GGML_TYPE_F32) {
+        if (ggml_cuda_mul_mat_vcache_nvfp4(ctx, src0, src1, dst)) {
+            return;
+        }
+    }
+
+    if (!split &&
         src0->type == GGML_TYPE_NVFP4 &&
         src1->type == GGML_TYPE_F32 &&
         dst->type == GGML_TYPE_F32) {
@@ -2995,6 +2999,14 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             use_cuda_graph = false; // This node type is not supported by CUDA graph capture
 #ifndef NDEBUG
             GGML_LOG_DEBUG("%s: disabling CUDA graphs due to unsupported node type\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_FLASH_ATTN_EXT &&
+                (ggml_flash_attn_ext_get_flags(node) & GGML_FLASH_ATTN_FLAG_NVFP4_QKVP) != 0) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for NVFP4 flash attention\n", __func__);
 #endif
         }
 

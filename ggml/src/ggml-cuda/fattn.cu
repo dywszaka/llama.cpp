@@ -1,6 +1,8 @@
 #include "common.cuh"
+#include "cuda-log.cuh"
 #include "fattn-common.cuh"
 #include "fattn-mma-f16.cuh"
+#include "nvfp4/fattn-nvfp4.cuh"
 #include "fattn-tile-f16.cuh"
 #include "fattn-tile-f32.cuh"
 #include "fattn-vec-f16.cuh"
@@ -291,6 +293,29 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
     const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
     const enum ggml_prec prec = ggml_flash_attn_ext_get_prec(KQV);
+    const int32_t flags = ggml_flash_attn_ext_get_flags(KQV);
+    ggml_cuda_log_fattn_tensor_brief_once(Q, K, V, dst);
+
+    if ((flags & GGML_FLASH_ATTN_FLAG_NVFP4_QKVP) != 0) {
+        const bool ok = ggml_cuda_flash_attn_ext_nvfp4(ctx, dst);
+        if (ok) {
+            return;
+        }
+        if (ggml_cuda_nvfp4_fattn_no_fallback()) {
+            GGML_ABORT(
+                    "%s: NVFP4 flash attention requested but unsupported for dst=%s "
+                    "Q[type=%s ne=[%lld,%lld,%lld,%lld]] "
+                    "K[type=%s ne=[%lld,%lld,%lld,%lld]] "
+                    "V[type=%s ne=[%lld,%lld,%lld,%lld]]",
+                    __func__, ggml_get_name(dst),
+                    ggml_type_name(Q->type),
+                    (long long) Q->ne[0], (long long) Q->ne[1], (long long) Q->ne[2], (long long) Q->ne[3],
+                    ggml_type_name(K->type),
+                    (long long) K->ne[0], (long long) K->ne[1], (long long) K->ne[2], (long long) K->ne[3],
+                    ggml_type_name(V->type),
+                    (long long) V->ne[0], (long long) V->ne[1], (long long) V->ne[2], (long long) V->ne[3]);
+        }
+    }
 
 #if defined(GGML_HIP_ROCWMMA_FATTN)
     if (GGML_CUDA_CC_IS_AMD(cc) && fp16_mma_available(cc)) {

@@ -27,7 +27,9 @@ GGML_API void quantize_row_nvfp4_ref(const float * GGML_RESTRICT x, block_nvfp4 
 GGML_API void quantize_row_nvfp4_ref_default(const float * GGML_RESTRICT x, block_nvfp4 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_nvfp4_8_ref(const float * GGML_RESTRICT x, block_nvfp4_8 * GGML_RESTRICT y, int64_t k, float global_scale);
 GGML_API void quantize_row_nvfp4_8_ref_default(const float * GGML_RESTRICT x, block_nvfp4_8 * GGML_RESTRICT y, int64_t k);
+GGML_API bool ggml_fp8_e4m3_e8m0_32_experiment_e4m2_enabled(void);
 GGML_API void quantize_row_fp8_e4m3_e8m0_32_ref(const float * GGML_RESTRICT x, block_fp8_e4m3_e8m0_32 * GGML_RESTRICT y, int64_t k);
+GGML_API void quantize_row_fp8_e4m3_e8m0_32_e4m2_ref(const float * GGML_RESTRICT x, block_fp8_e4m3_e8m0_32 * GGML_RESTRICT y, int64_t k);
 GGML_API void quantize_row_fp8_e4m3_e8m0_16_ref(const float * GGML_RESTRICT x, block_fp8_e4m3_e8m0_16 * GGML_RESTRICT y, int64_t k);
 
 GGML_API void quantize_row_q2_K_ref(const float * GGML_RESTRICT x, block_q2_K * GGML_RESTRICT y, int64_t k);

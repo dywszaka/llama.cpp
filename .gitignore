@@ -151,3 +151,10 @@ poetry.toml
 /run-chat.sh
 
 myplayground/
+data
+experiments
+
+# Local planning notes
+findings.md
+progress.md
+task_plan.md

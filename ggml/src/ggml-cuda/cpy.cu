@@ -1,9 +1,12 @@
 #include "cpy.cuh"
-#include "dequantize.cuh"
 #include "cpy-utils.cuh"
+#include "cuda-log.cuh"
+#include "dequantize.cuh"
 #if defined(GGML_USE_MUSA) && defined(GGML_MUSA_MUDNN_COPY)
 #include "ggml-musa/mudnn.cuh"
 #endif // GGML_USE_MUSA && GGML_MUSA_MUDNN_COPY
+
+#include <string.h>
 
 typedef void (*cpy_kernel_t)(const char * cx, char * cdst);
 
@@ -90,11 +93,12 @@ static __device__ void cpy_blck_fp8_e4m3_e8m0_16_fp8_e4m3_e8m0_16(const char * c
     *y = *x;
 }
 
-static __device__ void quantize_f32_fp8_e4m3_e8m0_block(const float * x, block_fp8_e4m3_e8m0_32 * y) {
-    quantize_f32_fp8_e4m3_e8m0_32_block(x, y);
+static __device__ void quantize_f32_fp8_e4m3_e8m0_block(const float * x, block_fp8_e4m3_e8m0_32 * y, bool e4m2_experiment = false) {
+    quantize_f32_fp8_e4m3_e8m0_32_block(x, y, e4m2_experiment);
 }
 
-static __device__ void quantize_f32_fp8_e4m3_e8m0_block(const float * x, block_fp8_e4m3_e8m0_16 * y) {
+static __device__ void quantize_f32_fp8_e4m3_e8m0_block(const float * x, block_fp8_e4m3_e8m0_16 * y, bool e4m2_experiment = false) {
+    GGML_UNUSED(e4m2_experiment);
     quantize_f32_fp8_e4m3_e8m0_16_block(x, y);
 }
 
@@ -129,6 +133,15 @@ static bool ggml_cuda_is_fp8_e8m0_transpose_permute_repack(const ggml_tensor * s
     return ggml_is_contiguous(src1);
 }
 
+static bool ggml_cuda_fp8_e4m3_e8m0_32_e4m2_experiment_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_FP8_E4M3_E8M0_32_EXPERIMENT_E4M2");
+        cached = (env != nullptr && atoi(env) != 0) ? 1 : 0;
+    }
+    return cached != 0;
+}
+
 template <typename block_t, int qk>
 static __global__ void cpy_fp8_e8m0_transpose_permute_repack_kernel(
         const block_t * __restrict__ src_base,
@@ -144,7 +157,8 @@ static __global__ void cpy_fp8_e8m0_transpose_permute_repack_kernel(
         const int64_t ne0,
         const int64_t ne1,
         const int64_t ne2,
-        const int64_t ne3) {
+        const int64_t ne3,
+        bool e4m2_experiment) {
     const int64_t nblk0 = ne0 / qk;
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = nblk0 * ne1 * ne2 * ne3;
@@ -182,14 +196,15 @@ static __global__ void cpy_fp8_e8m0_transpose_permute_repack_kernel(
             i1  * dst_nb1 +
             i2  * dst_nb2 +
             i3  * dst_nb3);
-    quantize_f32_fp8_e4m3_e8m0_block(tmp, dst_block);
+    quantize_f32_fp8_e4m3_e8m0_block(tmp, dst_block, e4m2_experiment);
 }
 
 template <typename block_t, int qk, ggml_type type>
 static void ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda(
         const ggml_tensor * src0,
         ggml_tensor * src1,
-        cudaStream_t stream) {
+        cudaStream_t stream,
+        bool e4m2_experiment) {
     const ggml_tensor * perm = src0->src[0];
     const ggml_tensor * base = perm->src[0];
 
@@ -211,7 +226,8 @@ static void ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda(
             (block_t *) src1->data,
             base->nb[0], base->nb[1], base->nb[2], base->nb[3],
             src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3],
-            src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3]);
+            src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+            e4m2_experiment);
 }
 
 template <cpy_kernel_t cpy_blck, int qk>
@@ -619,6 +635,7 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
 
     char * src0_ddc = (char *) src0->data;
     char * src1_ddc = (char *) src1->data;
+    const bool fp8_e4m2_experiment = ggml_cuda_fp8_e4m3_e8m0_32_e4m2_experiment_enabled();
     const ggml_tensor * src0_nvfp4_scale = ggml_tensor_get_nvfp4_scale(src0);
     const float * src0_nvfp4_scale_d = nullptr;
     int scale_axis = -1;
@@ -662,10 +679,11 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
 #endif
     if (ggml_cuda_is_fp8_e8m0_transpose_permute_repack(src0, src1)) {
         if (src1->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
-            ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda<block_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32, GGML_TYPE_FP8_E4M3_E8M0_32>(src0, src1, main_stream);
+            ggml_cuda_log_fp8_e4m3_e8m0_32_e4m2_cpy_once("transpose_permute_repack", src0, src1, fp8_e4m2_experiment);
+            ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda<block_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32, GGML_TYPE_FP8_E4M3_E8M0_32>(src0, src1, main_stream, fp8_e4m2_experiment);
         } else {
             GGML_ASSERT(src1->type == GGML_TYPE_FP8_E4M3_E8M0_16);
-            ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda<block_fp8_e4m3_e8m0_16, QK_FP8_E4M3_E8M0_16, GGML_TYPE_FP8_E4M3_E8M0_16>(src0, src1, main_stream);
+            ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda<block_fp8_e4m3_e8m0_16, QK_FP8_E4M3_E8M0_16, GGML_TYPE_FP8_E4M3_E8M0_16>(src0, src1, main_stream, false);
         }
     } else if (src0->type == src1->type && ggml_is_contiguous(src0) && ggml_is_contiguous(src1)) {
         GGML_ASSERT(ggml_nbytes(src0) == ggml_nbytes(src1));
@@ -688,7 +706,12 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
     } else if (src0->type == GGML_TYPE_Q8_0 && src1->type == GGML_TYPE_F32) {
         ggml_cpy_q8_0_f32_cuda(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
-        ggml_cpy_f32_q_cuda<cpy_blck_f32_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
+        ggml_cuda_log_fp8_e4m3_e8m0_32_e4m2_cpy_once("f32_to_fp8", src0, src1, fp8_e4m2_experiment);
+        if (fp8_e4m2_experiment) {
+            ggml_cpy_f32_q_cuda<cpy_blck_f32_fp8_e4m3_e8m0_32_e4m2, QK_FP8_E4M3_E8M0_32>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
+        } else {
+            ggml_cpy_f32_q_cuda<cpy_blck_f32_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
+        }
     } else if (src0->type == GGML_TYPE_FP8_E4M3_E8M0_32 && src1->type == GGML_TYPE_F32) {
         ggml_cpy_q_f32_cuda<cpy_blck_fp8_e4m3_e8m0_32_f32, QK_FP8_E4M3_E8M0_32>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_FP8_E4M3_E8M0_16) {
