@@ -34,6 +34,31 @@ subject of the experiment.
 - CPU threads: `-t 32`
 - K cache type: `--cache-type-k f16`
 - V cache type: `--cache-type-v f16`
+- Flash attention: disabled (`flash_attn=0`; do not pass `--flash-attn`
+  unless the experiment targets flash attention)
+- KQV offload: enabled (`offload_kqv=1`; do not pass `--no-kv-offload`)
+- KV mode: unified (`--kv-unified`)
+
+## NVFP4 V-Cache Runtime Requirement
+
+The default baseline keeps these requirements enabled so experiments can switch
+V cache type to `--cache-type-v nvfp4` without changing unrelated runtime
+plumbing. The current runtime requires all of the following for NVFP4 V-cache:
+
+- Flash attention disabled: `flash_attn=0`.
+- KQV offload enabled: `offload_kqv=1`.
+- Unified KV cache enabled: `--kv-unified`.
+
+If these requirements are not met, context creation fails with:
+
+```text
+NVFP4 V cache requires flash_attn=0, offload_kqv=1, and kv_unified=1
+```
+
+For PPL, server, or benchmark experiments that test `--cache-type-v nvfp4`,
+keep these defaults in place and document that they are runtime compatibility
+requirements for NVFP4 V-cache. Only change them when the experiment explicitly
+targets flash attention, KQV offload, or KV layout behavior.
 
 ## llama-server Baseline
 
@@ -70,6 +95,8 @@ Fixed `llama-server` arguments:
 - Context size: `-c 2048`
 - K cache type: `--cache-type-k f16`
 - V cache type: `--cache-type-v f16`
+- Flash attention: disabled by default; do not pass `--flash-attn`
+- KQV offload: enabled by default; do not pass `--no-kv-offload`
 - KV mode: `--kv-unified`
 - Log file: `--log-file ${WORKSPACE}/gpu.log`
 
@@ -96,7 +123,8 @@ CUDA_VISIBLE_DEVICES=0 \
     --batch-size 512 \
     --ubatch-size 512 \
     -t 32 \
-    -c 512
+    -c 512 \
+    --kv-unified
 ```
 
 Fixed `llama-perplexity` arguments:
@@ -111,6 +139,9 @@ Fixed `llama-perplexity` arguments:
 - UBatch size: `--ubatch-size 512`
 - Threads: `-t 32`
 - Context size: `-c 512`
+- Flash attention: disabled by default; do not pass `--flash-attn`
+- KQV offload: enabled by default; do not pass `--no-kv-offload`
+- KV mode: `--kv-unified`
 
 Fixed `llama-perplexity` environment:
 
@@ -133,6 +164,9 @@ CUDA_VISIBLE_DEVICES=0 \
     --n-gpu-layers 40 \
     --batch-size 2048 \
     --ubatch-size 512 \
+    --kv-unified 1 \
+    --flash-attn 0 \
+    --no-kv-offload 0 \
     -t 32 \
     -p 512 \
     -n 128
@@ -147,6 +181,9 @@ Fixed `llama-bench` arguments:
 - GPU layers: `--n-gpu-layers 40`
 - Batch size: `--batch-size 2048`
 - UBatch size: `--ubatch-size 512`
+- Flash attention: `--flash-attn 0`
+- KQV offload: `--no-kv-offload 0`
+- KV mode: `--kv-unified 1`
 - Threads: `-t 32`
 - Prompt tokens: `-p 512`
 - Generation tokens: `-n 128`
