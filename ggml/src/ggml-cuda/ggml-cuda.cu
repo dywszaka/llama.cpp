@@ -21,7 +21,7 @@
 #include "ggml-cuda/cross-entropy-loss.cuh"
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/fattn.cuh"
-#include "ggml-cuda/fp8-e8m0-matmul.cuh"
+#include "ggml-cuda/fp8/fp8-e8m0-matmul.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"

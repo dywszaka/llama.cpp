@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common.cuh"
+#include "../common.cuh"
 
 bool ggml_cuda_mul_mat_fp8_e8m0_native(
         ggml_backend_cuda_context & ctx,

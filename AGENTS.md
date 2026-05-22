@@ -80,6 +80,8 @@
   - `ggml_compute_forward_get_rows_f32 ... firstN=...` in `ggml/src/ggml-cpu/ops.cpp`
   - `NVFP4 layout diagnostic for ...` in `ggml/src/ggml-cuda/nvfp4/nvfp4-matmul.cu`
 - Implementation pattern: `#ifndef NDEBUG`.
+- For changes under `ggml/src/ggml-cuda/`, keep CUDA logging helpers in `cuda-log.cu` / `cuda-log.cuh`.
+- Keep NVFP4-specific CUDA code under `ggml/src/ggml-cuda/nvfp4/`, and keep FP8-specific CUDA code under the corresponding FP8 CUDA implementation files or folders.
 - Experiment switch confirmation logs are allowed in Release only when they print once and are useful for confirming runtime behavior.
 
 ## Helper Scripts
