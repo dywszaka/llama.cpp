@@ -84,12 +84,6 @@
 - Keep NVFP4-specific CUDA code under `ggml/src/ggml-cuda/nvfp4/`, and keep FP8-specific CUDA code under the corresponding FP8 CUDA implementation files or folders.
 - Experiment switch confirmation logs are allowed in Release only when they print once and are useful for confirming runtime behavior.
 
-## Helper Scripts
-- `run-llama-server-nvfp4-cuda.sh`
-  - Local NVFP4 CUDA server launch helper.
-- `llama_bench.sh`
-  - Local benchmark helper.
-
 ## Validation Guidance
 - For NVFP4 native CUDA matmul changes, prefer running `test-nvfp4-matmul` from the active CUDA build directory when the local GPU/toolkit supports it.
 - For NVFP4 flash-attention or KV-cache changes, run the nearest focused CUDA tests first, then a small server or perplexity smoke test if behavior changes.
