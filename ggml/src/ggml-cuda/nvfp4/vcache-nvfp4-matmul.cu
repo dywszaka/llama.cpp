@@ -3,7 +3,7 @@
 #include <atomic>
 
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_P_AMAX_PREPASS_MIN_KV = 2048;
-static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_MIN_KV = 512;
+static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K = 512;
 
 #if defined(CUBLAS_VERSION)
 #define GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
@@ -20,7 +20,7 @@ static void ggml_cuda_vcache_nvfp4_log_fp4_pv_once() {
     }
 
     GGML_LOG_INFO(
-            "%s: CUDA NVFP4 V-cache p*v quantizes P to dynamic NVFP4 by default; using cuBLASLt FP4 when available, otherwise custom CUDA dot kernel\n",
+            "%s: CUDA NVFP4 V-cache p*v quantizes P to dynamic NVFP4 by default; using cuBLASLt FP4 matmul\n",
             __func__);
 }
 
@@ -256,89 +256,6 @@ static __global__ void k_quantize_p_rows_nvfp4_dynamic(
     }
 }
 
-static __global__ void k_vcache_nvfp4_matmul_fp4_p_4d(
-        const block_nvfp4 * __restrict__ v_data,
-        const float * __restrict__ v_scale,
-        const block_nvfp4 * __restrict__ p_q,
-        const float * __restrict__ p_scale,
-        float * __restrict__ dst_data,
-        int64_t kv_size,
-        int64_t rows,
-        int64_t cols,
-        int64_t kv_heads,
-        int64_t q_heads,
-        int64_t kv_streams,
-        int64_t q_streams,
-        int64_t v_nb0,
-        int64_t v_nb1,
-        int64_t v_nb2,
-        int64_t v_nb3,
-        int64_t scale_nb0,
-        int64_t scale_row_nb,
-        int64_t scale_head_nb,
-        int64_t scale_stream_nb,
-        bool scale_is_global,
-        int64_t dst_nb1,
-        int64_t dst_nb2,
-        int64_t dst_nb3,
-        int64_t r2,
-        int64_t r3) {
-    const int64_t row = blockIdx.x;
-    const int64_t col = blockIdx.y;
-    const int64_t head = blockIdx.z % q_heads;
-    const int64_t stream = blockIdx.z / q_heads;
-    const int64_t kv_head = head / r2;
-    const int64_t kv_stream = stream / r3;
-
-    if (row >= rows || col >= cols || head >= q_heads || stream >= q_streams || kv_head >= kv_heads || kv_stream >= kv_streams) {
-        return;
-    }
-
-    const int64_t n_blocks = kv_size / QK_NVFP4;
-    const int64_t p_row = (stream * q_heads + head) * cols + col;
-    const char * v_base = (const char *) v_data + row * v_nb1 + kv_head * v_nb2 + kv_stream * v_nb3;
-    const char * scale_base = (const char *) v_scale + row * scale_row_nb + kv_head * scale_head_nb + kv_stream * scale_stream_nb;
-    const float v_global_scale = scale_is_global ? *(const float *) ((const char *) v_scale + kv_stream * scale_stream_nb) : 0.0f;
-    const block_nvfp4 * p_row_q = p_q + p_row * n_blocks;
-    const float p_row_scale = p_scale[p_row];
-
-    float thread_sum = 0.0f;
-    for (int64_t block = threadIdx.x; block < n_blocks; block += blockDim.x) {
-        const block_nvfp4 * v_block_ptr = (const block_nvfp4 *) (v_base + block * v_nb0);
-        const block_nvfp4 vb = *v_block_ptr;
-        const block_nvfp4 pb = p_row_q[block];
-        const float v_d = scale_is_global ?
-            (v_global_scale > 0.0f ? ggml_cuda_e4m3_to_fp32_half(vb.e) / v_global_scale : 0.0f) :
-            ggml_cuda_e4m3_to_fp32_half(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
-        const float p_d = ggml_cuda_e4m3_to_fp32_half(pb.e) * p_row_scale;
-        const float d = v_d * p_d;
-
-#pragma unroll
-        for (int i = 0; i < QK_NVFP4 / 2; ++i) {
-            const uint8_t v_packed = vb.qs[i];
-            const uint8_t p_packed = pb.qs[i];
-            thread_sum += d * (float) kvalues_nvfp4[v_packed & 0x0F] * (float) kvalues_nvfp4[p_packed & 0x0F];
-            thread_sum += d * (float) kvalues_nvfp4[v_packed >> 4]    * (float) kvalues_nvfp4[p_packed >> 4];
-        }
-    }
-
-    __shared__ float sum[256];
-    sum[threadIdx.x] = thread_sum;
-    __syncthreads();
-
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride) {
-            sum[threadIdx.x] += sum[threadIdx.x + stride];
-        }
-        __syncthreads();
-    }
-
-    if (threadIdx.x == 0) {
-        char * dst_ptr = (char *) dst_data + row * sizeof(float) + col * dst_nb1 + head * dst_nb2 + stream * dst_nb3;
-        *(float *) dst_ptr = sum[0];
-    }
-}
-
 #if GGML_CUDA_HAS_CUBLASLT
 static __global__ void k_stage_vcache_nvfp4_v_for_lt(
         const block_nvfp4 * __restrict__ v_data,
@@ -483,17 +400,18 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
         int64_t r2,
         int64_t r3) {
 #if GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS
-    if (kv_size < GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_MIN_KV ||
-            kv_size % QK_NVFP4 != 0 || rows <= 0 || cols <= 0 ||
+    if (kv_size % QK_NVFP4 != 0 || rows <= 0 || cols <= 0 ||
             kv_heads <= 0 || q_heads <= 0 || kv_streams <= 0 || q_streams <= 0) {
         return false;
     }
 
     cudaStream_t stream = ctx.stream();
     const int64_t n_blocks = kv_size / QK_NVFP4;
+    const int64_t lt_k = std::max(kv_size, GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K);
+    const int64_t lt_blocks = lt_k / QK_NVFP4;
     const int64_t lt_cols = (cols + 15) & ~15LL;
-    const int64_t row_data_bytes = kv_size / 2;
-    const int64_t scale_inner_padded = ggml_cuda_nvfp4_pad_i64(n_blocks, 4);
+    const int64_t row_data_bytes = lt_k / 2;
+    const int64_t scale_inner_padded = ggml_cuda_nvfp4_pad_i64(lt_blocks, 4);
     const int64_t a_scale_outer_padded = ggml_cuda_nvfp4_pad_i64(rows, 128);
     const int64_t b_scale_outer_padded = ggml_cuda_nvfp4_pad_i64(lt_cols, 128);
     const int64_t a_data_nbytes = rows * row_data_bytes;
@@ -551,7 +469,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_a";
-        st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) kv_size, (uint64_t) rows, (int64_t) kv_size);
+        st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) lt_k, (uint64_t) rows, (int64_t) lt_k);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
@@ -560,7 +478,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_b";
-        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) kv_size, (uint64_t) lt_cols, (int64_t) kv_size);
+        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) lt_k, (uint64_t) lt_cols, (int64_t) lt_k);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
@@ -650,7 +568,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
         static std::atomic<bool> logged(false);
         if (!logged.exchange(true)) {
             GGML_LOG_WARN(
-                    "%s: cuBLASLt FP4 P*V path failed at %s status=%d (%s); falling back to custom CUDA kernel\n",
+                    "%s: cuBLASLt FP4 P*V path failed at %s status=%d (%s); custom CUDA fallback is disabled\n",
                     __func__, stage, (int) st, cublas_get_error_str(st));
         }
         return false;
@@ -699,7 +617,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
     GGML_UNUSED(r3);
     static std::atomic<bool> logged(false);
     if (!logged.exchange(true)) {
-        GGML_LOG_WARN("%s: cuBLASLt FP4 scale-channel attrs unavailable; falling back to custom CUDA kernel\n", __func__);
+        GGML_LOG_WARN("%s: cuBLASLt FP4 scale-channel attrs unavailable; custom CUDA fallback is disabled\n", __func__);
     }
     return false;
 #endif
@@ -833,38 +751,13 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     }
 #endif
 
-    int fp4_block_threads = 16;
-    while (fp4_block_threads < n_blocks && fp4_block_threads < 256) {
-        fp4_block_threads *= 2;
-    }
-    ggml_cuda_vcache_nvfp4_log_matmul_path_once("custom-cuda-fp4");
-    k_vcache_nvfp4_matmul_fp4_p_4d<<<grid, dim3((uint32_t) fp4_block_threads, 1, 1), 0, ctx.stream()>>>(
-            (const block_nvfp4 *) src0->data,
-            (const float *) scale->data,
-            p_q.get(),
-            p_scale.get(),
-            (float *) dst->data,
-            kv_size,
-            rows,
-            cols,
-            kv_heads,
-            q_heads,
-            kv_streams,
-            q_streams,
-            src0->nb[0],
-            src0->nb[1],
-            src0->nb[2],
-            src0->nb[3],
-            scale->nb[0],
-            scale_row_nb,
-            scale_head_nb,
-            scale_stream_nb,
-            scale_is_global,
-            dst->nb[1],
-            dst->nb[2],
-            dst->nb[3],
-            r2,
-            r3);
-    CUDA_CHECK(cudaGetLastError());
-    return true;
+    GGML_UNUSED(grid);
+    GGML_UNUSED(n_blocks);
+    GGML_ABORT(
+            "%s: CUDA NVFP4 V-cache p*v cuBLASLt FP4 path is unavailable and custom CUDA fallback is disabled | "
+            "src0_ne=[%lld,%lld,%lld,%lld] src1_ne=[%lld,%lld,%lld,%lld] dst_ne=[%lld,%lld,%lld,%lld]",
+            __func__,
+            (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2], (long long) src0->ne[3],
+            (long long) src1->ne[0], (long long) src1->ne[1], (long long) src1->ne[2], (long long) src1->ne[3],
+            (long long) dst->ne[0],  (long long) dst->ne[1],  (long long) dst->ne[2],  (long long) dst->ne[3]);
 }
