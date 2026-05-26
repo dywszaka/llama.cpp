@@ -1,5 +1,17 @@
 # Experiment Switch Environment Variables
 
+## FP8 E4M3 E8M0 32 K-Cache
+
+### `--cache-type-k fp8_e4m3_e8m0_32`
+
+Enables the experimental FP8(E4M3+E8M0 block32) K-cache path. Default: off
+because the standard K-cache type default remains `f16`.
+
+Initial scope: CUDA non-flash KQ with KQV offload enabled. During KQ, the stored
+K cache is `GGML_TYPE_FP8_E4M3_E8M0_32`; the F32 Q operand is quantized to
+temporary FP8 block32 inside the native CUDA FP8 matmul path before cuBLASLt
+execution.
+
 ## NVFP4 K-Cache Outlier Sidecar
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER`

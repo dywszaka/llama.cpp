@@ -142,6 +142,7 @@ static __global__ void split_blocks_fp8_e8m0_kernel(
         uint8_t * __restrict__ out_scale,
         int64_t nblk_k,
         int64_t n_outer_valid,
+        int64_t in_outer_stride_bytes,
         int64_t row_data_bytes,
         int64_t n_inner_padded) {
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
@@ -153,7 +154,9 @@ static __global__ void split_blocks_fp8_e8m0_kernel(
     const int64_t outer = idx / nblk_k;
     const int64_t inner = idx % nblk_k;
 
-    const block_fp8_e4m3_e8m0_32 v = in[idx];
+    const block_fp8_e4m3_e8m0_32 * row =
+            (const block_fp8_e4m3_e8m0_32 *) ((const char *) in + outer * in_outer_stride_bytes);
+    const block_fp8_e4m3_e8m0_32 v = row[inner];
     uint8_t * data_dst = out_data + outer * row_data_bytes + inner * QK_FP8_E4M3_E8M0_32;
 #pragma unroll
     for (int i = 0; i < QK_FP8_E4M3_E8M0_32; ++i) {
@@ -203,6 +206,7 @@ static void split_blocks_fp8_e8m0_cuda(
         int64_t ne_k,
         int64_t n_outer_valid,
         int64_t n_outer_alloc,
+        int64_t in_outer_stride_bytes,
         int64_t * scale_inner_padded,
         int64_t * scale_outer_padded,
         size_t * data_nbytes,
@@ -212,6 +216,9 @@ static void split_blocks_fp8_e8m0_cuda(
     GGML_ASSERT(n_outer_valid >= 0 && n_outer_alloc >= n_outer_valid);
 
     const int64_t nblk_k = ne_k / QK_FP8_E4M3_E8M0_32;
+    if (in_outer_stride_bytes == 0) {
+        in_outer_stride_bytes = (int64_t) nblk_k * (int64_t) sizeof(block_fp8_e4m3_e8m0_32);
+    }
     const int64_t row_data_bytes = ne_k;
     const int64_t inner_padded = ggml_cuda_fp8_pad_i64(nblk_k, 4);
     const int64_t outer_padded = ggml_cuda_fp8_pad_i64(n_outer_alloc, 128);
@@ -240,7 +247,7 @@ static void split_blocks_fp8_e8m0_cuda(
         const int block_size = 256;
         const int grid_size = (int) ((total + block_size - 1) / block_size);
         split_blocks_fp8_e8m0_kernel<<<grid_size, block_size, 0, stream>>>(
-                in, out_data, out_scale, nblk_k, n_outer_valid, row_data_bytes, inner_padded);
+                in, out_data, out_scale, nblk_k, n_outer_valid, in_outer_stride_bytes, row_data_bytes, inner_padded);
         CUDA_CHECK(cudaGetLastError());
     }
 }
@@ -554,7 +561,7 @@ bool ggml_cuda_mul_mat_fp8_e8m0_native(
         return true;
     }
 
-    if (ggml_is_transposed(src0) || ggml_is_transposed(src1) || !ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+    if (ggml_is_transposed(src0) || ggml_is_transposed(src1) || !ggml_is_contiguous_rows(src0) || !ggml_is_contiguous_rows(src1) || !ggml_is_contiguous(dst)) {
         return false;
     }
 
@@ -590,6 +597,7 @@ bool ggml_cuda_mul_mat_fp8_e8m0_native(
             k,
             m,
             m,
+            src0->nb[1],
             &a_scale_inner_padded,
             &a_scale_outer_padded,
             &a_data_nbytes,
@@ -615,6 +623,7 @@ bool ggml_cuda_mul_mat_fp8_e8m0_native(
             k,
             n,
             n_padded,
+            0,
             &b_scale_inner_padded,
             &b_scale_outer_padded,
             &b_data_nbytes,

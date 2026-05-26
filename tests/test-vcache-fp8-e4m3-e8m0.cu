@@ -468,6 +468,104 @@ static bool test_mul_mat_variant(const mul_mat_case & tc, ggml_type src0_type, d
     return true;
 }
 
+static bool run_kcache_kq_4d_case(ggml_type k_type, std::vector<float> & out) {
+    ggml_init_params params = {
+        /* .mem_size   = */ 32 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context for K-cache KQ 4D\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend for K-cache KQ 4D\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    const int64_t head_dim = 128;
+    const int64_t n_head_kv = 2;
+    const int64_t n_head = 8;
+    const int64_t n_kv = 16;
+    const int64_t n_tokens = 3;
+
+    ggml_tensor * k_store = ggml_new_tensor_2d(ctx, k_type, head_dim * n_head_kv, n_kv);
+    ggml_tensor * k = ggml_reshape_4d(ctx, k_store, head_dim, n_head_kv, n_kv, 1);
+    k = ggml_permute(ctx, k, 0, 2, 1, 3);
+
+    ggml_tensor * q_store = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_dim, n_head, n_tokens, 1);
+    ggml_tensor * q = ggml_permute(ctx, q_store, 0, 2, 1, 3);
+    ggml_tensor * kq = ggml_mul_mat(ctx, k, q);
+    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, kq);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors for K-cache KQ 4D\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    const std::vector<float> k_data = make_signal((size_t) ggml_nelements(k_store), 4.0f, 0.02f, 0.37f);
+    const std::vector<float> q_data = make_signal((size_t) ggml_nelements(q_store), 0.50f, 0.01f, 0.61f);
+    if (!set_tensor_from_fp32(k_store, k_data) || !set_tensor_from_fp32(q_store, q_data)) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    const ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "K-cache KQ 4D compute failed for k_type=%s: %s\n",
+                ggml_type_name(k_type), ggml_status_to_string(status));
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    out.assign((size_t) ggml_nelements(kq), 0.0f);
+    ggml_backend_tensor_get(kq, out.data(), 0, out.size() * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+    return true;
+}
+
+static bool test_kcache_kq_4d_variant(ggml_type k_type, double tol_nmse, float tol_max_abs) {
+    std::vector<float> ref;
+    std::vector<float> got;
+
+    if (!run_kcache_kq_4d_case(GGML_TYPE_F32, ref)) {
+        return false;
+    }
+    if (!run_kcache_kq_4d_case(k_type, got)) {
+        return false;
+    }
+
+    const double err_nmse = nmse(ref, got);
+    const float err_max_abs = max_abs_diff(ref, got);
+    std::fprintf(stderr, "K-cache KQ 4D type=%s nmse=%g max_abs=%g\n",
+            ggml_type_name(k_type), err_nmse, err_max_abs);
+
+    if (err_nmse > tol_nmse && err_max_abs > tol_max_abs) {
+        std::fprintf(stderr, "K-cache KQ 4D mismatch type=%s nmse=%g max_abs=%g\n",
+                ggml_type_name(k_type), err_nmse, err_max_abs);
+        return false;
+    }
+
+    return true;
+}
+
 static bool run_block16_same_type_view_copy_case() {
     ggml_init_params params = {
         /* .mem_size   = */ 16 * 1024 * 1024,
@@ -714,6 +812,9 @@ int main() {
         return 1;
     }
     if (!test_mul_mat_variant(non_flash_prefill_case, GGML_TYPE_FP8_E4M3_E8M0_16, 1e-1, 2.0f)) {
+        return 1;
+    }
+    if (!test_kcache_kq_4d_variant(GGML_TYPE_FP8_E4M3_E8M0_32, 1e-1, 2.0f)) {
         return 1;
     }
     if (!run_block16_same_type_view_copy_case()) {
