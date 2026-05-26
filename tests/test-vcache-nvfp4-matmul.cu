@@ -76,8 +76,7 @@ static float lt_scale_roundtrip(float x) {
 #endif
 
 static bool expect_lt_reference_for_kv_size(int64_t kv_size) {
-    GGML_UNUSED(kv_size);
-    return TEST_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS;
+    return TEST_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS && (kv_size <= 512 || kv_size % 512 == 0);
 }
 
 static void dequantize_v_blocks_like_lt(
@@ -882,6 +881,10 @@ int main(int argc, char ** argv) {
     }
 
     if (!run_real_vcache_view_case(512, true)) {
+        return 1;
+    }
+
+    if (!run_real_vcache_view_case(528)) {
         return 1;
     }
 
