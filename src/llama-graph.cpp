@@ -1238,6 +1238,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
              int       il) const {
     ggml_tensor * k_scale = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_scale(k));
     ggml_tensor * v_scale = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_scale(v));
+    ggml_tensor * k_outlier_count = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_kcache_outlier_counts(k));
+    ggml_tensor * k_outlier_index = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_kcache_outlier_indices(k));
+    ggml_tensor * k_outlier_value = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_kcache_outlier_values(k));
     const bool v_is_nvfp4_cache =
             v->type == GGML_TYPE_NVFP4 &&
             v_scale != nullptr &&
@@ -1256,6 +1259,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     v = ggml_permute(ctx0, v, 0, 2, 1, 3);
     if (k_scale) {
         ggml_tensor_set_nvfp4_scale(k, k_scale);
+    }
+    if (k_outlier_count) {
+        ggml_tensor_set_nvfp4_kcache_outliers(k, k_outlier_count, k_outlier_index, k_outlier_value);
     }
     if (v_scale) {
         ggml_tensor_set_nvfp4_scale(v, v_scale);

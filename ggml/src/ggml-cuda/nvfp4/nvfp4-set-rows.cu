@@ -1,4 +1,5 @@
 #include "nvfp4-set-rows.cuh"
+#include "kcache-outlier.cuh"
 
 static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_set_rows(float x) {
     uint8_t best_index = 0;
@@ -75,7 +76,9 @@ static __global__ void k_set_rows_nvfp4(
         const int64_t s01,
         const int64_t s10,
         const int64_t s1,
-        const float * __restrict__ amax_rows) {
+        const float * __restrict__ amax_rows,
+        const float threshold,
+        const bool zero_outliers) {
     const int lane = threadIdx.x;
     const bool lane_active = lane < QK_NVFP4;
 
@@ -84,7 +87,8 @@ static __global__ void k_set_rows_nvfp4(
     const int64_t k0 = (int64_t) ib * QK_NVFP4 + lane;
 
     const int64_t row_off = (int64_t) i1 * s01;
-    const float xi = (lane_active && k0 < ne00) ? src0[row_off + k0] : 0.0f;
+    const float raw_xi = (lane_active && k0 < ne00) ? src0[row_off + k0] : 0.0f;
+    const float xi = (zero_outliers && fabsf(raw_xi) > threshold) ? 0.0f : raw_xi;
 
     float vmax = fabsf(xi);
     vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 8, WARP_SIZE));
@@ -122,7 +126,9 @@ static __global__ void k_set_rows_nvfp4_8(
         const int64_t s01,
         const int64_t s10,
         const int64_t s1,
-        const float * __restrict__ amax_rows) {
+        const float * __restrict__ amax_rows,
+        const float threshold,
+        const bool zero_outliers) {
     const int lane = threadIdx.x;
     const bool lane_active = lane < QK_NVFP4_8;
 
@@ -131,7 +137,8 @@ static __global__ void k_set_rows_nvfp4_8(
     const int64_t k0 = (int64_t) ib * QK_NVFP4_8 + lane;
 
     const int64_t row_off = (int64_t) i1 * s01;
-    const float xi = (lane_active && k0 < ne00) ? src0[row_off + k0] : 0.0f;
+    const float raw_xi = (lane_active && k0 < ne00) ? src0[row_off + k0] : 0.0f;
+    const float xi = (zero_outliers && fabsf(raw_xi) > threshold) ? 0.0f : raw_xi;
 
     float vmax = fabsf(xi);
     vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 4, WARP_SIZE));
@@ -193,14 +200,44 @@ static void ggml_cuda_set_rows_nvfp4_common(
     GGML_ASSERT(scale_tensor != nullptr);
     GGML_ASSERT(scale_tensor->type == GGML_TYPE_F32);
     GGML_ASSERT(scale_tensor->data != nullptr);
+    const ggml_tensor * outlier_counts = ggml_tensor_get_nvfp4_kcache_outlier_counts(dst);
+    const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(dst);
+    const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(dst);
+    const bool use_outliers = outlier_counts != nullptr && outlier_indices != nullptr && outlier_values != nullptr;
+    if (use_outliers) {
+        GGML_ASSERT(outlier_counts->type == GGML_TYPE_I32);
+        GGML_ASSERT(outlier_indices->type == GGML_TYPE_I32);
+        GGML_ASSERT(outlier_values->type == GGML_TYPE_F32);
+        GGML_ASSERT(outlier_counts->data != nullptr);
+        GGML_ASSERT(outlier_indices->data != nullptr);
+        GGML_ASSERT(outlier_values->data != nullptr);
+    }
 
     ggml_cuda_pool_alloc<float> amax_d(ctx.pool(), (size_t) p.ne01);
     if (p.ne01 > 0) {
-        k_abs_max_f32_rows<<<(int) p.ne01, CUDA_SET_ROWS_BLOCK_SIZE, 0, p.stream>>>(
-                p.src0_d, amax_d.get(),
-                p.ne00, p.ne01,
-                p.nb01/sizeof(float));
-        CUDA_CHECK(cudaGetLastError());
+        if (use_outliers) {
+            ggml_cuda_nvfp4_kcache_outlier_extract(
+                    p.src0_d,
+                    p.src1_d,
+                    (int32_t *) outlier_counts->data,
+                    (int32_t *) outlier_indices->data,
+                    (float *) outlier_values->data,
+                    amax_d.get(),
+                    p.ne00,
+                    p.ne01,
+                    p.nb01/sizeof(float),
+                    p.nb10/sizeof(int64_t),
+                    outlier_counts->ne[0],
+                    outlier_indices->ne[0],
+                    ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                    p.stream);
+        } else {
+            k_abs_max_f32_rows<<<(int) p.ne01, CUDA_SET_ROWS_BLOCK_SIZE, 0, p.stream>>>(
+                    p.src0_d, amax_d.get(),
+                    p.ne00, p.ne01,
+                    p.nb01/sizeof(float));
+            CUDA_CHECK(cudaGetLastError());
+        }
     }
 
     if (p.ne01 > 0) {
@@ -213,7 +250,9 @@ static void ggml_cuda_set_rows_nvfp4_common(
                     p.nb01/sizeof(float),
                     p.nb10/sizeof(int64_t),
                     p.nb1,
-                    amax_d.get());
+                    amax_d.get(),
+                    ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                    use_outliers);
         } else {
             const dim3 block_size(QK_NVFP4);
             const dim3 grid_size((uint32_t) (p.ne00 / QK_NVFP4), (uint32_t) p.ne01, 1);
@@ -223,7 +262,9 @@ static void ggml_cuda_set_rows_nvfp4_common(
                     p.nb01/sizeof(float),
                     p.nb10/sizeof(int64_t),
                     p.nb1,
-                    amax_d.get());
+                    amax_d.get(),
+                    ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                    use_outliers);
         }
         CUDA_CHECK(cudaGetLastError());
 

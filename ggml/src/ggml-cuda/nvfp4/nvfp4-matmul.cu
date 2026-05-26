@@ -1,5 +1,7 @@
 #include "nvfp4-matmul.cuh"
 
+#include "kcache-outlier.cuh"
+
 #include "ggml-backend.h"
 #include "../../ggml-quants.h"
 
@@ -770,6 +772,39 @@ bool ggml_cuda_mul_mat_nvfp4_native(
 
                 if (!ggml_cuda_mul_mat_nvfp4_native(ctx, &src0_slice, &src1_slice, &dst_slice)) {
                     return false;
+                }
+
+                const ggml_tensor * outlier_counts = ggml_tensor_get_nvfp4_kcache_outlier_counts(src0);
+                const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(src0);
+                const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(src0);
+                const ggml_tensor * k_scale = ggml_tensor_get_nvfp4_scale(src0);
+                if (outlier_counts != nullptr && outlier_indices != nullptr && outlier_values != nullptr) {
+                    const int64_t q_heads = src1->ne[2];
+                    const int64_t kv_heads = src0->ne[2];
+                    const int64_t q_head = i2;
+                    const int64_t stream_id = i3 / r3;
+                    const int64_t kv_len = src0_slice.ne[1];
+                    const int64_t q_len = src1_slice.ne[1];
+                    const int64_t max_outliers = outlier_indices->ne[0];
+                    ggml_cuda_nvfp4_kcache_outlier_apply_correction(
+                            (const int32_t *) ((const char *) outlier_counts->data + stream_id * outlier_counts->nb[3]),
+                            (const int32_t *) ((const char *) outlier_indices->data + stream_id * outlier_indices->nb[3]),
+                            (const float *)   ((const char *) outlier_values->data  + stream_id * outlier_values->nb[3]),
+                            (const float *) src1_slice.data,
+                            (float *) dst_slice.data,
+                            k_scale != nullptr ? (const float *) ((const char *) k_scale->data + stream_id * k_scale->nb[3]) : nullptr,
+                            src0_slice.ne[0],
+                            kv_len,
+                            q_len,
+                            q_heads,
+                            kv_heads,
+                            q_head,
+                            max_outliers,
+                            src1_slice.nb[0] / (int64_t) sizeof(float),
+                            src1_slice.nb[1] / (int64_t) sizeof(float),
+                            dst_slice.nb[0] / (int64_t) sizeof(float),
+                            dst_slice.nb[1] / (int64_t) sizeof(float),
+                            stream);
                 }
             }
         }

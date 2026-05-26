@@ -7,6 +7,7 @@
 #include "llama-vcache-nvfp4.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cctype>
@@ -24,6 +25,41 @@
 static constexpr float LLAMA_NVFP4_VCACHE_FP4_MAX = 6.0f;
 static constexpr float LLAMA_NVFP4_VCACHE_E4M3_HALF_MAX = 224.0f;
 static constexpr float LLAMA_NVFP4_VCACHE_GLOBAL_SCALE_MAX = LLAMA_NVFP4_VCACHE_FP4_MAX * LLAMA_NVFP4_VCACHE_E4M3_HALF_MAX;
+
+static bool llama_env_flag_enabled_local(const char * name) {
+    const char * value = std::getenv(name);
+    return value != nullptr && std::atoi(value) != 0;
+}
+
+static uint32_t llama_env_u32_or_default_local(const char * name, uint32_t default_value) {
+    const char * value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return default_value;
+    }
+
+    char * end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value || parsed == 0 || parsed > std::numeric_limits<uint32_t>::max()) {
+        return default_value;
+    }
+
+    return (uint32_t) parsed;
+}
+
+static float llama_env_f32_or_default_local(const char * name, float default_value) {
+    const char * value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return default_value;
+    }
+
+    char * end = nullptr;
+    const float parsed = std::strtof(value, &end);
+    if (end == value || !std::isfinite(parsed)) {
+        return default_value;
+    }
+
+    return parsed;
+}
 
 static bool llama_nvfp4_parse_json_number_after_key(
         const std::string & text,
@@ -126,6 +162,21 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     nvfp4_vcache_layer_global_scale = nvfp4_vcache && v_trans && nvfp4_layer_scale_path != nullptr;
     nvfp4_vcache_per_block_scale = nvfp4_vcache && v_trans && !nvfp4_vcache_layer_global_scale && llama_vcache_nvfp4_per_block_scale_enabled();
     llama_vcache_nvfp4_log_scale_mode_once(nvfp4_vcache && v_trans);
+    nvfp4_kcache_outlier = type_k == GGML_TYPE_NVFP4 && llama_env_flag_enabled_local("LLAMA_NVFP4_KCACHE_OUTLIER");
+    nvfp4_kcache_outlier_log = nvfp4_kcache_outlier && llama_env_flag_enabled_local("LLAMA_NVFP4_KCACHE_OUTLIER_LOG");
+    nvfp4_kcache_outlier_max = nvfp4_kcache_outlier
+            ? llama_env_u32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_MAX", 32)
+            : 0;
+    if (nvfp4_kcache_outlier_log) {
+        static std::atomic<bool> logged(false);
+        if (!logged.exchange(true)) {
+            LLAMA_LOG_INFO(
+                    "%s: NVFP4 K-cache outlier sidecar enabled: threshold=%g max_outliers=%u\n",
+                    __func__,
+                    (double) llama_env_f32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD", 16.0f),
+                    nvfp4_kcache_outlier_max);
+        }
+    }
 
     // TODO: this is temporary until we support passing reuse layer filters [KV_REUSE]
     auto n_layer_cache = hparams.n_layer;
@@ -151,8 +202,9 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
+            const uint32_t tensors_per_layer = 4u*(1 + n_stream) + (nvfp4_kcache_outlier ? 3u*(1 + n_stream) : 0u);
             ggml_init_params params = {
-                /*.mem_size   =*/ size_t(4u*(1 + n_stream)*n_layer_cache*ggml_tensor_overhead()),
+                /*.mem_size   =*/ size_t(tensors_per_layer*n_layer_cache*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -235,6 +287,9 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         ggml_tensor * v;
         ggml_tensor * k_scale = nullptr;
         ggml_tensor * v_scale = nullptr;
+        ggml_tensor * k_outlier_count = nullptr;
+        ggml_tensor * k_outlier_index = nullptr;
+        ggml_tensor * k_outlier_value = nullptr;
 
         k = ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream);
         if (use_nvfp4_vcache_layout()) {
@@ -246,6 +301,14 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         if (has_k_scale) {
             k_scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (int64_t) kv_size * n_stream);
             ggml_format_name(k_scale, "cache_k_gscale_l%d", il);
+        }
+        if (nvfp4_kcache_outlier) {
+            k_outlier_count = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t) kv_size * n_stream);
+            k_outlier_index = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, nvfp4_kcache_outlier_max, (int64_t) kv_size * n_stream);
+            k_outlier_value = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nvfp4_kcache_outlier_max, (int64_t) kv_size * n_stream);
+            ggml_format_name(k_outlier_count, "cache_k_outlier_count_l%d", il);
+            ggml_format_name(k_outlier_index, "cache_k_outlier_index_l%d", il);
+            ggml_format_name(k_outlier_value, "cache_k_outlier_value_l%d", il);
         }
         if (use_nvfp4_vcache_layout()) {
             v_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_v_scale, n_stream);
@@ -259,6 +322,9 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         std::vector<ggml_tensor *> v_stream;
         std::vector<ggml_tensor *> k_scale_stream;
         std::vector<ggml_tensor *> v_scale_stream;
+        std::vector<ggml_tensor *> k_outlier_count_stream;
+        std::vector<ggml_tensor *> k_outlier_index_stream;
+        std::vector<ggml_tensor *> k_outlier_value_stream;
 
         for (uint32_t s = 0; s < n_stream; ++s) {
             k_stream.push_back(ggml_view_2d(ctx, k, n_embd_k_gqa, kv_size, k->nb[1], s*k->nb[2]));
@@ -270,6 +336,14 @@ llama_kv_cache_unified::llama_kv_cache_unified(
             if (k_scale) {
                 k_scale_stream.push_back(ggml_view_1d(ctx, k_scale, kv_size, (int64_t) s * kv_size * sizeof(float)));
             }
+            if (k_outlier_count) {
+                const int64_t stream_off = (int64_t) s * kv_size;
+                k_outlier_count_stream.push_back(ggml_view_1d(ctx, k_outlier_count, kv_size, stream_off * sizeof(int32_t)));
+                k_outlier_index_stream.push_back(ggml_view_2d(ctx, k_outlier_index, nvfp4_kcache_outlier_max, kv_size,
+                            k_outlier_index->nb[1], stream_off * k_outlier_index->nb[1]));
+                k_outlier_value_stream.push_back(ggml_view_2d(ctx, k_outlier_value, nvfp4_kcache_outlier_max, kv_size,
+                            k_outlier_value->nb[1], stream_off * k_outlier_value->nb[1]));
+            }
             if (v_scale) {
                 v_scale_stream.push_back(ggml_view_1d(ctx, v_scale, n_v_scale, (int64_t) s * n_v_scale * sizeof(float)));
             }
@@ -277,7 +351,12 @@ llama_kv_cache_unified::llama_kv_cache_unified(
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_scale, v_scale, k_stream, v_stream, k_scale_stream, v_scale_stream, });
+        layers.push_back({
+                il, k, v, k_scale, v_scale,
+                k_outlier_count, k_outlier_index, k_outlier_value,
+                k_stream, v_stream, k_scale_stream, v_scale_stream,
+                k_outlier_count_stream, k_outlier_index_stream, k_outlier_value_stream,
+        });
     }
 
     // TODO: this is temporary until we support passing reuse layer filters [KV_REUSE]
@@ -815,6 +894,11 @@ bool llama_kv_cache_unified::update(llama_context * lctx, bool do_shift, const d
                 if (layer.k_scale) {
                     ggml_backend_tensor_copy(layer.k_scale_stream[ssrc], layer.k_scale_stream[sdst]);
                 }
+                if (layer.k_outlier_count) {
+                    ggml_backend_tensor_copy(layer.k_outlier_count_stream[ssrc], layer.k_outlier_count_stream[sdst]);
+                    ggml_backend_tensor_copy(layer.k_outlier_index_stream[ssrc], layer.k_outlier_index_stream[sdst]);
+                    ggml_backend_tensor_copy(layer.k_outlier_value_stream[ssrc], layer.k_outlier_value_stream[sdst]);
+                }
                 if (layer.v_scale) {
                     ggml_backend_tensor_copy(layer.v_scale_stream[ssrc], layer.v_scale_stream[sdst]);
                 }
@@ -1279,6 +1363,9 @@ ggml_tensor * llama_kv_cache_unified::get_k(ggml_context * ctx, int32_t il, uint
 
     auto * k = layers[ikv].k;
     auto * k_scale = layers[ikv].k_scale;
+    auto * k_outlier_count = layers[ikv].k_outlier_count;
+    auto * k_outlier_index = layers[ikv].k_outlier_index;
+    auto * k_outlier_value = layers[ikv].k_outlier_value;
 
     const uint64_t kv_size      = get_size();
     const uint64_t n_embd_k_gqa = k->ne[0];
@@ -1303,6 +1390,27 @@ ggml_tensor * llama_kv_cache_unified::get_k(ggml_context * ctx, int32_t il, uint
                 (int64_t) kv_size * sizeof(float),
                 (int64_t) sinfo.s0 * kv_size * sizeof(float));
         ggml_tensor_set_nvfp4_scale(res, scale);
+    }
+    if (k_outlier_count) {
+        ggml_tensor * outlier_count = ggml_view_4d(ctx, k_outlier_count,
+                n_kv, 1, 1, ns,
+                0,
+                0,
+                (int64_t) kv_size * sizeof(int32_t),
+                (int64_t) sinfo.s0 * kv_size * sizeof(int32_t));
+        ggml_tensor * outlier_index = ggml_view_4d(ctx, k_outlier_index,
+                nvfp4_kcache_outlier_max, n_kv, 1, ns,
+                k_outlier_index->nb[1],
+                0,
+                (int64_t) kv_size * k_outlier_index->nb[1],
+                (int64_t) sinfo.s0 * kv_size * k_outlier_index->nb[1]);
+        ggml_tensor * outlier_value = ggml_view_4d(ctx, k_outlier_value,
+                nvfp4_kcache_outlier_max, n_kv, 1, ns,
+                k_outlier_value->nb[1],
+                0,
+                (int64_t) kv_size * k_outlier_value->nb[1],
+                (int64_t) sinfo.s0 * kv_size * k_outlier_value->nb[1]);
+        ggml_tensor_set_nvfp4_kcache_outliers(res, outlier_count, outlier_index, outlier_value);
     }
 
     return res;
@@ -1409,6 +1517,13 @@ ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_
         ggml_tensor * res = ggml_set_rows(ctx, k, k_cur, k_idxs);
         if (layers[ikv].k_scale) {
             ggml_tensor_set_nvfp4_scale(res, layers[ikv].k_scale);
+        }
+        if (layers[ikv].k_outlier_count) {
+            ggml_tensor_set_nvfp4_kcache_outliers(
+                    res,
+                    layers[ikv].k_outlier_count,
+                    layers[ikv].k_outlier_index,
+                    layers[ikv].k_outlier_value);
         }
         return res;
     }
@@ -1984,6 +2099,12 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_defrag(
             ggml_tensor * view_k_scale_dst = nullptr;
             ggml_tensor * view_v_scale_src = nullptr;
             ggml_tensor * view_v_scale_dst = nullptr;
+            ggml_tensor * view_k_outlier_count_src = nullptr;
+            ggml_tensor * view_k_outlier_count_dst = nullptr;
+            ggml_tensor * view_k_outlier_index_src = nullptr;
+            ggml_tensor * view_k_outlier_index_dst = nullptr;
+            ggml_tensor * view_k_outlier_value_src = nullptr;
+            ggml_tensor * view_k_outlier_value_dst = nullptr;
 
             if (cparams.flash_attn) {
                 // NOTE: the V cache is not transposed when using flash attention
@@ -2028,6 +2149,23 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_defrag(
                 view_k_scale_src = ggml_view_1d(ctx, layer.k_scale, nm, i * sizeof(float));
                 view_k_scale_dst = ggml_view_1d(ctx, layer.k_scale, nm, id * sizeof(float));
                 ggml_build_forward_expand(gf, ggml_cpy(ctx, view_k_scale_src, view_k_scale_dst));
+            }
+            if (layer.k_outlier_count) {
+                view_k_outlier_count_src = ggml_view_1d(ctx, layer.k_outlier_count, nm, i * sizeof(int32_t));
+                view_k_outlier_count_dst = ggml_view_1d(ctx, layer.k_outlier_count, nm, id * sizeof(int32_t));
+                ggml_build_forward_expand(gf, ggml_cpy(ctx, view_k_outlier_count_src, view_k_outlier_count_dst));
+
+                view_k_outlier_index_src = ggml_view_2d(ctx, layer.k_outlier_index, nvfp4_kcache_outlier_max, nm,
+                        layer.k_outlier_index->nb[1], (int64_t) i * layer.k_outlier_index->nb[1]);
+                view_k_outlier_index_dst = ggml_view_2d(ctx, layer.k_outlier_index, nvfp4_kcache_outlier_max, nm,
+                        layer.k_outlier_index->nb[1], (int64_t) id * layer.k_outlier_index->nb[1]);
+                ggml_build_forward_expand(gf, ggml_cpy(ctx, view_k_outlier_index_src, view_k_outlier_index_dst));
+
+                view_k_outlier_value_src = ggml_view_2d(ctx, layer.k_outlier_value, nvfp4_kcache_outlier_max, nm,
+                        layer.k_outlier_value->nb[1], (int64_t) i * layer.k_outlier_value->nb[1]);
+                view_k_outlier_value_dst = ggml_view_2d(ctx, layer.k_outlier_value, nvfp4_kcache_outlier_max, nm,
+                        layer.k_outlier_value->nb[1], (int64_t) id * layer.k_outlier_value->nb[1]);
+                ggml_build_forward_expand(gf, ggml_cpy(ctx, view_k_outlier_value_src, view_k_outlier_value_dst));
             }
             if (layer.v_scale) {
                 if (use_nvfp4_vcache_single_global_scale()) {
@@ -2226,6 +2364,9 @@ void llama_kv_cache_unified::state_write(llama_io_write_i & io, llama_seq_id seq
     if (use_nvfp4_vcache_layout()) {
         throw std::runtime_error("NVFP4 V-cache state export is not supported");
     }
+    if (nvfp4_kcache_outlier) {
+        throw std::runtime_error("NVFP4 K-cache outlier state export is not supported");
+    }
 
     io.write(&n_stream, sizeof(n_stream));
 
@@ -2282,6 +2423,9 @@ void llama_kv_cache_unified::state_read(llama_io_read_i & io, llama_seq_id seq_i
 
     if (use_nvfp4_vcache_layout()) {
         throw std::runtime_error("NVFP4 V-cache state import is not supported");
+    }
+    if (nvfp4_kcache_outlier) {
+        throw std::runtime_error("NVFP4 K-cache outlier state import is not supported");
     }
 
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));

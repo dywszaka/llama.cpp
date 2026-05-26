@@ -1,5 +1,45 @@
 # Experiment Switch Environment Variables
 
+## NVFP4 K-Cache Outlier Sidecar
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER`
+
+Enables the experimental NVFP4 K-cache outlier sidecar path. Default: off.
+
+When enabled for `K cache = nvfp4`, K values whose absolute value is above the
+configured threshold are extracted before cache quantization. The residual K
+positions are quantized as zero, and the extracted signed F32 values are added
+back into KQ by multiplying them with the corresponding pre-quantization F32 Q
+values.
+
+Initial scope: CUDA NVFP4 K-cache, non-flash-attention KQ.
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD`
+
+Absolute-value threshold for K-cache outlier extraction. Default: `16`.
+
+The predicate is:
+
+```text
+abs(K) > LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD
+```
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_MAX`
+
+Maximum number of outlier values stored per K-cache row. Default: `32`.
+
+The count sidecar records the true number of outliers per row. The value/index
+sidecars store only the first `LLAMA_NVFP4_KCACHE_OUTLIER_MAX` entries, and KQ
+correction uses only stored entries. Use the log switch below to detect overflow.
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_LOG`
+
+Enables outlier sidecar logging. Default: off.
+
+When enabled, startup logs print the configured threshold and per-row storage
+capacity. Runtime set_rows logs summarize rows processed, total outliers,
+maximum outliers in a row, and rows whose true count exceeded storage capacity.
+
 ## NVFP4 V-Cache
 
 ### `LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE`

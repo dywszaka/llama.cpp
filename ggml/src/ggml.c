@@ -7011,6 +7011,31 @@ const struct ggml_tensor * ggml_tensor_get_nvfp4_scale(
     return tensor->src[GGML_MAX_SRC - 1];
 }
 
+void ggml_tensor_set_nvfp4_kcache_outliers(
+        struct ggml_tensor       * tensor,
+        const struct ggml_tensor * counts,
+        const struct ggml_tensor * indices,
+        const struct ggml_tensor * values) {
+    tensor->src[GGML_MAX_SRC - 4] = (struct ggml_tensor *) counts;
+    tensor->src[GGML_MAX_SRC - 3] = (struct ggml_tensor *) indices;
+    tensor->src[GGML_MAX_SRC - 2] = (struct ggml_tensor *) values;
+}
+
+const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_counts(
+        const struct ggml_tensor * tensor) {
+    return tensor->src[GGML_MAX_SRC - 4];
+}
+
+const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_indices(
+        const struct ggml_tensor * tensor) {
+    return tensor->src[GGML_MAX_SRC - 3];
+}
+
+const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_values(
+        const struct ggml_tensor * tensor) {
+    return tensor->src[GGML_MAX_SRC - 2];
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 void ggml_quantize_init(enum ggml_type type) {
