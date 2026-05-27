@@ -162,18 +162,26 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     nvfp4_vcache_layer_global_scale = nvfp4_vcache && v_trans && nvfp4_layer_scale_path != nullptr;
     nvfp4_vcache_per_block_scale = nvfp4_vcache && v_trans && !nvfp4_vcache_layer_global_scale && llama_vcache_nvfp4_per_block_scale_enabled();
     llama_vcache_nvfp4_log_scale_mode_once(nvfp4_vcache && v_trans);
-    nvfp4_kcache_outlier = type_k == GGML_TYPE_NVFP4 && llama_env_flag_enabled_local("LLAMA_NVFP4_KCACHE_OUTLIER");
-    nvfp4_kcache_outlier_log = nvfp4_kcache_outlier && llama_env_flag_enabled_local("LLAMA_NVFP4_KCACHE_OUTLIER_LOG");
+    const bool f16_kcache_outlier = type_k == GGML_TYPE_F16 && llama_env_flag_enabled_local("LLAMA_F16_KCACHE_OUTLIER");
+    nvfp4_kcache_outlier = (type_k == GGML_TYPE_NVFP4 && llama_env_flag_enabled_local("LLAMA_NVFP4_KCACHE_OUTLIER")) || f16_kcache_outlier;
+    nvfp4_kcache_outlier_log = nvfp4_kcache_outlier && (
+            llama_env_flag_enabled_local("LLAMA_NVFP4_KCACHE_OUTLIER_LOG") ||
+            llama_env_flag_enabled_local("LLAMA_F16_KCACHE_OUTLIER_LOG"));
     nvfp4_kcache_outlier_max = nvfp4_kcache_outlier
-            ? llama_env_u32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_MAX", 32)
+            ? (f16_kcache_outlier
+                    ? llama_env_u32_or_default_local("LLAMA_F16_KCACHE_OUTLIER_MAX", 32)
+                    : llama_env_u32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_MAX", 32))
             : 0;
     if (nvfp4_kcache_outlier_log) {
         static std::atomic<bool> logged(false);
         if (!logged.exchange(true)) {
             LLAMA_LOG_INFO(
-                    "%s: NVFP4 K-cache outlier sidecar enabled: threshold=%g max_outliers=%u\n",
+                    "%s: %s K-cache outlier sidecar enabled: threshold=%g max_outliers=%u\n",
                     __func__,
-                    (double) llama_env_f32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD", 16.0f),
+                    f16_kcache_outlier ? "F16" : "NVFP4",
+                    (double) (f16_kcache_outlier
+                            ? llama_env_f32_or_default_local("LLAMA_F16_KCACHE_OUTLIER_THRESHOLD", 16.0f)
+                            : llama_env_f32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD", 16.0f)),
                     nvfp4_kcache_outlier_max);
         }
     }

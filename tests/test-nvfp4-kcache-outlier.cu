@@ -4,6 +4,7 @@
 #include "../ggml/src/ggml-cuda/nvfp4/kcache-outlier.cuh"
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 #include <cmath>
 #include <cstdio>
@@ -245,6 +246,75 @@ static void test_apply_correction_compensates_for_downstream_k_scale() {
     CUDA_CHECK(cudaFree(k_scale_d));
 }
 
+static void test_f16_set_rows_extracts_outliers_and_writes_residual() {
+    constexpr int64_t k = 8;
+    constexpr int64_t rows = 1;
+    constexpr int64_t dst_rows = 4;
+    constexpr int64_t max_outliers = 3;
+    constexpr float threshold = 16.0f;
+
+    std::vector<float> src = {
+        1.0f, 17.0f, -2.5f, -18.0f, 3.0f, 15.0f, 22.0f, -4.0f,
+    };
+    const int64_t idx_h[1] = { 2 };
+
+    float * src_d = nullptr;
+    int64_t * idx_d = nullptr;
+    __half * dst_d = nullptr;
+    int32_t * counts_d = nullptr;
+    int32_t * indices_d = nullptr;
+    float * values_d = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&src_d, src.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&idx_d, sizeof(idx_h)));
+    CUDA_CHECK(cudaMalloc(&dst_d, (size_t) dst_rows * k * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&counts_d, (size_t) dst_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&indices_d, (size_t) max_outliers * dst_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&values_d, (size_t) max_outliers * dst_rows * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(src_d, src.data(), src.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(idx_d, idx_h, sizeof(idx_h), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(dst_d, 0, (size_t) dst_rows * k * sizeof(__half)));
+    CUDA_CHECK(cudaMemset(counts_d, 0, (size_t) dst_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(indices_d, 0, (size_t) max_outliers * dst_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(values_d, 0, (size_t) max_outliers * dst_rows * sizeof(float)));
+
+    ggml_cuda_f16_kcache_outlier_set_rows(
+            src_d, idx_d, dst_d, counts_d, indices_d, values_d,
+            k, rows, k, 1, k, dst_rows, max_outliers, threshold, nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<__half> dst((size_t) dst_rows * k);
+    std::vector<int32_t> counts((size_t) dst_rows);
+    std::vector<int32_t> indices((size_t) max_outliers * dst_rows);
+    std::vector<float> values((size_t) max_outliers * dst_rows);
+    CUDA_CHECK(cudaMemcpy(dst.data(), dst_d, dst.size() * sizeof(__half), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(counts.data(), counts_d, counts.size() * sizeof(int32_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(indices.data(), indices_d, indices.size() * sizeof(int32_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(values.data(), values_d, values.size() * sizeof(float), cudaMemcpyDeviceToHost));
+
+    require(counts[2] == 3, "F16 row should record all outliers");
+    require(indices[2 * max_outliers + 0] == 1, "F16 first outlier index");
+    require(indices[2 * max_outliers + 1] == 3, "F16 second outlier index");
+    require(indices[2 * max_outliers + 2] == 6, "F16 third outlier index");
+    require(nearly_equal(values[2 * max_outliers + 0], 17.0f), "F16 first outlier value");
+    require(nearly_equal(values[2 * max_outliers + 1], -18.0f), "F16 second outlier value");
+    require(nearly_equal(values[2 * max_outliers + 2], 22.0f), "F16 third outlier value");
+
+    const size_t base = 2 * k;
+    require(nearly_equal(__half2float(dst[base + 0]), 1.0f), "F16 residual keeps non-outlier 0");
+    require(nearly_equal(__half2float(dst[base + 1]), 0.0f), "F16 residual zeros outlier 1");
+    require(nearly_equal(__half2float(dst[base + 2]), -2.5f), "F16 residual keeps non-outlier 2");
+    require(nearly_equal(__half2float(dst[base + 3]), 0.0f), "F16 residual zeros outlier 3");
+    require(nearly_equal(__half2float(dst[base + 6]), 0.0f), "F16 residual zeros outlier 6");
+
+    CUDA_CHECK(cudaFree(src_d));
+    CUDA_CHECK(cudaFree(idx_d));
+    CUDA_CHECK(cudaFree(dst_d));
+    CUDA_CHECK(cudaFree(counts_d));
+    CUDA_CHECK(cudaFree(indices_d));
+    CUDA_CHECK(cudaFree(values_d));
+}
+
 int main() {
     if (!cuda_available()) {
         std::printf("SKIP (no CUDA device)\n");
@@ -254,6 +324,7 @@ int main() {
     test_extract_counts_positions_and_residual_amax();
     test_apply_correction_filters_head();
     test_apply_correction_compensates_for_downstream_k_scale();
+    test_f16_set_rows_extracts_outliers_and_writes_residual();
 
     std::printf("OK\n");
     return 0;

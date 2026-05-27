@@ -52,6 +52,45 @@ When enabled, startup logs print the configured threshold and per-row storage
 capacity. Runtime set_rows logs summarize rows processed, total outliers,
 maximum outliers in a row, and rows whose true count exceeded storage capacity.
 
+## F16 K-Cache Outlier Sidecar
+
+### `LLAMA_F16_KCACHE_OUTLIER`
+
+Enables the experimental F16 K-cache outlier sidecar path. Default: off.
+
+When enabled for `K cache = f16`, K values whose absolute value is above the
+configured threshold are extracted before cache write. The residual K-cache row
+stores zero at those positions in F16, and the extracted signed F32 values are
+added back into KQ by multiplying them with the corresponding F32 Q values.
+
+Initial scope: CUDA F16 K-cache, non-flash-attention KQ.
+
+### `LLAMA_F16_KCACHE_OUTLIER_THRESHOLD`
+
+Absolute-value threshold for F16 K-cache outlier extraction. Default: `16`.
+
+The predicate is:
+
+```text
+abs(K) > LLAMA_F16_KCACHE_OUTLIER_THRESHOLD
+```
+
+### `LLAMA_F16_KCACHE_OUTLIER_MAX`
+
+Maximum number of outlier values stored per K-cache row. Default: `32`.
+
+The count sidecar records the true number of outliers per row. The value/index
+sidecars store only the first `LLAMA_F16_KCACHE_OUTLIER_MAX` entries, and KQ
+correction uses only stored entries. Use the log switch below to detect overflow.
+
+### `LLAMA_F16_KCACHE_OUTLIER_LOG`
+
+Enables F16 K-cache outlier sidecar logging. Default: off.
+
+When enabled, startup logs print the configured threshold and per-row storage
+capacity. Runtime set_rows logs summarize rows processed, total outliers,
+maximum outliers in a row, and rows whose true count exceeded storage capacity.
+
 ## NVFP4 V-Cache
 
 ### `LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE`

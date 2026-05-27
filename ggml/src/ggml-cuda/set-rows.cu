@@ -2,6 +2,7 @@
 #include "cpy-utils.cuh"
 #include "cuda-log.cuh"
 #include "fp8/fp8-set-rows.cuh"
+#include "nvfp4/kcache-outlier.cuh"
 #include "nvfp4/nvfp4-set-rows.cuh"
 #include "nvfp4/vcache-nvfp4-set-rows.cuh"
 
@@ -217,15 +218,45 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
             stream
         );
     } else if (dst->type == GGML_TYPE_F16) {
-        set_rows_cuda(
-            src0_d, src1_d, (half*)dst->data,
-            ne00, ne01, ne02, ne03,
-            ne10, ne11, ne12, ne13,
-            nb01, nb02, nb03,
-            nb10, nb11, nb12,
-            nb1, nb2, nb3,
-            stream
-        );
+        const ggml_tensor * outlier_counts = ggml_tensor_get_nvfp4_kcache_outlier_counts(dst);
+        const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(dst);
+        const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(dst);
+        const bool use_outliers =
+                ne02 == 1 && ne03 == 1 &&
+                outlier_counts != nullptr &&
+                outlier_indices != nullptr &&
+                outlier_values != nullptr;
+        if (use_outliers) {
+            GGML_ASSERT(outlier_counts->type == GGML_TYPE_I32);
+            GGML_ASSERT(outlier_indices->type == GGML_TYPE_I32);
+            GGML_ASSERT(outlier_values->type == GGML_TYPE_F32);
+            ggml_cuda_f16_kcache_outlier_set_rows(
+                    src0_d,
+                    src1_d,
+                    (half *) dst->data,
+                    (int32_t *) outlier_counts->data,
+                    (int32_t *) outlier_indices->data,
+                    (float *) outlier_values->data,
+                    ne00,
+                    ne01,
+                    nb01 / sizeof(float),
+                    nb10 / sizeof(int64_t),
+                    nb1 / sizeof(half),
+                    outlier_counts->ne[0],
+                    outlier_indices->ne[0],
+                    ggml_cuda_f16_kcache_outlier_threshold(),
+                    stream);
+        } else {
+            set_rows_cuda(
+                src0_d, src1_d, (half*)dst->data,
+                ne00, ne01, ne02, ne03,
+                ne10, ne11, ne12, ne13,
+                nb01, nb02, nb03,
+                nb10, nb11, nb12,
+                nb1, nb2, nb3,
+                stream
+            );
+        }
     } else if (dst->type == GGML_TYPE_BF16) {
         set_rows_cuda(
             src0_d, src1_d, (nv_bfloat16*)dst->data,
