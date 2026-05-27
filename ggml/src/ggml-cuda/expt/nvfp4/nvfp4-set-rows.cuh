@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../set-rows.cuh"
+#include "../../set-rows.cuh"
 #include "nvfp4-common.cuh"
 
 void ggml_cuda_set_rows_nvfp4(

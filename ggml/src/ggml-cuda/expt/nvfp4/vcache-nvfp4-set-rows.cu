@@ -1,6 +1,6 @@
 #include "vcache-nvfp4-set-rows.cuh"
 
-#include "../cuda-log.cuh"
+#include "../../cuda-log.cuh"
 
 #include <cstdlib>
 

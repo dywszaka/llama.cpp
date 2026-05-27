@@ -51,7 +51,7 @@
 - 权重侧 scale 绑定：`src/llama-model.cpp`
 - K cache 分配 / 视图 / 写入：`src/llama-kv-cache-unified.cpp`
 - 注意力图拼接：`src/llama-graph.cpp`
-- CUDA native NVFP4 matmul：`ggml/src/ggml-cuda/nvfp4/nvfp4-matmul.cu`
+- CUDA native NVFP4 matmul：`ggml/src/ggml-cuda/expt/nvfp4/nvfp4-matmul.cu`
 - CUDA `set_rows` NVFP4 写入：`ggml/src/ggml-cuda/set-rows.cu`
 
 ## 4. NVFP4 的 scale 语义
@@ -88,7 +88,7 @@
 常量定义在：
 
 - `ggml/src/ggml-cuda/set-rows.cu`
-- `ggml/src/ggml-cuda/nvfp4/nvfp4-matmul.cu`
+- `ggml/src/ggml-cuda/expt/nvfp4/nvfp4-matmul.cu`
 
 其中：
 
@@ -229,7 +229,7 @@
 
 对应代码：
 
-- `ggml/src/ggml-cuda/nvfp4/nvfp4-matmul.cu`
+- `ggml/src/ggml-cuda/expt/nvfp4/nvfp4-matmul.cu`
 
 ### 9.2 src0 的处理
 
@@ -285,7 +285,7 @@ native path 最终调用 `cublasLtMatmul()`，A/B 两侧都设置：
 
 对应代码：
 
-- `ggml/src/ggml-cuda/nvfp4/nvfp4-matmul.cu`
+- `ggml/src/ggml-cuda/expt/nvfp4/nvfp4-matmul.cu`
 - `src/llama-graph.cpp`
 
 这样做的原因是：
@@ -345,7 +345,7 @@ native path 最终调用 `cublasLtMatmul()`，A/B 两侧都设置：
 
 对应代码：
 
-- `ggml/src/ggml-cuda/nvfp4/nvfp4-matmul.cu`
+- `ggml/src/ggml-cuda/expt/nvfp4/nvfp4-matmul.cu`
 
 这是把 `backend-permuted-lhs` 回归用例拉回正确结果的关键修复。
 

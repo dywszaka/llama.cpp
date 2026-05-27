@@ -1,6 +1,6 @@
 #include "kcache-outlier.cuh"
 
-#include "../common.cuh"
+#include "../../common.cuh"
 #include "ggml-impl.h"
 
 #include <algorithm>

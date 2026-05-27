@@ -89,7 +89,7 @@ Expected evidence:
 - `ncu` should include NVFP4 K-cache write/read support kernels such as
   `set_rows` or NVFP4 staging kernels.
 - During attention KQ, native FP4 evidence is a combination of:
-  - NVFP4 native matmul logs from `ggml/src/ggml-cuda/nvfp4/nvfp4-matmul.cu`;
+  - NVFP4 native matmul logs from `ggml/src/ggml-cuda/expt/nvfp4/nvfp4-matmul.cu`;
   - quantization/staging kernels for F32 Q to NVFP4;
   - cuBLASLt GEMM kernels in `ncu` for the same request window.
 - Absence of the NVFP4 native logs or absence of NVFP4 staging kernels usually

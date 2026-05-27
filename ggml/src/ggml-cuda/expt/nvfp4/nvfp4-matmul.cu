@@ -3,7 +3,7 @@
 #include "kcache-outlier.cuh"
 
 #include "ggml-backend.h"
-#include "../../ggml-quants.h"
+#include "../../../ggml-quants.h"
 
 #include <atomic>
 #include <cmath>

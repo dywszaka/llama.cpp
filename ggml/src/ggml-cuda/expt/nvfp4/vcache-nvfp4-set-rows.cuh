@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../set-rows.cuh"
+#include "../../set-rows.cuh"
 #include "nvfp4-common.cuh"
 
 bool ggml_cuda_is_nvfp4_vcache_transposed_set_rows(

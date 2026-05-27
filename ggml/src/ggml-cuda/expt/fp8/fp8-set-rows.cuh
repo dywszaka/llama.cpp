@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../set-rows.cuh"
+#include "../../set-rows.cuh"
 
 bool ggml_cuda_fp8_e4m3_e8m0_32_e4m2_experiment_enabled();
 

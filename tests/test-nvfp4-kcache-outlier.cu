@@ -1,7 +1,7 @@
 #include <ggml.h>
 #include <ggml-cuda.h>
 
-#include "../ggml/src/ggml-cuda/nvfp4/kcache-outlier.cuh"
+#include "../ggml/src/ggml-cuda/expt/nvfp4/kcache-outlier.cuh"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

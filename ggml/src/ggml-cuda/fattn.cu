@@ -2,7 +2,7 @@
 #include "cuda-log.cuh"
 #include "fattn-common.cuh"
 #include "fattn-mma-f16.cuh"
-#include "nvfp4/fattn-nvfp4.cuh"
+#include "expt/nvfp4/fattn-nvfp4.cuh"
 #include "fattn-tile-f16.cuh"
 #include "fattn-tile-f32.cuh"
 #include "fattn-vec-f16.cuh"

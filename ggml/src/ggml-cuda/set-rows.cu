@@ -1,10 +1,10 @@
 #include "set-rows.cuh"
 #include "cpy-utils.cuh"
 #include "cuda-log.cuh"
-#include "fp8/fp8-set-rows.cuh"
-#include "nvfp4/kcache-outlier.cuh"
-#include "nvfp4/nvfp4-set-rows.cuh"
-#include "nvfp4/vcache-nvfp4-set-rows.cuh"
+#include "expt/fp8/fp8-set-rows.cuh"
+#include "expt/nvfp4/kcache-outlier.cuh"
+#include "expt/nvfp4/nvfp4-set-rows.cuh"
+#include "expt/nvfp4/vcache-nvfp4-set-rows.cuh"
 
 #include <algorithm>
 #include <cmath>

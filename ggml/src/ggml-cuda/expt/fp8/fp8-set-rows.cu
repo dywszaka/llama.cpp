@@ -1,6 +1,6 @@
 #include "fp8-set-rows.cuh"
 
-#include "../cpy-utils.cuh"
+#include "../../cpy-utils.cuh"
 
 #include <cstdlib>
 
