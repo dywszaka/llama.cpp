@@ -19,6 +19,10 @@
 static void print_usage(int, char ** argv) {
     LOG("\nexample usage:\n");
     LOG("\n    %s -m model.gguf -f prompt.txt -o kcache-mean.jsonl -n 128 -ctk f16 -ctv f16 --kv-unified\n", argv[0]);
+    LOG("\n    --include-prompt    include prompt-token K-cache appends in the running means\n");
+    LOG("    --generated-only    record generated-token K-cache appends only (default)\n");
+    LOG("    --dump-mean-vectors-every N  include full per-channel running mean vectors at step 1 and every N append steps\n");
+    LOG("    --dump-final-mean-vectors    include full per-channel running mean vectors for all layers after the final append\n");
     LOG("\n");
 }
 
@@ -50,24 +54,31 @@ struct kcache_mean_collector {
     std::ofstream out;
     std::vector<uint8_t> scratch;
     std::vector<float> values;
+    std::vector<double> running_means;
     std::map<int, layer_running_stats> layers;
 
     bool recording = false;
+    std::string phase = "generated";
     int64_t step = 0;
+    int64_t phase_step = 0;
     int32_t token = -1;
+    int64_t dump_mean_vectors_every = 0;
+    bool dump_mean_vectors_current_step = false;
 
     bool open(const std::string & path) {
         out.open(path);
         return (bool) out;
     }
 
-    void begin_generated_token(int64_t step_in, int32_t token_in) {
+    void begin_token(const char * phase_in, int64_t step_in, int64_t phase_step_in, int32_t token_in) {
         recording = true;
+        phase = phase_in;
         step = step_in;
+        phase_step = phase_step_in;
         token = token_in;
     }
 
-    void end_generated_token() {
+    void end_token() {
         recording = false;
         token = -1;
     }
@@ -100,6 +111,7 @@ struct kcache_mean_collector {
             LOG_WRN("%s: skipping %s source type %s\n", __func__, t->name, ggml_type_name(src->type));
             return true;
         }
+        apply_cache_precision(t->type, values);
 
         auto & stats = layers[layer];
         if (stats.channel_sums.empty()) {
@@ -133,14 +145,45 @@ struct kcache_mean_collector {
 
         double running_min = std::numeric_limits<double>::infinity();
         double running_max = -std::numeric_limits<double>::infinity();
-        for (double sum : stats.channel_sums) {
-            const double mean = sum / (double) stats.n_seen;
+        double running_abs_sum = 0.0;
+        double running_sum_sq = 0.0;
+        double delta_abs_sum = 0.0;
+        double delta_abs_max = 0.0;
+        double delta_sum_sq = 0.0;
+        const double n_seen = (double) stats.n_seen;
+        const double n_prev = (double) (stats.n_seen - 1);
+        const bool dump_mean_vector = dump_mean_vectors_current_step ||
+                (dump_mean_vectors_every > 0 && (step == 1 || step % dump_mean_vectors_every == 0));
+        if (dump_mean_vector) {
+            running_means.resize((size_t) n_channels);
+        }
+        for (int64_t i = 0; i < n_channels; ++i) {
+            const double mean = stats.channel_sums[(size_t) i] / n_seen;
+            if (dump_mean_vector) {
+                running_means[(size_t) i] = mean;
+            }
             running_min = std::min(running_min, mean);
             running_max = std::max(running_max, mean);
+            running_abs_sum += std::fabs(mean);
+            running_sum_sq += mean * mean;
+
+            double delta = mean;
+            if (stats.n_seen > 1) {
+                const double prev_mean = (stats.channel_sums[(size_t) i] - (double) values[(size_t) i]) / n_prev;
+                delta = mean - prev_mean;
+            }
+            const double abs_delta = std::fabs(delta);
+            delta_abs_sum += abs_delta;
+            delta_abs_max = std::max(delta_abs_max, abs_delta);
+            delta_sum_sq += delta * delta;
         }
 
-        out << "{\"phase\":\"generated\""
+        const double running_rms = std::sqrt(running_sum_sq / (double) n_channels);
+        const double delta_rms = std::sqrt(delta_sum_sq / (double) n_channels);
+
+        out << "{\"phase\":\"" << phase << "\""
             << ",\"step\":" << step
+            << ",\"phase_step\":" << phase_step
             << ",\"token\":" << token
             << ",\"layer\":" << layer
             << ",\"n_channels\":" << n_channels
@@ -153,6 +196,11 @@ struct kcache_mean_collector {
             << ",\"running_channel_mean_min\":" << running_min
             << ",\"running_channel_mean_max\":" << running_max
             << ",\"running_channel_mean_span\":" << (running_max - running_min)
+            << ",\"running_channel_mean_abs_mean\":" << (running_abs_sum / (double) n_channels)
+            << ",\"running_channel_mean_rms\":" << running_rms
+            << ",\"running_delta_abs_mean\":" << (delta_abs_sum / (double) n_channels)
+            << ",\"running_delta_abs_max\":" << delta_abs_max
+            << ",\"running_delta_rms\":" << delta_rms
             << ",\"abs_bins\":[";
         for (int i = 0; i < N_BINS; ++i) {
             if (i > 0) {
@@ -160,8 +208,18 @@ struct kcache_mean_collector {
             }
             out << bins[i];
         }
-        out << "]"
-            << "}\n";
+        out << "]";
+        if (dump_mean_vector) {
+            out << ",\"running_channel_means\":[";
+            for (int64_t i = 0; i < n_channels; ++i) {
+                if (i > 0) {
+                    out << ",";
+                }
+                out << running_means[(size_t) i];
+            }
+            out << "]";
+        }
+        out << "}\n";
 
         return true;
     }
@@ -235,6 +293,18 @@ struct kcache_mean_collector {
 
         return false;
     }
+
+    static void apply_cache_precision(enum ggml_type cache_type, std::vector<float> & out_values) {
+        if (cache_type == GGML_TYPE_F16) {
+            for (float & v : out_values) {
+                v = ggml_fp16_to_fp32(ggml_fp32_to_fp16(v));
+            }
+        } else if (cache_type == GGML_TYPE_BF16) {
+            for (float & v : out_values) {
+                v = ggml_bf16_to_fp32(ggml_fp32_to_bf16(v));
+            }
+        }
+    }
 };
 
 static bool cb_eval_kcache_mean(struct ggml_tensor * t, bool ask, void * user_data) {
@@ -256,7 +326,31 @@ static bool decode_tokens(llama_context * ctx, const llama_token * tokens, int32
     return true;
 }
 
-static bool run(llama_context * ctx, const common_params & params, kcache_mean_collector & collector) {
+static bool decode_recorded_token(
+        llama_context * ctx,
+        kcache_mean_collector & collector,
+        const char * phase,
+        int64_t step,
+        int64_t phase_step,
+        llama_token token) {
+    collector.begin_token(phase, step, phase_step, token);
+    llama_batch batch = llama_batch_get_one(&token, 1);
+    if (llama_decode(ctx, batch) != 0) {
+        LOG_ERR("%s: llama_decode failed while appending %s token at step %" PRId64 "\n",
+                __func__, phase, step);
+        collector.end_token();
+        return false;
+    }
+    collector.end_token();
+    return true;
+}
+
+static bool run(
+        llama_context * ctx,
+        const common_params & params,
+        kcache_mean_collector & collector,
+        bool include_prompt,
+        bool dump_final_mean_vectors) {
     const llama_model * model = llama_get_model(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const bool add_bos = llama_vocab_get_add_bos(vocab);
@@ -267,8 +361,22 @@ static bool run(llama_context * ctx, const common_params & params, kcache_mean_c
         return false;
     }
 
-    if (!decode_tokens(ctx, prompt_tokens.data(), (int32_t) prompt_tokens.size(), std::max<int32_t>(1, params.n_batch))) {
-        return false;
+    int64_t append_step = 0;
+    const int64_t final_append_step = (include_prompt ? (int64_t) prompt_tokens.size() : 0) + params.n_predict;
+    if (include_prompt) {
+        for (size_t i = 0; i < prompt_tokens.size(); ++i) {
+            append_step++;
+            collector.dump_mean_vectors_current_step = dump_final_mean_vectors && append_step == final_append_step;
+            if (!decode_recorded_token(ctx, collector, "prompt", append_step, (int64_t) i + 1, prompt_tokens[i])) {
+                collector.dump_mean_vectors_current_step = false;
+                return false;
+            }
+            collector.dump_mean_vectors_current_step = false;
+        }
+    } else {
+        if (!decode_tokens(ctx, prompt_tokens.data(), (int32_t) prompt_tokens.size(), std::max<int32_t>(1, params.n_batch))) {
+            return false;
+        }
     }
 
     common_sampler * sampler = common_sampler_init(model, params.sampling);
@@ -290,15 +398,14 @@ static bool run(llama_context * ctx, const common_params & params, kcache_mean_c
         common_sampler_accept(sampler, id, true);
         generated.push_back(id);
 
-        collector.begin_generated_token((int64_t) i + 1, id);
-        llama_batch batch = llama_batch_get_one(&generated.back(), 1);
-        if (llama_decode(ctx, batch) != 0) {
-            LOG_ERR("%s: llama_decode failed while appending generated token %d/%d\n",
-                    __func__, i + 1, params.n_predict);
+        append_step++;
+        collector.dump_mean_vectors_current_step = dump_final_mean_vectors && append_step == final_append_step;
+        if (!decode_recorded_token(ctx, collector, "generated", append_step, (int64_t) i + 1, generated.back())) {
+            collector.dump_mean_vectors_current_step = false;
             ok = false;
             break;
         }
-        collector.end_generated_token();
+        collector.dump_mean_vectors_current_step = false;
     }
 
     common_sampler_free(sampler);
@@ -309,13 +416,66 @@ static bool run(llama_context * ctx, const common_params & params, kcache_mean_c
     return ok && (int32_t) generated.size() == params.n_predict;
 }
 
+static bool parse_kcache_mean_args(
+        int argc,
+        char ** argv,
+        bool & include_prompt,
+        int64_t & dump_mean_vectors_every,
+        bool & dump_final_mean_vectors,
+        std::vector<char *> & filtered_argv) {
+    include_prompt = false;
+    dump_mean_vectors_every = 0;
+    dump_final_mean_vectors = false;
+    filtered_argv.clear();
+    filtered_argv.reserve((size_t) argc);
+    filtered_argv.push_back(argv[0]);
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--include-prompt") {
+            include_prompt = true;
+            continue;
+        }
+        if (arg == "--generated-only") {
+            include_prompt = false;
+            continue;
+        }
+        if (arg == "--dump-mean-vectors-every") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: expected value for --dump-mean-vectors-every\n");
+                return false;
+            }
+            dump_mean_vectors_every = std::stoll(argv[++i]);
+            if (dump_mean_vectors_every <= 0) {
+                fprintf(stderr, "error: --dump-mean-vectors-every must be > 0\n");
+                return false;
+            }
+            continue;
+        }
+        if (arg == "--dump-final-mean-vectors") {
+            dump_final_mean_vectors = true;
+            continue;
+        }
+        filtered_argv.push_back(argv[i]);
+    }
+    return true;
+}
+
 int main(int argc, char ** argv) {
     common_params params;
     params.out_file = "kcache-mean.jsonl";
     params.n_predict = 128;
     params.warmup = false;
 
-    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_IMATRIX, print_usage)) {
+    bool include_prompt = false;
+    int64_t dump_mean_vectors_every = 0;
+    bool dump_final_mean_vectors = false;
+    std::vector<char *> filtered_argv;
+    if (!parse_kcache_mean_args(argc, argv, include_prompt, dump_mean_vectors_every, dump_final_mean_vectors, filtered_argv)) {
+        return 1;
+    }
+
+    if (!common_params_parse((int) filtered_argv.size(), filtered_argv.data(), params, LLAMA_EXAMPLE_IMATRIX, print_usage)) {
         return 1;
     }
 
@@ -334,6 +494,7 @@ int main(int argc, char ** argv) {
     llama_numa_init(params.numa);
 
     kcache_mean_collector collector;
+    collector.dump_mean_vectors_every = dump_mean_vectors_every;
     if (!collector.open(params.out_file)) {
         LOG_ERR("%s: failed to open output file '%s'\n", __func__, params.out_file.c_str());
         return 1;
@@ -350,9 +511,10 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    LOG_INF("%s: collecting generated-token K-cache channel means only\n", __func__);
+    LOG_INF("%s: collecting %s K-cache channel means\n",
+            __func__, include_prompt ? "prompt+generated-token" : "generated-token-only");
 
-    const bool ok = run(ctx, params, collector);
+    const bool ok = run(ctx, params, collector, include_prompt, dump_final_mean_vectors);
 
     llama_backend_free();
     return ok ? 0 : 1;

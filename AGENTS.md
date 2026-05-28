@@ -12,10 +12,13 @@
   - When code removes an environment-variable switch, remove it from that file.
 - Baseline runtime parameters for local experiments are documented in `expt-baseline.md`.
 - Experiment and validation artifacts live under `experiments/`.
-- CUDA backend experiment implementations live under `ggml/src/ggml-cuda/expt/`.
-  - FP8 experiment implementation files live under `ggml/src/ggml-cuda/expt/fp8/`.
-  - NVFP4 experiment implementation files live under `ggml/src/ggml-cuda/expt/nvfp4/`.
-  - Top-level `ggml/src/ggml-cuda/` files should keep only narrow flow-control, dispatch, or integration code for experiments so future upstream llama.cpp syncs have fewer conflicts.
+- Experiment implementation code must live under an `expt/` directory near the owning subsystem.
+  - Original/upstream-tracked code should keep only narrow control-flow, dispatch, switch, or integration hooks for experiments.
+  - Do not place substantial experiment algorithms, kernels, data transforms, or diagnostic implementations directly in original upstream files when they can live behind an `expt/` entry point.
+  - CUDA backend experiment implementations live under `ggml/src/ggml-cuda/expt/`.
+    - FP8 experiment implementation files live under `ggml/src/ggml-cuda/expt/fp8/`.
+    - NVFP4 experiment implementation files live under `ggml/src/ggml-cuda/expt/nvfp4/`.
+    - Top-level `ggml/src/ggml-cuda/` files should keep only narrow flow-control, dispatch, or integration code for experiments so future upstream llama.cpp syncs have fewer conflicts.
 - Repository-specific development guides include:
   - `docs/development/ncu-kvcache-profiling.md` for Nsight Compute KV-cache profiling;
   - `docs/development/nvfp4-k-cache.md` for NVFP4 K-cache details;
