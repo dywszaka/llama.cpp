@@ -111,6 +111,45 @@ static void test_extract_counts_positions_and_residual_amax() {
     CUDA_CHECK(cudaFree(amax_d));
 }
 
+static void test_nvfp4_outlier_k_scale_mode_selects_row_or_threshold_amax() {
+    constexpr float row_amax = 4.0f;
+    constexpr float threshold = 16.0f;
+    constexpr float expected_row_global_scale = 1344.0f / row_amax;
+    constexpr float expected_row_input_scale = row_amax / 1344.0f;
+    constexpr float expected_threshold_global_scale = 1344.0f / threshold;
+    constexpr float expected_threshold_input_scale = threshold / 1344.0f;
+
+    require(nearly_equal(
+                ggml_cuda_nvfp4_kcache_outlier_k_global_scale(row_amax, threshold, false),
+                expected_row_global_scale),
+            "NVFP4 outlier K global scale should default to residual row amax");
+    require(nearly_equal(
+                ggml_cuda_nvfp4_kcache_outlier_k_input_scale(row_amax, threshold, false),
+                expected_row_input_scale),
+            "NVFP4 outlier K input scale should default to residual row amax reciprocal");
+
+    require(nearly_equal(
+                ggml_cuda_nvfp4_kcache_outlier_k_global_scale(row_amax, threshold, true),
+                expected_threshold_global_scale),
+            "NVFP4 outlier K tensor-scale mode should use threshold as per-tensor amax");
+    require(nearly_equal(
+                ggml_cuda_nvfp4_kcache_outlier_k_input_scale(row_amax, threshold, true),
+                expected_threshold_input_scale),
+            "NVFP4 outlier K tensor-scale mode should store reciprocal threshold global scale");
+}
+
+static void test_nvfp4_outlier_q_scale_uses_dynamic_tensor_amax() {
+    constexpr float amax = 21.0f;
+    constexpr float out_scale = 0.5f;
+    constexpr float expected_global_scale = 1344.0f / amax;
+    constexpr float expected_input_scale = out_scale / expected_global_scale;
+
+    require(nearly_equal(ggml_cuda_nvfp4_kcache_outlier_q_global_scale(amax), expected_global_scale),
+            "NVFP4 outlier Q global scale should use dynamic per-tensor amax");
+    require(nearly_equal(ggml_cuda_nvfp4_kcache_outlier_q_input_scale(amax, out_scale), expected_input_scale),
+            "NVFP4 outlier Q input scale should use one dynamic per-tensor scale");
+}
+
 static void test_apply_correction_filters_head() {
     constexpr int64_t head_dim = 4;
     constexpr int64_t kv_len = 2;
@@ -322,6 +361,8 @@ int main() {
     }
 
     test_extract_counts_positions_and_residual_amax();
+    test_nvfp4_outlier_k_scale_mode_selects_row_or_threshold_amax();
+    test_nvfp4_outlier_q_scale_uses_dynamic_tensor_amax();
     test_apply_correction_filters_head();
     test_apply_correction_compensates_for_downstream_k_scale();
     test_f16_set_rows_extracts_outliers_and_writes_residual();

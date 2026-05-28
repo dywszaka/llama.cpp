@@ -8,10 +8,42 @@
 struct ggml_backend_cuda_context;
 struct ggml_tensor;
 
+static constexpr float GGML_CUDA_NVFP4_KCACHE_OUTLIER_GLOBAL_SCALE_MAX = 1344.0f;
+
 bool ggml_cuda_nvfp4_kcache_outlier_enabled();
 bool ggml_cuda_nvfp4_kcache_outlier_log_enabled();
+bool ggml_cuda_nvfp4_kcache_outlier_tensor_scale_enabled();
 float ggml_cuda_nvfp4_kcache_outlier_threshold();
 int64_t ggml_cuda_nvfp4_kcache_outlier_max();
+
+static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_global_scale_from_amax(float amax) {
+    return (amax > 0.0f && isfinite(amax)) ? (GGML_CUDA_NVFP4_KCACHE_OUTLIER_GLOBAL_SCALE_MAX / amax) : 0.0f;
+}
+
+static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_k_global_scale(
+        float row_amax,
+        float threshold,
+        bool tensor_scale_enabled) {
+    const float amax = tensor_scale_enabled ? threshold : row_amax;
+    return ggml_cuda_nvfp4_kcache_outlier_global_scale_from_amax(amax);
+}
+
+static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_k_input_scale(
+        float row_amax,
+        float threshold,
+        bool tensor_scale_enabled) {
+    const float global_scale = ggml_cuda_nvfp4_kcache_outlier_k_global_scale(row_amax, threshold, tensor_scale_enabled);
+    return (global_scale != 0.0f && isfinite(global_scale)) ? (1.0f / global_scale) : 0.0f;
+}
+
+static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_q_global_scale(float amax) {
+    return ggml_cuda_nvfp4_kcache_outlier_global_scale_from_amax(amax);
+}
+
+static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_q_input_scale(float amax, float out_scale) {
+    const float global_scale = ggml_cuda_nvfp4_kcache_outlier_q_global_scale(amax);
+    return (global_scale != 0.0f && isfinite(global_scale)) ? (out_scale / global_scale) : 0.0f;
+}
 
 bool ggml_cuda_f16_kcache_outlier_enabled();
 bool ggml_cuda_f16_kcache_outlier_log_enabled();

@@ -78,6 +78,7 @@ static __global__ void k_set_rows_nvfp4(
         const int64_t s1,
         const float * __restrict__ amax_rows,
         const float threshold,
+        const bool use_threshold_global_scale,
         const bool zero_outliers) {
     const int lane = threadIdx.x;
     const bool lane_active = lane < QK_NVFP4;
@@ -101,8 +102,7 @@ static __global__ void k_set_rows_nvfp4(
     block_nvfp4 * dst_row_ptr = dst + dst_row*s1 / sizeof(block_nvfp4);
 
     float scale_f = 0.0f;
-    const float amax_f = amax_rows[i1];
-    const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
+    const float global_scale = ggml_cuda_nvfp4_kcache_outlier_k_global_scale(amax_rows[i1], threshold, use_threshold_global_scale);
     if (lane == 0) {
         const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
         const uint8_t scale_q = ggml_cuda_best_index_e4m3_set_rows(scale);
@@ -128,6 +128,7 @@ static __global__ void k_set_rows_nvfp4_8(
         const int64_t s1,
         const float * __restrict__ amax_rows,
         const float threshold,
+        const bool use_threshold_global_scale,
         const bool zero_outliers) {
     const int lane = threadIdx.x;
     const bool lane_active = lane < QK_NVFP4_8;
@@ -150,8 +151,7 @@ static __global__ void k_set_rows_nvfp4_8(
     block_nvfp4_8 * dst_row_ptr = dst + dst_row*s1 / sizeof(block_nvfp4_8);
 
     float scale_f = 0.0f;
-    const float amax_f = amax_rows[i1];
-    const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
+    const float global_scale = ggml_cuda_nvfp4_kcache_outlier_k_global_scale(amax_rows[i1], threshold, use_threshold_global_scale);
     if (lane == 0) {
         const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
         const uint8_t scale_q = ggml_cuda_best_index_e4m3_set_rows(scale);
@@ -174,14 +174,15 @@ static __global__ void k_set_rows_scale(
         float * __restrict__ scale,
         const int64_t ne10,
         const int64_t s10,
-        const float * __restrict__ amax_rows) {
+        const float * __restrict__ amax_rows,
+        const float threshold,
+        const bool use_threshold_global_scale) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= ne10) {
         return;
     }
 
-    const float amax_f = amax_rows[i];
-    const float global_scale = (amax_f > 0.0f && isfinite(amax_f)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax_f) : 0.0f;
+    const float global_scale = ggml_cuda_nvfp4_kcache_outlier_k_global_scale(amax_rows[i], threshold, use_threshold_global_scale);
     const float input_scale = (global_scale != 0.0f && isfinite(global_scale)) ? (1.0f / global_scale) : 0.0f;
     const int64_t dst_row = *(src1 + i*s10);
     scale[dst_row] = input_scale;
@@ -204,6 +205,7 @@ static void ggml_cuda_set_rows_nvfp4_common(
     const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(dst);
     const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(dst);
     const bool use_outliers = outlier_counts != nullptr && outlier_indices != nullptr && outlier_values != nullptr;
+    const bool use_tensor_scale = use_outliers && ggml_cuda_nvfp4_kcache_outlier_tensor_scale_enabled();
     if (use_outliers) {
         GGML_ASSERT(outlier_counts->type == GGML_TYPE_I32);
         GGML_ASSERT(outlier_indices->type == GGML_TYPE_I32);
@@ -252,6 +254,7 @@ static void ggml_cuda_set_rows_nvfp4_common(
                     p.nb1,
                     amax_d.get(),
                     ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                    use_tensor_scale,
                     use_outliers);
         } else {
             const dim3 block_size(QK_NVFP4);
@@ -264,6 +267,7 @@ static void ggml_cuda_set_rows_nvfp4_common(
                     p.nb1,
                     amax_d.get(),
                     ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                    use_tensor_scale,
                     use_outliers);
         }
         CUDA_CHECK(cudaGetLastError());
@@ -274,7 +278,9 @@ static void ggml_cuda_set_rows_nvfp4_common(
                 (float *) scale_tensor->data,
                 p.ne10,
                 p.nb10/sizeof(int64_t),
-                amax_d.get());
+                amax_d.get(),
+                ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                use_tensor_scale);
         CUDA_CHECK(cudaGetLastError());
     }
 }
