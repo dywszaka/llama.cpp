@@ -838,7 +838,24 @@ extern "C" {
             const struct ggml_tensor * indices,
             const struct ggml_tensor * values);
 
+    GGML_API void ggml_tensor_set_nvfp4_kcache_outliers_compact(
+            struct ggml_tensor       * tensor,
+            const struct ggml_tensor * counts,
+            const struct ggml_tensor * offsets,
+            const struct ggml_tensor * indices,
+            const struct ggml_tensor * values);
+
+    GGML_API void ggml_tensor_set_nvfp4_kcache_outlier_cursor(
+            struct ggml_tensor       * tensor,
+            const struct ggml_tensor * cursor);
+
     GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_counts(
+            const struct ggml_tensor * tensor);
+
+    GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_offsets(
+            const struct ggml_tensor * tensor);
+
+    GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_cursor(
             const struct ggml_tensor * tensor);
 
     GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_indices(

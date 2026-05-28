@@ -1078,6 +1078,139 @@ static bool run_case_backend_outlier_dynamic_rhs_tensor_scale(
     return ok;
 }
 
+static bool run_case_backend_outlier_compact_sidecar() {
+    const int m = 32;
+    const int n = 4;
+    const int k = 128;
+
+    std::vector<float> a_fp32((size_t) m * (size_t) k, 0.0f);
+    std::vector<float> b_fp32((size_t) n * (size_t) k, 0.0f);
+    for (int col = 0; col < k; ++col) {
+        b_fp32[(size_t) 0 * k + col] = 0.01f * (float) (col + 1);
+        b_fp32[(size_t) 1 * k + col] = 0.02f * (float) (col + 1);
+        b_fp32[(size_t) 2 * k + col] = -0.01f * (float) (col + 1);
+        b_fp32[(size_t) 3 * k + col] = 0.005f * (float) (col + 1);
+    }
+
+    std::vector<block_nvfp4> a_nvfp4;
+    quantize_matrix_nvfp4(a_fp32, a_nvfp4, m, k, 1.0f);
+
+    std::vector<float> c_ref_col_major((size_t) m * (size_t) n, 0.0f);
+    const int row0 = 0;
+    const int row1 = 1;
+    const int dim0 = 3;
+    const int dim1 = 17;
+    const int dim2 = 64;
+    const float val0 = 20.0f;
+    const float val1 = -18.0f;
+    const float val2 = 24.0f;
+    for (int q = 0; q < n; ++q) {
+        c_ref_col_major[(size_t) q * m + row0] =
+                val0 * b_fp32[(size_t) q * k + dim0] +
+                val1 * b_fp32[(size_t) q * k + dim1];
+        c_ref_col_major[(size_t) q * m + row1] =
+                val2 * b_fp32[(size_t) q * k + dim2];
+    }
+
+    ggml_init_params params = {
+        /* .mem_size   = */ 16u * 1024u * 1024u,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_NVFP4, k, m);
+    ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n);
+    ggml_tensor * outlier_counts  = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, m);
+    ggml_tensor * outlier_offsets = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, m);
+    ggml_tensor * outlier_indices = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 3);
+    ggml_tensor * outlier_values  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3);
+    ggml_tensor_set_nvfp4_kcache_outliers_compact(a, outlier_counts, outlier_offsets, outlier_indices, outlier_values);
+
+    ggml_tensor * c = ggml_mul_mat(ctx, a, b);
+    ggml_mul_mat_set_prec(c, GGML_PREC_F32);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, c);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<int32_t> counts((size_t) m, 0);
+    std::vector<int32_t> offsets((size_t) m, 0);
+    std::vector<int32_t> indices = { dim0, dim1, dim2 };
+    std::vector<float> values = { val0, val1, val2 };
+    counts[(size_t) row0] = 2;
+    counts[(size_t) row1] = 1;
+    offsets[(size_t) row0] = 0;
+    offsets[(size_t) row1] = 2;
+
+    ggml_backend_tensor_set(a, a_nvfp4.data(), 0, ggml_nbytes(a));
+    ggml_backend_tensor_set(b, b_fp32.data(), 0, b_fp32.size() * sizeof(float));
+    ggml_backend_tensor_set(outlier_counts, counts.data(), 0, counts.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(outlier_offsets, offsets.data(), 0, offsets.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(outlier_indices, indices.data(), 0, indices.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(outlier_values, values.data(), 0, values.size() * sizeof(float));
+
+#if defined(_WIN32)
+    _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
+    _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
+#else
+    setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
+    setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
+#endif
+
+    ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "backend compact outlier compute failed: %s\n", ggml_status_to_string(status));
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> c_gpu(c_ref_col_major.size(), 0.0f);
+    ggml_backend_tensor_get(c, c_gpu.data(), 0, c_gpu.size() * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+
+    float max_abs_err = 0.0f;
+    size_t worst_idx = 0;
+    for (size_t i = 0; i < c_ref_col_major.size(); ++i) {
+        const float abs_err = std::fabs(c_gpu[i] - c_ref_col_major[i]);
+        if (abs_err > max_abs_err) {
+            max_abs_err = abs_err;
+            worst_idx = i;
+        }
+    }
+
+    const bool ok = max_abs_err <= 1e-4f;
+    std::printf("backend-outlier-compact-sidecar case | max_abs=%.6g | %s\n", max_abs_err, ok ? "PASS" : "FAIL");
+    if (!ok) {
+        std::printf("  worst idx=%zu ref=%.8f gpu=%.8f\n", worst_idx, c_ref_col_major[worst_idx], c_gpu[worst_idx]);
+    }
+
+    return ok;
+}
+
 static bool run_case_backend_batched_dynamic_rhs_permuted_lhs(
         int m,
         int n,
@@ -1302,6 +1435,7 @@ int main() {
     ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 32, 1.0f, 1e-3f, 96.0f, 25u) && ok;
     ok = run_case_backend_outlier_dynamic_rhs_tensor_scale(32, 16, 128, 1.0f, 1.0f, 96.0f, false, 26u) && ok;
     ok = run_case_backend_outlier_dynamic_rhs_tensor_scale(32, 16, 128, 1.0f, 1.0f, 96.0f, true, 27u) && ok;
+    ok = run_case_backend_outlier_compact_sidecar() && ok;
     ok = run_case_backend_batched_dynamic_rhs_permuted_lhs(32, 16, 128, 8, 32, 1.0f, 96.0f, 24u) && ok;
 
     if (!ok) {

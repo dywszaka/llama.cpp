@@ -54,6 +54,8 @@ void ggml_cuda_nvfp4_kcache_outlier_extract(
         const float * src,
         const int64_t * dst_rows,
         int32_t * counts,
+        int32_t * offsets,
+        int32_t * cursor,
         int32_t * indices,
         float * values,
         float * residual_amax,
@@ -63,11 +65,13 @@ void ggml_cuda_nvfp4_kcache_outlier_extract(
         int64_t dst_rows_stride,
         int64_t sidecar_rows,
         int64_t max_outliers,
+        int64_t compact_capacity,
         float threshold,
         cudaStream_t stream);
 
 void ggml_cuda_nvfp4_kcache_outlier_apply_correction(
         const int32_t * counts,
+        const int32_t * offsets,
         const int32_t * indices,
         const float * values,
         const float * q,
@@ -80,6 +84,7 @@ void ggml_cuda_nvfp4_kcache_outlier_apply_correction(
         int64_t kv_heads,
         int64_t q_head,
         int64_t max_outliers,
+        int64_t compact_capacity,
         int64_t q_nb0_f32,
         int64_t q_nb1_f32,
         int64_t kq_nb0_f32,
@@ -91,6 +96,8 @@ void ggml_cuda_f16_kcache_outlier_set_rows(
         const int64_t * dst_rows,
         half * dst,
         int32_t * counts,
+        int32_t * offsets,
+        int32_t * cursor,
         int32_t * indices,
         float * values,
         int64_t ne00,
@@ -100,6 +107,7 @@ void ggml_cuda_f16_kcache_outlier_set_rows(
         int64_t dst_stride,
         int64_t sidecar_rows,
         int64_t max_outliers,
+        int64_t compact_capacity,
         float threshold,
         cudaStream_t stream);
 

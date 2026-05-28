@@ -808,6 +808,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 }
 
                 const ggml_tensor * outlier_counts = ggml_tensor_get_nvfp4_kcache_outlier_counts(src0);
+                const ggml_tensor * outlier_offsets = ggml_tensor_get_nvfp4_kcache_outlier_offsets(src0);
                 const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(src0);
                 const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(src0);
                 const ggml_tensor * k_scale = ggml_tensor_get_nvfp4_scale(src0);
@@ -818,9 +819,11 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                     const int64_t stream_id = i3 / r3;
                     const int64_t kv_len = src0_slice.ne[1];
                     const int64_t q_len = src1_slice.ne[1];
-                    const int64_t max_outliers = outlier_indices->ne[0];
+                    const int64_t max_outliers = outlier_offsets != nullptr ? outlier_indices->ne[0] : outlier_indices->ne[0];
+                    const int64_t compact_capacity = outlier_offsets != nullptr ? outlier_indices->ne[0] : outlier_indices->ne[0];
                     ggml_cuda_nvfp4_kcache_outlier_apply_correction(
                             (const int32_t *) ((const char *) outlier_counts->data + stream_id * outlier_counts->nb[3]),
+                            outlier_offsets != nullptr ? (const int32_t *) ((const char *) outlier_offsets->data + stream_id * outlier_offsets->nb[3]) : nullptr,
                             (const int32_t *) ((const char *) outlier_indices->data + stream_id * outlier_indices->nb[3]),
                             (const float *)   ((const char *) outlier_values->data  + stream_id * outlier_values->nb[3]),
                             (const float *) src1_slice.data,
@@ -833,6 +836,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                             kv_heads,
                             q_head,
                             max_outliers,
+                            compact_capacity,
                             src1_slice.nb[0] / (int64_t) sizeof(float),
                             src1_slice.nb[1] / (int64_t) sizeof(float),
                             dst_slice.nb[0] / (int64_t) sizeof(float),
@@ -1583,6 +1587,39 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 dst->data, dst_padded.get(),
                 (size_t) ne01 * (size_t) ne11 * sizeof(float),
                 cudaMemcpyDeviceToDevice, stream));
+    }
+
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        const ggml_tensor * outlier_counts = ggml_tensor_get_nvfp4_kcache_outlier_counts(src0);
+        const ggml_tensor * outlier_offsets = ggml_tensor_get_nvfp4_kcache_outlier_offsets(src0);
+        const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(src0);
+        const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(src0);
+        const ggml_tensor * k_scale = ggml_tensor_get_nvfp4_scale(src0);
+        if (outlier_counts != nullptr && outlier_indices != nullptr && outlier_values != nullptr) {
+            const int64_t max_outliers = outlier_offsets != nullptr ? outlier_indices->ne[0] : outlier_indices->ne[0];
+            const int64_t compact_capacity = outlier_offsets != nullptr ? outlier_indices->ne[0] : outlier_indices->ne[0];
+            ggml_cuda_nvfp4_kcache_outlier_apply_correction(
+                    (const int32_t *) outlier_counts->data,
+                    outlier_offsets != nullptr ? (const int32_t *) outlier_offsets->data : nullptr,
+                    (const int32_t *) outlier_indices->data,
+                    (const float *) outlier_values->data,
+                    (const float *) src1->data,
+                    (float *) dst->data,
+                    k_scale != nullptr ? (const float *) k_scale->data : nullptr,
+                    src0->ne[0],
+                    src0->ne[1],
+                    src1->ne[1],
+                    src1->ne[2],
+                    src0->ne[2],
+                    0,
+                    max_outliers,
+                    compact_capacity,
+                    src1->nb[0] / (int64_t) sizeof(float),
+                    src1->nb[1] / (int64_t) sizeof(float),
+                    dst->nb[0] / (int64_t) sizeof(float),
+                    dst->nb[1] / (int64_t) sizeof(float),
+                    stream);
+        }
     }
 
 

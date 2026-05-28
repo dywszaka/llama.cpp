@@ -72,13 +72,44 @@ cache_k_outlier_index_l{layer}: I32[max_outliers, kv_size * n_stream]
 cache_k_outlier_value_l{layer}: F32[max_outliers, kv_size * n_stream]
 ```
 
-逻辑结构是：
+默认逻辑结构是固定 per-row slot：
 
 ```text
 count[kv_pos]       = 当前 K row 检测到的 outlier 数量
 index[kv_pos][slot] = outlier 在完整 K row 里的维度编号
 value[kv_pos][slot] = outlier 的原始 signed K 值
 ```
+
+开启 `LLAMA_NVFP4_KCACHE_OUTLIER_COMPACT=1` 后，sidecar 改为固定容量稀疏池：
+
+```text
+cache_k_outlier_count_l{layer}:  I32[kv_size * n_stream]
+cache_k_outlier_offset_l{layer}: I32[kv_size * n_stream]
+cache_k_outlier_cursor_l{layer}: I32[n_stream]
+cache_k_outlier_index_l{layer}:  I32[capacity, n_stream]
+cache_k_outlier_value_l{layer}:  F32[capacity, n_stream]
+```
+
+compact 逻辑结构是：
+
+```text
+count[kv_pos]        = 当前 K row 已存储 outlier 数量
+offset[kv_pos]       = 当前 K row 在 sparse pool 中的起始位置，-1 表示没有存储段
+index[offset+i]      = outlier 在完整 K row 里的维度编号
+value[offset+i]      = outlier 的原始 signed K 值
+cursor[stream]       = sparse pool 的单调追加位置
+```
+
+compact pool 容量由 `LLAMA_NVFP4_KCACHE_OUTLIER_CAPACITY_RATIO` 控制：
+
+```text
+capacity = max(kv_size, ceil(kv_size * n_embd_k_gqa * ratio))
+```
+
+compact pool 在 KV cache 生命周期内单调追加，row 重写时会更新该 row 的
+`offset/count`，但旧 pool 段不回收；`clear(true)` 清零 KV buffer 后 cursor 也归零。
+如果 pool 容量耗尽，后续 row 会保留 count/offset 状态中的可存储部分，未存储 outlier
+无法参与 KQ correction。
 
 这里的 `index` 不是 byte offset，也不是整个 tensor 的扁平 offset，而是
 当前 K row 内的维度坐标：

@@ -219,6 +219,8 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         );
     } else if (dst->type == GGML_TYPE_F16) {
         const ggml_tensor * outlier_counts = ggml_tensor_get_nvfp4_kcache_outlier_counts(dst);
+        const ggml_tensor * outlier_offsets = ggml_tensor_get_nvfp4_kcache_outlier_offsets(dst);
+        const ggml_tensor * outlier_cursor = ggml_tensor_get_nvfp4_kcache_outlier_cursor(dst);
         const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(dst);
         const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(dst);
         const bool use_outliers =
@@ -230,11 +232,18 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
             GGML_ASSERT(outlier_counts->type == GGML_TYPE_I32);
             GGML_ASSERT(outlier_indices->type == GGML_TYPE_I32);
             GGML_ASSERT(outlier_values->type == GGML_TYPE_F32);
+            if (outlier_offsets != nullptr) {
+                GGML_ASSERT(outlier_offsets->type == GGML_TYPE_I32);
+                GGML_ASSERT(outlier_cursor != nullptr);
+                GGML_ASSERT(outlier_cursor->type == GGML_TYPE_I32);
+            }
             ggml_cuda_f16_kcache_outlier_set_rows(
                     src0_d,
                     src1_d,
                     (half *) dst->data,
                     (int32_t *) outlier_counts->data,
+                    outlier_offsets != nullptr ? (int32_t *) outlier_offsets->data : nullptr,
+                    outlier_cursor != nullptr ? (int32_t *) outlier_cursor->data : nullptr,
                     (int32_t *) outlier_indices->data,
                     (float *) outlier_values->data,
                     ne00,
@@ -244,6 +253,7 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                     nb1 / sizeof(half),
                     outlier_counts->ne[0],
                     outlier_indices->ne[0],
+                    outlier_offsets != nullptr ? outlier_indices->ne[0] : outlier_indices->ne[0],
                     ggml_cuda_f16_kcache_outlier_threshold(),
                     stream);
         } else {

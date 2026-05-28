@@ -213,6 +213,8 @@ private:
         ggml_tensor * k_scale;
         ggml_tensor * v_scale;
         ggml_tensor * k_outlier_count;
+        ggml_tensor * k_outlier_offset;
+        ggml_tensor * k_outlier_cursor;
         ggml_tensor * k_outlier_index;
         ggml_tensor * k_outlier_value;
 
@@ -221,6 +223,8 @@ private:
         std::vector<ggml_tensor *> k_scale_stream;
         std::vector<ggml_tensor *> v_scale_stream;
         std::vector<ggml_tensor *> k_outlier_count_stream;
+        std::vector<ggml_tensor *> k_outlier_offset_stream;
+        std::vector<ggml_tensor *> k_outlier_cursor_stream;
         std::vector<ggml_tensor *> k_outlier_index_stream;
         std::vector<ggml_tensor *> k_outlier_value_stream;
     };
@@ -233,6 +237,7 @@ private:
     bool nvfp4_vcache_per_block_scale = false;
     bool nvfp4_kcache_outlier = false;
     bool nvfp4_kcache_outlier_log = false;
+    bool nvfp4_kcache_outlier_compact = false;
     uint32_t nvfp4_kcache_outlier_max = 0;
     std::vector<float> nvfp4_vcache_layer_global_scales;
     ggml_type type_v_cache = GGML_TYPE_F16;

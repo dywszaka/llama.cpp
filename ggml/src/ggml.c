@@ -7021,9 +7021,35 @@ void ggml_tensor_set_nvfp4_kcache_outliers(
     tensor->src[GGML_MAX_SRC - 2] = (struct ggml_tensor *) values;
 }
 
+void ggml_tensor_set_nvfp4_kcache_outliers_compact(
+        struct ggml_tensor       * tensor,
+        const struct ggml_tensor * counts,
+        const struct ggml_tensor * offsets,
+        const struct ggml_tensor * indices,
+        const struct ggml_tensor * values) {
+    tensor->src[GGML_MAX_SRC - 5] = (struct ggml_tensor *) offsets;
+    ggml_tensor_set_nvfp4_kcache_outliers(tensor, counts, indices, values);
+}
+
+void ggml_tensor_set_nvfp4_kcache_outlier_cursor(
+        struct ggml_tensor       * tensor,
+        const struct ggml_tensor * cursor) {
+    tensor->src[GGML_MAX_SRC - 6] = (struct ggml_tensor *) cursor;
+}
+
 const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_counts(
         const struct ggml_tensor * tensor) {
     return tensor->src[GGML_MAX_SRC - 4];
+}
+
+const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_offsets(
+        const struct ggml_tensor * tensor) {
+    return tensor->src[GGML_MAX_SRC - 5];
+}
+
+const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_cursor(
+        const struct ggml_tensor * tensor) {
+    return tensor->src[GGML_MAX_SRC - 6];
 }
 
 const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_indices(

@@ -68,6 +68,30 @@ The count sidecar records the true number of outliers per row. The value/index
 sidecars store only the first `LLAMA_NVFP4_KCACHE_OUTLIER_MAX` entries, and KQ
 correction uses only stored entries. Use the log switch below to detect overflow.
 
+### `LLAMA_NVFP4_KCACHE_OUTLIER_COMPACT`
+
+Enables compact fixed-capacity sparse-pool storage for NVFP4 K-cache outliers.
+Default: off.
+
+When off, the sidecar uses the legacy fixed per-row `count/index/value` layout.
+When on, each row stores `count` and `offset`, while outlier `index/value`
+entries are appended to a per-layer, per-stream sparse pool. The pool is not
+compacted or reclaimed during row rewrites; `clear(true)` resets the backing
+buffer and cursor. If the pool capacity is exhausted, later rows keep their
+count but receive no stored entries, so KQ correction can only restore stored
+entries.
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_CAPACITY_RATIO`
+
+Fraction of dense K-cache elements reserved as compact outlier pool entries.
+Default: `0.004`.
+
+The allocated pool capacity per layer and stream is:
+
+```text
+max(kv_size, ceil(kv_size * n_embd_k_gqa * ratio))
+```
+
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_LOG`
 
 Enables outlier sidecar logging. Default: off.
@@ -106,6 +130,17 @@ Maximum number of outlier values stored per K-cache row. Default: `32`.
 The count sidecar records the true number of outliers per row. The value/index
 sidecars store only the first `LLAMA_F16_KCACHE_OUTLIER_MAX` entries, and KQ
 correction uses only stored entries. Use the log switch below to detect overflow.
+
+### `LLAMA_F16_KCACHE_OUTLIER_COMPACT`
+
+Enables compact fixed-capacity sparse-pool storage for F16 K-cache outliers.
+Default: off. Semantics match `LLAMA_NVFP4_KCACHE_OUTLIER_COMPACT`.
+
+### `LLAMA_F16_KCACHE_OUTLIER_CAPACITY_RATIO`
+
+Fraction of dense K-cache elements reserved as compact F16 outlier pool entries.
+Default: `0.004`. Capacity calculation matches
+`LLAMA_NVFP4_KCACHE_OUTLIER_CAPACITY_RATIO`.
 
 ### `LLAMA_F16_KCACHE_OUTLIER_LOG`
 
