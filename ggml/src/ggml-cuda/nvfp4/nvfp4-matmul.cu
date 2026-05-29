@@ -5,10 +5,19 @@
 
 #include <atomic>
 #include <cmath>
+#include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
 namespace {
 
@@ -186,6 +195,17 @@ static bool ggml_cuda_nvfp4_native_row_split_enabled() {
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
     }
     return cached != 0;
+}
+
+static const char * ggml_cuda_nvfp4_native_act_dump_dir() {
+    static const char * cached = nullptr;
+    static bool initialized = false;
+    if (!initialized) {
+        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_ACT_DUMP");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? env : nullptr;
+        initialized = true;
+    }
+    return cached;
 }
 
 static const char * ggml_cuda_nvfp4_scale_channel_attr_diag() {
@@ -426,6 +446,237 @@ static void quantize_row_nvfp4_dynamic_cuda(
     const dim3 block_size(WARP_SIZE, 1, 1);
 
     quantize_row_nvfp4_dynamic_kernel<<<num_blocks, block_size, 0, stream>>>(x, y, ne00, s01, amax_rows);
+}
+
+static __global__ void ggml_cuda_nvfp4_truncate_f32_to_hi16_kernel(
+        const float * __restrict__ src,
+        uint16_t * __restrict__ dst,
+        const int64_t ne00,
+        const int64_t ne01,
+        const int64_t s01) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t total = ne00 * ne01;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t row = idx / ne00;
+    const int64_t col = idx - row * ne00;
+    union {
+        float    f;
+        uint32_t u;
+    } v = { src[row * s01 + col] };
+    dst[idx] = (uint16_t) (v.u >> 16);
+}
+
+static bool ggml_cuda_nvfp4_write_file(const std::string & path, const void * data, size_t size) {
+    FILE * fp = std::fopen(path.c_str(), "wb");
+    if (fp == nullptr) {
+        GGML_LOG_WARN("%s: failed to open %s: errno=%d\n", __func__, path.c_str(), errno);
+        return false;
+    }
+
+    const size_t written = std::fwrite(data, 1, size, fp);
+    const bool close_ok = std::fclose(fp) == 0;
+    if (written != size || !close_ok) {
+        GGML_LOG_WARN("%s: failed to write %s: written=%zu expected=%zu close_ok=%d errno=%d\n",
+                __func__, path.c_str(), written, size, close_ok ? 1 : 0, errno);
+        return false;
+    }
+
+    return true;
+}
+
+static std::string ggml_cuda_nvfp4_join_path(const char * dir, const char * name) {
+    std::string out(dir);
+    if (!out.empty() && out.back() != '/') {
+        out.push_back('/');
+    }
+    out += name;
+    return out;
+}
+
+static bool ggml_cuda_nvfp4_mkdir_one(const std::string & path) {
+    if (path.empty()) {
+        return false;
+    }
+#if defined(_WIN32)
+    if (_mkdir(path.c_str()) == 0 || errno == EEXIST) {
+#else
+    if (mkdir(path.c_str(), 0755) == 0 || errno == EEXIST) {
+#endif
+        return true;
+    }
+    return false;
+}
+
+static bool ggml_cuda_nvfp4_mkdirs(const char * dir) {
+    std::string path(dir ? dir : "");
+    if (path.empty()) {
+        return false;
+    }
+
+    for (size_t i = 1; i < path.size(); ++i) {
+        if (path[i] == '/' || path[i] == '\\') {
+            const std::string parent = path.substr(0, i);
+            if (!parent.empty() && !ggml_cuda_nvfp4_mkdir_one(parent)) {
+                return false;
+            }
+        }
+    }
+
+    return ggml_cuda_nvfp4_mkdir_one(path);
+}
+
+static std::string ggml_cuda_nvfp4_json_escape(const char * s) {
+    std::string out;
+    for (const unsigned char * p = (const unsigned char *) (s ? s : ""); *p != '\0'; ++p) {
+        switch (*p) {
+            case '\\': out += "\\\\"; break;
+            case '"':  out += "\\\""; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (*p < 0x20) {
+                    char buf[7];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned) *p);
+                    out += buf;
+                } else {
+                    out.push_back((char) *p);
+                }
+                break;
+        }
+    }
+    return out;
+}
+
+static void ggml_cuda_nvfp4_dump_first_activation_quantization(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src1,
+        const ggml_tensor * dst,
+        const block_nvfp4 * src1_q_nvfp4,
+        int64_t ne10,
+        int64_t ne11,
+        int64_t src1_s01,
+        float global_scale,
+        bool used_dynamic_scale,
+        const float * dynamic_amax_rows,
+        cudaStream_t stream) {
+    static std::atomic<bool> dumped(false);
+    const char * dump_dir = ggml_cuda_nvfp4_native_act_dump_dir();
+    if (dump_dir == nullptr || dumped.exchange(true)) {
+        return;
+    }
+    if (!ggml_cuda_nvfp4_mkdirs(dump_dir)) {
+        GGML_LOG_WARN("%s: failed to create native NVFP4 activation dump directory %s: errno=%d\n",
+                __func__, dump_dir, errno);
+        return;
+    }
+
+    const size_t elems = (size_t) ne10 * (size_t) ne11;
+    const size_t blocks = (size_t) (ne10 / QK_NVFP4) * (size_t) ne11;
+    ggml_cuda_pool_alloc<uint16_t> before_hi16_device(ctx.pool(), elems);
+
+    const int block_size = 256;
+    const int grid_size = (int) ((elems + block_size - 1) / block_size);
+    ggml_cuda_nvfp4_truncate_f32_to_hi16_kernel<<<grid_size, block_size, 0, stream>>>(
+            (const float *) src1->data,
+            before_hi16_device.get(),
+            ne10,
+            ne11,
+            src1_s01);
+    CUDA_CHECK(cudaGetLastError());
+
+    std::vector<uint16_t> before_hi16(elems);
+    std::vector<block_nvfp4> after_nvfp4(blocks);
+    std::vector<float> dynamic_amax;
+    if (used_dynamic_scale) {
+        dynamic_amax.resize((size_t) ne11);
+    }
+
+    CUDA_CHECK(cudaMemcpyAsync(
+            before_hi16.data(),
+            before_hi16_device.get(),
+            elems * sizeof(uint16_t),
+            cudaMemcpyDeviceToHost,
+            stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+            after_nvfp4.data(),
+            src1_q_nvfp4,
+            blocks * sizeof(block_nvfp4),
+            cudaMemcpyDeviceToHost,
+            stream));
+    if (used_dynamic_scale) {
+        CUDA_CHECK(cudaMemcpyAsync(
+                dynamic_amax.data(),
+                dynamic_amax_rows,
+                (size_t) ne11 * sizeof(float),
+                cudaMemcpyDeviceToHost,
+                stream));
+    }
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    const std::string before_path = ggml_cuda_nvfp4_join_path(dump_dir, "activation-before-f32-hi16.bin");
+    const std::string after_path = ggml_cuda_nvfp4_join_path(dump_dir, "activation-after-nvfp4.bin");
+    const std::string meta_path = ggml_cuda_nvfp4_join_path(dump_dir, "metadata.json");
+
+    bool ok = true;
+    ok = ggml_cuda_nvfp4_write_file(before_path, before_hi16.data(), before_hi16.size() * sizeof(uint16_t)) && ok;
+    ok = ggml_cuda_nvfp4_write_file(after_path, after_nvfp4.data(), after_nvfp4.size() * sizeof(block_nvfp4)) && ok;
+
+    FILE * meta = std::fopen(meta_path.c_str(), "wb");
+    if (meta == nullptr) {
+        GGML_LOG_WARN("%s: failed to open %s: errno=%d\n", __func__, meta_path.c_str(), errno);
+        ok = false;
+    } else {
+        const std::string src1_name = ggml_cuda_nvfp4_json_escape(ggml_get_name(src1));
+        const std::string dst_name = ggml_cuda_nvfp4_json_escape(ggml_get_name(dst));
+        std::fprintf(meta,
+                "{\n"
+                "  \"format\": \"llama.cpp nvfp4 native activation quantization dump v1\",\n"
+                "  \"tensor\": \"%s\",\n"
+                "  \"dst\": \"%s\",\n"
+                "  \"before_file\": \"activation-before-f32-hi16.bin\",\n"
+                "  \"before_dtype\": \"bf16_trunc_bits_le\",\n"
+                "  \"after_file\": \"activation-after-nvfp4.bin\",\n"
+                "  \"after_dtype\": \"block_nvfp4\",\n"
+                "  \"rows\": %lld,\n"
+                "  \"cols\": %lld,\n"
+                "  \"row_stride_f32\": %lld,\n"
+                "  \"qk_nvfp4\": %d,\n"
+                "  \"block_nvfp4_size\": %zu,\n"
+                "  \"global_scale\": %.9g,\n"
+                "  \"scale_mode\": \"%s\"",
+                src1_name.c_str(),
+                dst_name.c_str(),
+                (long long) ne11,
+                (long long) ne10,
+                (long long) src1_s01,
+                QK_NVFP4,
+                sizeof(block_nvfp4),
+                (double) global_scale,
+                used_dynamic_scale ? "dynamic_per_row" : "bound_static");
+        if (used_dynamic_scale) {
+            std::fprintf(meta, ",\n  \"dynamic_amax_rows\": [");
+            for (int64_t i = 0; i < ne11; ++i) {
+                std::fprintf(meta, "%s%.9g", i == 0 ? "" : ", ", (double) dynamic_amax[(size_t) i]);
+            }
+            std::fprintf(meta, "]");
+        }
+        std::fprintf(meta, "\n}\n");
+        if (std::fclose(meta) != 0) {
+            GGML_LOG_WARN("%s: failed to close %s: errno=%d\n", __func__, meta_path.c_str(), errno);
+            ok = false;
+        }
+    }
+
+    if (ok) {
+        GGML_LOG_INFO("%s: dumped first native NVFP4 activation quantization for %s to %s\n",
+                __func__, ggml_get_name(dst), dump_dir);
+    }
 }
 
 struct ggml_cuda_nvfp4_split_matrix {
@@ -874,6 +1125,19 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 global_scale, stream);
     }
     CUDA_CHECK(cudaGetLastError());
+
+    ggml_cuda_nvfp4_dump_first_activation_quantization(
+            ctx,
+            src1,
+            dst,
+            src1_q_nvfp4.get(),
+            ne10,
+            ne11,
+            src1->nb[1] / (int64_t) sizeof(float),
+            global_scale,
+            used_dynamic_scale,
+            dynamic_amax_rows.get(),
+            stream);
 
     ggml_cuda_nvfp4_split_blocks_cuda(
             src1_q_nvfp4.get(),

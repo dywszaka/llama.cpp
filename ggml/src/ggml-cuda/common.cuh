@@ -204,6 +204,68 @@ static const char * cu_get_error_str(CUresult err) {
 #define GGML_CUDA_ASSUME(x)
 #endif // CUDART_VERSION >= 11010
 
+static __device__ __forceinline__ uint16_t ggml_cuda_fp32_to_bf16_round_device(float v) {
+    union {
+        float    f;
+        uint32_t u;
+    } tmp = { v };
+    uint32_t fp32_bits = tmp.u;
+
+    uint32_t sign = (fp32_bits >> 31) & 0x1;
+    uint32_t exp = (fp32_bits >> 23) & 0xFF;
+    uint32_t mant = fp32_bits & 0x007FFFFF;
+
+    if (exp == 0xFF) {
+        if (mant != 0) {
+            uint16_t bf16_bits = (sign << 15) | 0x7F80U | ((mant >> 16) & 0x3FU);
+            if ((bf16_bits & 0x7F) == 0) {
+                bf16_bits |= 0x0040U;
+            }
+            return bf16_bits;
+        }
+        return (uint16_t) ((sign << 15) | 0x7F80U);
+    }
+
+    if (exp == 0 && mant == 0) {
+        return (uint16_t) (sign << 15);
+    }
+
+    if (exp == 0) {
+        uint32_t shift = 0;
+        while ((mant & (1U << 22)) == 0 && shift < 22) {
+            mant <<= 1;
+            shift++;
+        }
+        exp = 1 - shift;
+        mant &= 0x007FFFFFU;
+    } else {
+        mant |= 0x00800000U;
+    }
+
+    const uint32_t guard_bit = (mant >> 15) & 0x1;
+    const uint32_t round_bit = (mant >> 14) & 0x1;
+    const uint32_t sticky = (mant & 0x3FFFU) != 0 ? 1 : 0;
+    uint32_t bf16_mant = (mant >> 16) & 0x7F;
+
+    if (guard_bit == 1 && (round_bit == 1 || sticky == 1 || (bf16_mant & 0x1) == 1)) {
+        bf16_mant += 1;
+    }
+
+    if (bf16_mant > 0x7F) {
+        bf16_mant = 0;
+        exp += 1;
+        if (exp > 0xFE) {
+            return (uint16_t) ((sign << 15) | 0x7F80U);
+        }
+    }
+
+    if (exp < 1) {
+        return (uint16_t) (sign << 15);
+    }
+
+    return (uint16_t) ((sign << 15) | ((exp & 0xFF) << 7) | (bf16_mant & 0x7F));
+}
+
 #ifdef GGML_CUDA_F16
 typedef half dfloat; // dequantize float
 typedef half2 dfloat2;

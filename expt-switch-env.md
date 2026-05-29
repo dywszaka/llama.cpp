@@ -1,5 +1,27 @@
 # Experiment Switch Environment Variables
 
+## CUDA NVFP4 Native Matmul
+
+### `GGML_CUDA_NVFP4_NATIVE_ACT_DUMP`
+
+Exports the first activation tensor quantized inside
+`ggml_cuda_mul_mat_nvfp4_native`. Default: off.
+
+Set this switch to a directory path. On the first native NVFP4 activation
+quantization, the CUDA path writes:
+
+- `activation-before-f32-hi16.bin`: pre-quantization activation values, exported
+  as the high 16 bits of the F32 bit pattern. The dump path does not round; when
+  `GGML_CUDA_TRUNC_ENABLE=1` has already rounded tensors to BF16-representable
+  F32 values, this is a direct truncation/export of those bits;
+- `activation-after-nvfp4.bin`: post-quantization `block_nvfp4` values;
+- `metadata.json`: shape, scale mode, global scale, and file metadata used by
+  `scripts/compare-nvfp4-activation-dump.py`.
+
+This diagnostic is intended for local baseline validation and prints once. It
+synchronizes the active CUDA stream while exporting and should stay disabled for
+performance measurements.
+
 ## NVFP4 V-Cache
 
 ### `LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE`
