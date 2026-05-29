@@ -402,55 +402,7 @@ static __device__ __forceinline__ uint8_t bf16_quant_mag(
     return 7u;
 }
 
-static __global__ void quantize_row_nvfp4_bf16_kernel(
-        const float * __restrict__ x,
-        block_nvfp4 * __restrict__ y,
-        const int64_t ne00,
-        const int64_t s01,
-        const float * __restrict__ global_scales,
-        const bool per_tensor_scale) {
-    const int lane = threadIdx.x;
-    const bool lane_active = lane < QK_NVFP4;
-
-    const int ib = blockIdx.x;
-    const int i1 = blockIdx.y;
-    const int64_t k0 = (int64_t) ib * QK_NVFP4 + lane;
-
-    const float xi = (lane_active && k0 < ne00) ? x[(int64_t) i1 * s01 + k0] : 0.0f;
-    const uint16_t bf16 = ggml_cuda_fp32_to_bf16_round_device(xi);
-    uint16_t block_abs_max = bf16_abs_bits(bf16);
-    block_abs_max = max(block_abs_max, __shfl_xor_sync(0xFFFFFFFF, block_abs_max, 8, WARP_SIZE));
-    block_abs_max = max(block_abs_max, __shfl_xor_sync(0xFFFFFFFF, block_abs_max, 4, WARP_SIZE));
-    block_abs_max = max(block_abs_max, __shfl_xor_sync(0xFFFFFFFF, block_abs_max, 2, WARP_SIZE));
-    block_abs_max = max(block_abs_max, __shfl_xor_sync(0xFFFFFFFF, block_abs_max, 1, WARP_SIZE));
-    block_abs_max = __shfl_sync(0xFFFFFFFF, block_abs_max, 0, WARP_SIZE);
-
-    const float global_scale = per_tensor_scale ? global_scales[0] : global_scales[i1];
-    const uint32_t global_scale_q = float_to_ufixed_q_hw(global_scale, 16);
-
-    uint8_t scale = 0u;
-    uint64_t block_scale_half_q = 0u;
-    if (lane == 0) {
-        scale = compute_block_scale_hw(block_abs_max, global_scale_q);
-        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].e = scale;
-        block_scale_half_q = compute_block_scale_half_q(scale);
-    }
-    scale = __shfl_sync(0xFFFFFFFF, scale, 0, WARP_SIZE);
-    block_scale_half_q = __shfl_sync(0xFFFFFFFF, block_scale_half_q, 0, WARP_SIZE);
-
-    uint8_t q = 0u;
-    if (scale != 0u) {
-        const uint8_t mag = bf16_quant_mag(bf16_abs_bits(bf16), global_scale_q, block_scale_half_q);
-        q = mag == 0u ? 0u : (uint8_t) (((bf16 >> 15) & 1u) << 3 | mag);
-    }
-    const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
-
-    if (lane_active && (lane & 1) == 0) {
-        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].qs[lane/2] = q | (q_peer << 4);
-    }
-}
-
-static __global__ void quantize_row_nvfp4_bf16_scalar_kernel(
+static __device__ __forceinline__ void quantize_row_nvfp4_bf16_block(
         const float * __restrict__ x,
         block_nvfp4 * __restrict__ y,
         const int64_t ne00,
@@ -496,6 +448,18 @@ static __global__ void quantize_row_nvfp4_bf16_scalar_kernel(
     }
 }
 
+static __global__ void quantize_row_nvfp4_bf16_kernel(
+        const float * __restrict__ x,
+        block_nvfp4 * __restrict__ y,
+        const int64_t ne00,
+        const int64_t s01,
+        const float * __restrict__ global_scales,
+        const bool per_tensor_scale) {
+    const int i1 = blockIdx.y;
+    const float global_scale = per_tensor_scale ? global_scales[0] : global_scales[i1];
+    quantize_row_nvfp4_bf16_block(x, y, ne00, s01, global_scale);
+}
+
 static __global__ void quantize_row_nvfp4_dynamic_bf16_kernel(
         const float * __restrict__ x,
         block_nvfp4 * __restrict__ y,
@@ -503,50 +467,10 @@ static __global__ void quantize_row_nvfp4_dynamic_bf16_kernel(
         const int64_t s01,
         const float * __restrict__ amax_rows,
         const bool per_tensor_scale) {
-    const int lane = threadIdx.x;
     const int i1 = blockIdx.y;
     const float amax_f = per_tensor_scale ? amax_rows[0] : amax_rows[i1];
     const float global_scale = ggml_cuda_nvfp4_kcache_outlier_q_global_scale(amax_f);
-    __shared__ float scale_shared;
-    if (lane == 0) {
-        scale_shared = global_scale;
-    }
-    __syncthreads();
-
-    const int ib = blockIdx.x;
-    const bool lane_active = lane < QK_NVFP4;
-    const int64_t k0 = (int64_t) ib * QK_NVFP4 + lane;
-    const float xi = (lane_active && k0 < ne00) ? x[(int64_t) i1 * s01 + k0] : 0.0f;
-    const uint16_t bf16 = ggml_cuda_fp32_to_bf16_round_device(xi);
-    uint16_t block_abs_max = bf16_abs_bits(bf16);
-    block_abs_max = max(block_abs_max, __shfl_xor_sync(0xFFFFFFFF, block_abs_max, 8, WARP_SIZE));
-    block_abs_max = max(block_abs_max, __shfl_xor_sync(0xFFFFFFFF, block_abs_max, 4, WARP_SIZE));
-    block_abs_max = max(block_abs_max, __shfl_xor_sync(0xFFFFFFFF, block_abs_max, 2, WARP_SIZE));
-    block_abs_max = max(block_abs_max, __shfl_xor_sync(0xFFFFFFFF, block_abs_max, 1, WARP_SIZE));
-    block_abs_max = __shfl_sync(0xFFFFFFFF, block_abs_max, 0, WARP_SIZE);
-
-    const uint32_t global_scale_q = float_to_ufixed_q_hw(scale_shared, 16);
-
-    uint8_t scale = 0u;
-    uint64_t block_scale_half_q = 0u;
-    if (lane == 0) {
-        scale = compute_block_scale_hw(block_abs_max, global_scale_q);
-        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].e = scale;
-        block_scale_half_q = compute_block_scale_half_q(scale);
-    }
-    scale = __shfl_sync(0xFFFFFFFF, scale, 0, WARP_SIZE);
-    block_scale_half_q = __shfl_sync(0xFFFFFFFF, block_scale_half_q, 0, WARP_SIZE);
-
-    uint8_t q = 0u;
-    if (scale != 0u) {
-        const uint8_t mag = bf16_quant_mag(bf16_abs_bits(bf16), global_scale_q, block_scale_half_q);
-        q = mag == 0u ? 0u : (uint8_t) (((bf16 >> 15) & 1u) << 3 | mag);
-    }
-    const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
-
-    if (lane_active && (lane & 1) == 0) {
-        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].qs[lane/2] = q | (q_peer << 4);
-    }
+    quantize_row_nvfp4_bf16_block(x, y, ne00, s01, global_scale);
 }
 
 } // namespace
@@ -625,20 +549,6 @@ void ggml_cuda_nvfp4_quantize_rows_dynamic_f32(
     const dim3 num_blocks((uint32_t) (ne00 / QK_NVFP4), (uint32_t) ne01, 1);
     const dim3 block_size(WARP_SIZE, 1, 1);
     quantize_row_nvfp4_dynamic_kernel<<<num_blocks, block_size, 0, stream>>>(x, y, ne00, s01, amax_rows, per_tensor_scale);
-}
-
-void ggml_cuda_nvfp4_quantize_rows_bf16_f32(
-        const float * x,
-        block_nvfp4 * y,
-        int64_t ne00,
-        int64_t s01,
-        int64_t ne01,
-        float global_scale,
-        cudaStream_t stream) {
-    GGML_ASSERT(ne00 % QK_NVFP4 == 0);
-    const dim3 num_blocks((uint32_t) (ne00 / QK_NVFP4), (uint32_t) ne01, 1);
-    const dim3 block_size(WARP_SIZE, 1, 1);
-    quantize_row_nvfp4_bf16_scalar_kernel<<<num_blocks, block_size, 0, stream>>>(x, y, ne00, s01, global_scale);
 }
 
 void ggml_cuda_nvfp4_quantize_rows_bf16_f32(

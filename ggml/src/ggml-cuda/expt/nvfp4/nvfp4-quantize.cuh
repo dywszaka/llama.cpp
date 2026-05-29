@@ -58,15 +58,6 @@ void ggml_cuda_nvfp4_quantize_rows_bf16_f32(
         int64_t ne00,
         int64_t s01,
         int64_t ne01,
-        float global_scale,
-        cudaStream_t stream);
-
-void ggml_cuda_nvfp4_quantize_rows_bf16_f32(
-        const float * x,
-        block_nvfp4 * y,
-        int64_t ne00,
-        int64_t s01,
-        int64_t ne01,
         const float * global_scales,
         bool per_tensor_scale,
         cudaStream_t stream);

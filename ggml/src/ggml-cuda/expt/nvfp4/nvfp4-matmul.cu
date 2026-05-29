@@ -696,10 +696,16 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         }
     } else {
         if (use_bf16_quant) {
+            CUDA_CHECK(cudaMemcpyAsync(
+                    dynamic_input_scales.get(),
+                    &global_scale,
+                    sizeof(float),
+                    cudaMemcpyHostToDevice,
+                    stream));
             ggml_cuda_nvfp4_quantize_rows_bf16_f32(
                     (const float *) src1->data, src1_q_nvfp4.get(),
                     ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
-                    global_scale, stream);
+                    dynamic_input_scales.get(), true, stream);
         } else {
             ggml_cuda_nvfp4_quantize_rows_f32(
                     (const float *) src1->data, src1_q_nvfp4.get(),
