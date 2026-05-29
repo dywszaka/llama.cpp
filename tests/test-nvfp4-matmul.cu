@@ -3,6 +3,7 @@
 #include <ggml-cuda.h>
 
 #include "../ggml/src/ggml-quants.h"
+#include "../ggml/src/ggml-cuda/expt/nvfp4/nvfp4-quantize.cuh"
 
 #include <cuda_runtime.h>
 #include <cublas_api.h>
@@ -169,6 +170,362 @@ static void dequantize_matrix_nvfp4_per_row_scale(
                 k,
                 global_scales[(size_t) r]);
     }
+}
+
+static uint64_t host_low_bits_mask_u64(uint8_t width) {
+    if (width >= 64u) {
+        return ~0ull;
+    }
+    return width == 0u ? 0ull : ((1ull << width) - 1ull);
+}
+
+static uint16_t host_fp32_to_bf16_bits(float x) {
+    union {
+        float f;
+        uint32_t u;
+    } bits;
+    bits.f = x;
+    const uint32_t sign = (bits.u >> 31) & 0x1u;
+    uint32_t exp = (bits.u >> 23) & 0xffu;
+    uint32_t mant = bits.u & 0x007fffffu;
+
+    if (exp == 0xffu) {
+        if (mant != 0u) {
+            uint16_t bf16_bits = (uint16_t) ((sign << 15) | 0x7f80u | ((mant >> 16) & 0x3fu));
+            if ((bf16_bits & 0x7fu) == 0u) {
+                bf16_bits |= 0x0040u;
+            }
+            return bf16_bits;
+        }
+        return (uint16_t) ((sign << 15) | 0x7f80u);
+    }
+
+    if (exp == 0u && mant == 0u) {
+        return (uint16_t) (sign << 15);
+    }
+
+    if (exp == 0u) {
+        uint32_t shift = 0;
+        while ((mant & (1u << 22)) == 0u && shift < 22u) {
+            mant <<= 1;
+            shift++;
+        }
+        exp = 1u - shift;
+        mant &= 0x007fffffu;
+    } else {
+        mant |= 0x00800000u;
+    }
+
+    const uint32_t guard_bit = (mant >> 15) & 0x1u;
+    const uint32_t round_bit = (mant >> 14) & 0x1u;
+    const uint32_t sticky = (mant & 0x3fffu) != 0u ? 1u : 0u;
+    uint32_t bf16_mant = (mant >> 16) & 0x7fu;
+
+    if (guard_bit == 1u && (round_bit == 1u || sticky == 1u || (bf16_mant & 0x1u) == 1u)) {
+        bf16_mant += 1u;
+    }
+
+    if (bf16_mant > 0x7fu) {
+        bf16_mant = 0u;
+        exp += 1u;
+        if (exp > 0xfeu) {
+            return (uint16_t) ((sign << 15) | 0x7f80u);
+        }
+    }
+
+    if (exp < 1u) {
+        return (uint16_t) (sign << 15);
+    }
+
+    return (uint16_t) ((sign << 15) | ((exp & 0xffu) << 7) | (bf16_mant & 0x7fu));
+}
+
+static uint16_t host_bf16_abs_bits(uint16_t x) {
+    return (uint16_t) (x & (uint16_t) host_low_bits_mask_u64(15u));
+}
+
+static uint64_t host_shift_hw(uint64_t value, uint8_t shift_amt, uint8_t shift_right) {
+    const uint64_t value_q = value & host_low_bits_mask_u64(32u);
+    return ((shift_right & 1u) == 0u)
+            ? ((value_q << shift_amt) & host_low_bits_mask_u64(36u))
+            : ((value_q >> shift_amt) & host_low_bits_mask_u64(36u));
+}
+
+static uint32_t host_float_to_ufixed_q_hw(float val, uint8_t frac_bits) {
+    union {
+        float f;
+        uint32_t u;
+    } bits;
+    bits.f = val;
+
+    const uint32_t sign = bits.u >> 31;
+    const uint32_t exponent = (bits.u >> 23) & (uint32_t) host_low_bits_mask_u64(8u);
+    const uint32_t mantissa = bits.u & (uint32_t) host_low_bits_mask_u64(23u);
+    if (sign != 0u || (exponent == 0u && mantissa == 0u)) {
+        return 0;
+    }
+    if (exponent == 0xffu) {
+        return mantissa == 0u ? (uint32_t) host_low_bits_mask_u64(32u) : 0u;
+    }
+
+    const uint32_t significand =
+            ((exponent == 0u) ? mantissa : ((1u << 23) | mantissa)) &
+            (uint32_t) host_low_bits_mask_u64(24u);
+    const uint32_t exponent_unbiased =
+            (exponent == 0u) ? 0x82u : ((exponent - 127u) & (uint32_t) host_low_bits_mask_u64(8u));
+    uint32_t exponent_unbiased_ext = exponent_unbiased;
+    if ((exponent_unbiased_ext & 0x80u) != 0u) {
+        exponent_unbiased_ext |= 0x100u;
+    }
+
+    const uint32_t total_shift =
+            (exponent_unbiased_ext + (uint32_t) frac_bits + 0x1e9u) &
+            (uint32_t) host_low_bits_mask_u64(9u);
+    const uint8_t shift_right = (uint8_t) ((total_shift >> 8) & 1u);
+    uint32_t shift_mag = total_shift;
+    if (shift_right != 0u) {
+        shift_mag = ((~shift_mag) + 1u) & (uint32_t) host_low_bits_mask_u64(9u);
+    }
+    return (uint32_t) (host_shift_hw(significand, (uint8_t) (shift_mag & 0xffu), shift_right) &
+                       host_low_bits_mask_u64(32u));
+}
+
+static uint64_t host_bf16_abs_mul_uq_hw(uint16_t abs_bits, uint32_t factor_q, int factor_frac_bits, int out_frac_bits) {
+    if (abs_bits == 0u || factor_q == 0u) {
+        return 0;
+    }
+
+    const uint32_t exponent = (abs_bits >> 7) & (uint32_t) host_low_bits_mask_u64(8u);
+    const uint32_t mantissa = abs_bits & (uint32_t) host_low_bits_mask_u64(7u);
+    const uint32_t significand =
+            ((exponent == 0u) ? mantissa : (0x80u | mantissa)) &
+            (uint32_t) host_low_bits_mask_u64(8u);
+    const uint32_t exp_mask = (uint32_t) host_low_bits_mask_u64(9u);
+    const uint32_t exp_sign = 1u << 8;
+    const uint32_t value_exp2_tc = (exponent == 0u) ? ((0u - 133u) & exp_mask) : ((exponent - 134u) & exp_mask);
+    const uint32_t value_exp2_ext = (value_exp2_tc & exp_sign) != 0u ? (value_exp2_tc | ~exp_mask) : value_exp2_tc;
+    const uint32_t frac_delta = (uint32_t) (out_frac_bits - factor_frac_bits) & (uint32_t) host_low_bits_mask_u64(9u);
+    const uint32_t total_shift = (value_exp2_ext + frac_delta) & (uint32_t) host_low_bits_mask_u64(9u);
+    const uint8_t shift_right = (uint8_t) ((total_shift >> 8) & 1u);
+    uint32_t shift_mag = total_shift;
+    if (shift_right != 0u) {
+        shift_mag = ((~shift_mag) + 1u) & (uint32_t) host_low_bits_mask_u64(9u);
+    }
+    const uint64_t product = (uint64_t) significand * factor_q;
+    uint64_t result = 0;
+    if ((shift_mag & 0xffu) < 64u) {
+        result = shift_right != 0u ? (product >> (shift_mag & 0xffu)) : (product << (shift_mag & 0xffu));
+    }
+    return result & host_low_bits_mask_u64(36u);
+}
+
+static uint8_t host_block_scale_msb_hw(uint64_t block_scale_q) {
+    uint64_t msb_probe = block_scale_q & host_low_bits_mask_u64(34u);
+    uint8_t msb = 0u;
+    if (msb_probe >= (1ull << 32)) { msb_probe >>= 32; msb = (uint8_t) ((msb + 32u) & 0x3fu); }
+    if (msb_probe >= (1ull << 16)) { msb_probe >>= 16; msb = (uint8_t) ((msb + 16u) & 0x3fu); }
+    if (msb_probe >= (1ull << 8))  { msb_probe >>= 8;  msb = (uint8_t) ((msb + 8u)  & 0x3fu); }
+    if (msb_probe >= (1ull << 4))  { msb_probe >>= 4;  msb = (uint8_t) ((msb + 4u)  & 0x3fu); }
+    if (msb_probe >= (1ull << 2))  { msb_probe >>= 2;  msb = (uint8_t) ((msb + 2u)  & 0x3fu); }
+    if (msb_probe >= (1ull << 1))  { msb = (uint8_t) ((msb + 1u) & 0x3fu); }
+    return (uint8_t) (msb & 0x3fu);
+}
+
+static uint8_t host_compute_block_scale_hw(uint16_t block_abs_max_bits, uint32_t global_scale_q) {
+    if (block_abs_max_bits == 0u) {
+        return 0u;
+    }
+
+    uint64_t block_scale_q = host_bf16_abs_mul_uq_hw(block_abs_max_bits, global_scale_q, 16, 24);
+    block_scale_q = ((block_scale_q + 3u) >> 3) + ((block_scale_q + 3u) >> 5) +
+                    ((block_scale_q + 3u) >> 7) + ((block_scale_q + 3u) >> 9) +
+                    ((block_scale_q + 3u) >> 11) + ((block_scale_q + 3u) >> 13);
+    block_scale_q &= host_low_bits_mask_u64(34u);
+
+    const uint8_t msb = host_block_scale_msb_hw(block_scale_q);
+    const uint8_t exp_field_tc = (uint8_t) ((msb - 24 + 7) & 0x3fu);
+    int32_t exp_field = ((uint32_t) exp_field_tc & 0x20u) != 0u ? (int32_t) ((uint32_t) exp_field_tc | ~0x3fu) : (int32_t) exp_field_tc;
+    if (exp_field <= 0) {
+        uint64_t mant_q = block_scale_q >> (24 - 9);
+        mant_q &= 0xffu;
+        return mant_q >= 8u ? 0x08u : (uint8_t) mant_q;
+    }
+
+    if (exp_field > 15) {
+        exp_field = 15;
+    }
+    const int rshift = 24 + exp_field - 10;
+    uint32_t signif_q_rounded = (uint32_t) (block_scale_q & host_low_bits_mask_u64(5u));
+    if (rshift > 0) {
+        const uint64_t shifted = (block_scale_q >> rshift) & host_low_bits_mask_u64(19u);
+        const uint64_t half = (1ull << (rshift - 1)) & host_low_bits_mask_u64(29u);
+        const uint64_t mask = host_low_bits_mask_u64((uint8_t) rshift) & host_low_bits_mask_u64(29u);
+        const uint64_t remainder = block_scale_q & mask;
+        const uint64_t round = remainder > half ? 1ull : 0ull;
+        signif_q_rounded = (uint32_t) ((shifted + round) & host_low_bits_mask_u64(5u));
+    }
+    const uint8_t carry = ((exp_field < 15) && ((signif_q_rounded & (1u << 4)) != 0u)) ? 1u : 0u;
+    const int32_t exp_field_norm = (exp_field + (int32_t) carry) & 0xf;
+    const uint32_t signif_q_norm = carry != 0u ? 8u : signif_q_rounded;
+    const uint32_t signif_q_floor = signif_q_norm < 8u ? 8u : signif_q_norm;
+    const uint32_t signif_q_clamped = exp_field_norm >= 15 ? (signif_q_floor > 14u ? 14u : signif_q_floor) : signif_q_floor;
+    return (uint8_t) ((exp_field_norm << 3) | ((signif_q_clamped - 8u) & 0x7u));
+}
+
+static uint64_t host_compute_block_scale_half_q(uint8_t scale) {
+    const uint32_t scale_exp = (scale >> 3) & 0xfu;
+    const uint32_t scale_mant = scale & 0x7u;
+    return scale_exp == 0u
+            ? (host_shift_hw(scale_mant, (uint8_t) ((24 - 10) & 0xffu), 0u) & 0xffffffffu)
+            : (host_shift_hw(8u + scale_mant, (uint8_t) ((24 + (int) scale_exp - 11) & 0xffu), 0u) & 0xffffffffu);
+}
+
+static void host_quantize_bf16_round_nvfp4(
+        const std::vector<float> & src,
+        std::vector<block_nvfp4> & dst,
+        int rows,
+        int k,
+        const std::vector<float> & global_scales) {
+    GGML_ASSERT(k % QK_NVFP4 == 0);
+    GGML_ASSERT((int) global_scales.size() == rows);
+    const int nblk = k / QK_NVFP4;
+    dst.assign((size_t) rows * (size_t) nblk, {});
+    std::vector<uint16_t> bf16((size_t) rows * (size_t) k);
+    for (size_t i = 0; i < bf16.size(); ++i) {
+        bf16[i] = host_fp32_to_bf16_bits(src[i]);
+    }
+
+    for (int r = 0; r < rows; ++r) {
+        const uint32_t global_scale_q = host_float_to_ufixed_q_hw(global_scales[(size_t) r], 16);
+        for (int ib = 0; ib < nblk; ++ib) {
+            uint16_t block_abs_max = 0;
+            for (int j = 0; j < QK_NVFP4; ++j) {
+                block_abs_max = std::max(block_abs_max, host_bf16_abs_bits(bf16[(size_t) r * (size_t) k + (size_t) ib * QK_NVFP4 + j]));
+            }
+            const uint8_t scale = host_compute_block_scale_hw(block_abs_max, global_scale_q);
+            block_nvfp4 & out = dst[(size_t) r * (size_t) nblk + (size_t) ib];
+            out.e = scale;
+            if (scale == 0u) {
+                std::memset(out.qs, 0, sizeof(out.qs));
+                continue;
+            }
+
+            const uint64_t block_scale_half_q = host_compute_block_scale_half_q(scale);
+            uint8_t q_raw[QK_NVFP4] = { 0 };
+            for (int j = 0; j < QK_NVFP4; ++j) {
+                const uint16_t bits = bf16[(size_t) r * (size_t) k + (size_t) ib * QK_NVFP4 + j];
+                const uint8_t sign = (uint8_t) ((bits >> 15) & 1u);
+                const uint64_t target_q = host_bf16_abs_mul_uq_hw(host_bf16_abs_bits(bits), global_scale_q, 16, 24) &
+                                          host_low_bits_mask_u64(36u);
+                const uint64_t target_2x_q = target_q << 1;
+                uint8_t best_mag = 0u;
+                if (target_2x_q < block_scale_half_q) {
+                    best_mag = 0u;
+                } else if (target_2x_q < 3ull * block_scale_half_q) {
+                    best_mag = 1u;
+                } else if (target_2x_q < 5ull * block_scale_half_q) {
+                    best_mag = 2u;
+                } else if (target_2x_q < 7ull * block_scale_half_q) {
+                    best_mag = 3u;
+                } else if (target_2x_q < 10ull * block_scale_half_q) {
+                    best_mag = 4u;
+                } else if (target_2x_q < 14ull * block_scale_half_q) {
+                    best_mag = 5u;
+                } else if (target_2x_q < 20ull * block_scale_half_q) {
+                    best_mag = 6u;
+                } else {
+                    best_mag = 7u;
+                }
+                q_raw[j] = best_mag == 0u ? 0u : (uint8_t) ((sign << 3) | best_mag);
+            }
+            for (int j = 0; j < QK_NVFP4 / 2; ++j) {
+                out.qs[j] = (uint8_t) ((q_raw[2*j + 1] << 4) | (q_raw[2*j] & 0x0f));
+            }
+        }
+    }
+}
+
+static bool test_bf16_round_quant_enabled() {
+    const char * env = std::getenv("GGML_CUDA_NVFP4_BF16_QUANT");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+static void quantize_matrix_nvfp4_dynamic_ref(
+        const std::vector<float> & src,
+        std::vector<block_nvfp4> & dst,
+        int rows,
+        int k,
+        const std::vector<float> & global_scales) {
+    if (test_bf16_round_quant_enabled()) {
+        host_quantize_bf16_round_nvfp4(src, dst, rows, k, global_scales);
+    } else {
+        quantize_matrix_nvfp4_per_row_scale(src, dst, rows, k, global_scales);
+    }
+}
+
+static void quantize_matrix_nvfp4_global_ref(
+        const std::vector<float> & src,
+        std::vector<block_nvfp4> & dst,
+        int rows,
+        int k,
+        float global_scale) {
+    if (test_bf16_round_quant_enabled()) {
+        host_quantize_bf16_round_nvfp4(src, dst, rows, k, std::vector<float>((size_t) rows, global_scale));
+    } else {
+        quantize_matrix_nvfp4(src, dst, rows, k, global_scale);
+    }
+}
+
+static bool run_case_bf16_round_quantizer_bytes() {
+    const int rows = 3;
+    const int k = 32;
+    std::vector<float> src((size_t) rows * (size_t) k);
+    for (int r = 0; r < rows; ++r) {
+        for (int i = 0; i < k; ++i) {
+            const float base = (float) ((i % 17) - 8) * (0.1375f + 0.025f * r);
+            src[(size_t) r * (size_t) k + (size_t) i] = (i & 1) ? -base : base;
+        }
+    }
+    src[5] = 0.33325195f;
+    src[19] = -1.8759766f;
+    src[(size_t) k + 7] = 8.03125f;
+    src[(size_t) 2 * k + 11] = -0.00024420023f;
+    src[(size_t) 2 * k + 12] = 1.0e-39f;
+    src[(size_t) 2 * k + 13] = -1.0e-39f;
+
+    const std::vector<float> global_scales = { 13.5f, 47.25f, 127.0f };
+    std::vector<block_nvfp4> expected;
+    host_quantize_bf16_round_nvfp4(src, expected, rows, k, global_scales);
+
+    float * d_src = nullptr;
+    float * d_scales = nullptr;
+    block_nvfp4 * d_dst = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_src, src.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_scales, global_scales.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_dst, expected.size() * sizeof(block_nvfp4)));
+    CUDA_CHECK(cudaMemcpy(d_src, src.data(), src.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_scales, global_scales.data(), global_scales.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(d_dst, 0, expected.size() * sizeof(block_nvfp4)));
+
+    ggml_cuda_nvfp4_quantize_rows_bf16_f32(d_src, d_dst, k, k, rows, d_scales, false, nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<block_nvfp4> got(expected.size());
+    CUDA_CHECK(cudaMemcpy(got.data(), d_dst, got.size() * sizeof(block_nvfp4), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_dst));
+    CUDA_CHECK(cudaFree(d_scales));
+    CUDA_CHECK(cudaFree(d_src));
+
+    bool ok = true;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        if (expected[i].e != got[i].e || std::memcmp(expected[i].qs, got[i].qs, sizeof(expected[i].qs)) != 0) {
+            std::fprintf(stderr, "bf16-round quant mismatch block=%zu expected_e=%u got_e=%u\n",
+                    i, (unsigned) expected[i].e, (unsigned) got[i].e);
+            ok = false;
+        }
+    }
+    std::printf("bf16-round quantizer bytes | %s\n", ok ? "PASS" : "FAIL");
+    return ok;
 }
 
 static void split_nvfp4_blocks(
@@ -599,7 +956,7 @@ static bool run_case_integration_style_dynamic_device_alpha(int m, int n, int k,
     std::vector<block_nvfp4> a_nvfp4;
     std::vector<block_nvfp4> b_nvfp4;
     quantize_matrix_nvfp4(a_fp32, a_nvfp4, m, k, global_scale_a);
-    quantize_matrix_nvfp4_per_row_scale(b_fp32, b_nvfp4, n, k, global_scales_b);
+    quantize_matrix_nvfp4_dynamic_ref(b_fp32, b_nvfp4, n, k, global_scales_b);
 
     std::vector<float> a_deq;
     std::vector<float> b_deq;
@@ -801,7 +1158,7 @@ static bool run_case_backend_batched_dynamic_rhs(
 
         std::vector<block_nvfp4> b_q_slice;
         std::vector<float> b_deq_slice;
-        quantize_matrix_nvfp4_per_row_scale(b_fp32_slice, b_q_slice, n, k, global_scales_b);
+        quantize_matrix_nvfp4_dynamic_ref(b_fp32_slice, b_q_slice, n, k, global_scales_b);
         dequantize_matrix_nvfp4_per_row_scale(b_q_slice, b_deq_slice, n, k, global_scales_b);
 
         std::vector<float> c_slice;
@@ -949,9 +1306,9 @@ static bool run_case_backend_outlier_dynamic_rhs_tensor_scale(
     std::vector<block_nvfp4> b_nvfp4;
     quantize_matrix_nvfp4(a_fp32, a_nvfp4, m, k, global_scale_a);
     if (tensor_scale_enabled) {
-        quantize_matrix_nvfp4(b_fp32, b_nvfp4, n, k, global_scale_b);
+        quantize_matrix_nvfp4_global_ref(b_fp32, b_nvfp4, n, k, global_scale_b);
     } else {
-        quantize_matrix_nvfp4_per_row_scale(b_fp32, b_nvfp4, n, k, global_scales_b);
+        quantize_matrix_nvfp4_dynamic_ref(b_fp32, b_nvfp4, n, k, global_scales_b);
     }
 
     std::vector<float> a_deq;
@@ -1276,7 +1633,7 @@ static bool run_case_backend_batched_dynamic_rhs_permuted_lhs(
 
         std::vector<block_nvfp4> b_q_slice;
         std::vector<float> b_deq_slice;
-        quantize_matrix_nvfp4_per_row_scale(b_fp32_slice, b_q_slice, n, k, global_scales_b);
+        quantize_matrix_nvfp4_dynamic_ref(b_fp32_slice, b_q_slice, n, k, global_scales_b);
         dequantize_matrix_nvfp4_per_row_scale(b_q_slice, b_deq_slice, n, k, global_scales_b);
 
         std::vector<float> c_slice;
@@ -1418,6 +1775,7 @@ int main() {
     CUDA_CHECK(cudaSetDevice(0));
 
     bool ok = true;
+    ok = run_case_bf16_round_quantizer_bytes() && ok;
     ok = run_case(64, 64, 128, 1.00f, 1.00f, 1u) && ok;
     ok = run_case(48, 80, 256, 0.75f, 1.25f, 2u) && ok;
     ok = run_case(96, 96, 192, 1.50f, 0.90f, 3u) && ok;

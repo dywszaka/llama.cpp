@@ -12,6 +12,23 @@ K cache is `GGML_TYPE_FP8_E4M3_E8M0_32`; the F32 Q operand is quantized to
 temporary FP8 block32 inside the native CUDA FP8 matmul path before cuBLASLt
 execution.
 
+## NVFP4 CUDA Native Matmul
+
+### `GGML_CUDA_NVFP4_BF16_QUANT`
+
+Enables the experimental BF16-round NVFP4 RHS activation quantizer in the CUDA
+native NVFP4 matmul path. Default: off.
+
+When enabled, CUDA native NVFP4 matmul converts each F32 RHS activation value to
+rounded BF16 bits first, then uses the QuantBF16-style fixed-point NVFP4 block
+scale and E2M1 magnitude threshold algorithm. When disabled, the existing FP32
+nearest-neighbor NVFP4 quantizer remains active.
+
+Initial scope: `GGML_TYPE_NVFP4 x GGML_TYPE_F32 -> GGML_TYPE_F32` CUDA native
+matmul activation quantization, including static input-scale and dynamic
+per-row/per-tensor RHS scale modes. This switch does not change stored NVFP4
+weights or generic dequantization paths.
+
 ## NVFP4 K-Cache Outlier Sidecar
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER`

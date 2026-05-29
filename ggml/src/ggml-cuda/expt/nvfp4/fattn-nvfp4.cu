@@ -1,6 +1,7 @@
 #include "fattn-nvfp4.cuh"
 
 #include "nvfp4-matmul.cuh"
+#include "nvfp4-quantize.cuh"
 #include "../../../ggml-quants.h"
 
 #include <cuda_fp16.h>
