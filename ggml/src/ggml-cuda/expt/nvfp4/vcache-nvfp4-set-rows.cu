@@ -1,6 +1,6 @@
 #include "vcache-nvfp4-set-rows.cuh"
 
-#include "../../cuda-log.cuh"
+#include "nvfp4-log.cuh"
 
 #include <cstdlib>
 
@@ -332,7 +332,7 @@ void ggml_cuda_op_set_rows_nvfp4_vcache(
     GGML_ASSERT(src0->ne[0] == QK_NVFP4);
     GGML_ASSERT(src0->ne[1] == src1->ne[0]);
 
-    ggml_cuda_log_nvfp4_vcache_fast_update_once(fast_update);
+    ggml_cuda_nvfp4_log_vcache_fast_update_once(fast_update);
 
     if (n_tokens > 0) {
         k_set_rows_nvfp4_vcache<<<(uint32_t) n_rows_local, WARP_SIZE, 0, stream>>>(

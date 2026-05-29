@@ -4,6 +4,7 @@
 #include "../../common.cuh"
 #include "kcache-outlier.cuh"
 #include "nvfp4-common.cuh"
+#include "nvfp4-log.cuh"
 
 #include <cstdlib>
 
@@ -555,11 +556,7 @@ bool ggml_cuda_nvfp4_bf16_quant_enabled() {
     if (cached < 0) {
         const char * env = getenv("GGML_CUDA_NVFP4_BF16_QUANT");
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-        GGML_LOG_INFO("%s: GGML_CUDA_NVFP4_BF16_QUANT=%s -> %s\n",
-                __func__,
-                env != nullptr ? env : "(unset)",
-                cached != 0 ? "enabled, F32 activations round to BF16 before NVFP4 quantization"
-                            : "disabled, using FP32 nearest-neighbor NVFP4 quantization");
+        ggml_cuda_nvfp4_log_bf16_quant_once(env, cached != 0);
     }
     return cached != 0;
 }

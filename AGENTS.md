@@ -91,7 +91,9 @@
   - `NVFP4 layout diagnostic for ...` in `ggml/src/ggml-cuda/expt/nvfp4/nvfp4-matmul.cu`
 - Implementation pattern: `#ifndef NDEBUG`.
 - For changes under `ggml/src/ggml-cuda/`, keep CUDA logging helpers in `cuda-log.cu` / `cuda-log.cuh`.
+- Do not place debug log printing or debug log implementation directly in main algorithm code. Main logic should call narrow logging helpers instead of owning complex formatting, once-only log state, host-copy diagnostic probes, or debug-only diagnostic output.
 - Keep NVFP4-specific CUDA experiment code under `ggml/src/ggml-cuda/expt/nvfp4/`, and keep FP8-specific CUDA experiment code under `ggml/src/ggml-cuda/expt/fp8/`.
+- For code under `ggml/src/ggml-cuda/expt/nvfp4/` and `ggml/src/ggml-cuda/expt/fp8/`, keep directory-specific debug logging in local helpers (`nvfp4-log.cu` / `nvfp4-log.cuh`, `fp8-log.cu` / `fp8-log.cuh`) rather than in the main experiment kernels or dispatch code.
 - Experiment switch confirmation logs are allowed in Release only when they print once and are useful for confirming runtime behavior.
 
 ## Validation Guidance

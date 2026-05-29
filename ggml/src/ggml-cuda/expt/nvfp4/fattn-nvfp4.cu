@@ -2,12 +2,12 @@
 
 #include "nvfp4-matmul.cuh"
 #include "nvfp4-quantize.cuh"
+#include "nvfp4-log.cuh"
 #include "../../../ggml-quants.h"
 
 #include <cuda_fp16.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -762,39 +762,6 @@ static ggml_tensor make_host_scalar_tensor_f32(float * value) {
     return t;
 }
 
-static void log_nvfp4_fattn_tensor_brief_once(
-        const char * label,
-        const ggml_tensor * a,
-        const ggml_tensor * b,
-        const ggml_tensor * dst,
-        bool qk) {
-    static std::atomic<bool> qk_logged(false);
-    static std::atomic<bool> pv_logged(false);
-    std::atomic<bool> & logged = qk ? qk_logged : pv_logged;
-    if (logged.exchange(true)) {
-        return;
-    }
-
-    GGML_LOG_INFO(
-            "%s: %s A{name=%s type=%s ne=[%lld,%lld,%lld,%lld]} "
-            "B{name=%s type=%s ne=[%lld,%lld,%lld,%lld]} "
-            "dst{name=%s type=%s ne=[%lld,%lld,%lld,%lld]}\n",
-            __func__,
-            label,
-            a != nullptr ? ggml_get_name(a) : "(null)",
-            a != nullptr ? ggml_type_name(a->type) : "(null)",
-            a != nullptr ? (long long) a->ne[0] : 0, a != nullptr ? (long long) a->ne[1] : 0,
-            a != nullptr ? (long long) a->ne[2] : 0, a != nullptr ? (long long) a->ne[3] : 0,
-            b != nullptr ? ggml_get_name(b) : "(null)",
-            b != nullptr ? ggml_type_name(b->type) : "(null)",
-            b != nullptr ? (long long) b->ne[0] : 0, b != nullptr ? (long long) b->ne[1] : 0,
-            b != nullptr ? (long long) b->ne[2] : 0, b != nullptr ? (long long) b->ne[3] : 0,
-            dst != nullptr ? ggml_get_name(dst) : "(null)",
-            dst != nullptr ? ggml_type_name(dst->type) : "(null)",
-            dst != nullptr ? (long long) dst->ne[0] : 0, dst != nullptr ? (long long) dst->ne[1] : 0,
-            dst != nullptr ? (long long) dst->ne[2] : 0, dst != nullptr ? (long long) dst->ne[3] : 0);
-}
-
 static float device_absmax(
         ggml_backend_cuda_context & ctx,
         const float * x,
@@ -966,32 +933,21 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     }
 
     if (debug_log) {
-        GGML_LOG_INFO(
-                "%s: NVFP4 FATTN native quantization: "
-                "Q/K group_dim=head_dim group_size=%d tensor_global_scale_inv=[q=%g k=%g] "
-                "V group_dim=kv_len group_size=%d tensor_global_scale_inv=%g "
-                "P format=%s "
-                "Q quant=%s "
-                "smooth=[q=%s k=%s] "
-                "shape=[batch=%lld q_heads=%lld kv_heads=%lld q_len=%lld kv_len=%lld head_dim=%lld]\n",
-                __func__,
+        ggml_cuda_nvfp4_log_fattn_quantization(
                 QK_NVFP4,
                 (double) q_global_scale,
                 (double) k_global_scale,
-                QK_NVFP4,
                 (double) v_global_scale,
-                p_direct ?
-                    "nvfp4_direct group_dim=kv_len first_level=none second_level=NVFP4(global_scale_inv=1)" :
-                    "nvfp4_twolevel group_dim=kv_len first_level=row_max/(448*6) second_level=NVFP4(global_scale_inv=1)",
-                q_dynamic ? "dynamic_per_row" : "static_global",
-                no_q_smooth ? "off" : "on",
-                no_k_smooth ? "off" : "on",
-                (long long) batch,
-                (long long) q_heads,
-                (long long) kv_heads,
-                (long long) q_len,
-                (long long) kv_len,
-                (long long) d);
+                p_direct,
+                q_dynamic,
+                no_q_smooth,
+                no_k_smooth,
+                batch,
+                q_heads,
+                kv_heads,
+                q_len,
+                kv_len,
+                d);
     }
 
     ggml_cuda_pool_alloc<block_nvfp4> k_q(ctx.pool(), k_nvfp4_cache ? 0 : (size_t) k_rows * (size_t) (d / QK_NVFP4));
@@ -1051,34 +1007,20 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
             ggml_set_name(&k_t, "nvfp4-fattn-k");
             ggml_set_name(&q_t, "nvfp4-fattn-q");
             ggml_set_name(&qk_t, "nvfp4-fattn-qk");
-            log_nvfp4_fattn_tensor_brief_once("q*k", &k_t, &q_t, &qk_t, true);
+            ggml_cuda_nvfp4_log_fattn_tensor_brief_once("q*k", &k_t, &q_t, &qk_t, true);
             if (debug_log && b == 0 && qh == 0) {
-                GGML_LOG_INFO(
-                        "%s: QK matmul requested: backend=cublasLt tensor_core=FP4 lt_type=CUDA_R_4F_E2M1 "
-                        "A=%s[NVFP4,k=%lld,m=%lld,weight_scale=%g%s] "
-                        "B=Q_centered[F32->NVFP4,k=%lld,n=%lld,%s=%g] "
-                        "C=F32[%lld,%lld]\n",
-                        __func__,
-                        k_nvfp4_cache ? "K_cache_direct" : "K_centered",
-                        (long long) d,
-                        (long long) kv_len,
-                        (double) k_weight_scale_value,
-                        k_nvfp4_cache ? ",row_scale_after_matmul" : "",
-                        (long long) d,
-                        (long long) q_len,
-                        q_dynamic ? "dynamic_per_row_scale_placeholder" : "input_scale=1/q_global_scale_inv",
-                        (double) q_input_scale_value,
-                        (long long) kv_len,
-                        (long long) q_len);
+                ggml_cuda_nvfp4_log_fattn_qk_requested(
+                        k_nvfp4_cache, d, kv_len, (double) k_weight_scale_value,
+                        q_len, q_dynamic, (double) q_input_scale_value);
             }
             if (!ggml_cuda_mul_mat_nvfp4_native(ctx, &k_t, &q_t, &qk_t)) {
                 if (debug_log) {
-                    GGML_LOG_WARN("%s: QK matmul did not use native Tensor Core FP4 path; NVFP4 FATTN native path unavailable\n", __func__);
+                    ggml_cuda_nvfp4_log_fattn_native_unavailable("QK");
                 }
                 return false;
             }
             if (debug_log && b == 0 && qh == 0) {
-                GGML_LOG_INFO("%s: QK matmul active: native Tensor Core FP4 path confirmed (cublasLt CUDA_R_4F_E2M1)\n", __func__);
+                ggml_cuda_nvfp4_log_fattn_native_active("QK");
             }
             if (k_nvfp4_cache) {
                 const int64_t qk_total = q_len * kv_len;
@@ -1128,32 +1070,19 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
             ggml_set_name(&v_t, "nvfp4-fattn-v");
             ggml_set_name(&p_t, "nvfp4-fattn-p");
             ggml_set_name(&vp_t, "nvfp4-fattn-vp");
-            log_nvfp4_fattn_tensor_brief_once("p*v", &v_t, &p_t, &vp_t, false);
+            ggml_cuda_nvfp4_log_fattn_tensor_brief_once("p*v", &v_t, &p_t, &vp_t, false);
             if (debug_log && b == 0 && qh == 0) {
-                GGML_LOG_INFO(
-                        "%s: VP matmul requested: backend=cublasLt tensor_core=FP4 lt_type=CUDA_R_4F_E2M1 "
-                        "A=V[NVFP4,k=%lld,m=%lld,weight_scale=1/v_global_scale_inv=%g] "
-                        "B=%s[F32->NVFP4,k=%lld,n=%lld,input_scale=1,%s] "
-                        "C=F32[%lld,%lld]\n",
-                        __func__,
-                        (long long) kv_len,
-                        (long long) d,
-                        (double) v_weight_scale_value,
-                        p_direct ? "P_raw" : "P_scaled",
-                        (long long) kv_len,
-                        (long long) q_len,
-                        p_direct ? "no_first_scale" : "twolevel_first_scale_applied_after_matmul",
-                        (long long) d,
-                        (long long) q_len);
+                ggml_cuda_nvfp4_log_fattn_vp_requested(
+                        kv_len, d, (double) v_weight_scale_value, p_direct, q_len);
             }
             if (!ggml_cuda_mul_mat_nvfp4_native(ctx, &v_t, &p_t, &vp_t)) {
                 if (debug_log) {
-                    GGML_LOG_WARN("%s: VP matmul did not use native Tensor Core FP4 path; NVFP4 FATTN native path unavailable\n", __func__);
+                    ggml_cuda_nvfp4_log_fattn_native_unavailable("VP");
                 }
                 return false;
             }
             if (debug_log && b == 0 && qh == 0) {
-                GGML_LOG_INFO("%s: VP matmul active: native Tensor Core FP4 path confirmed (cublasLt CUDA_R_4F_E2M1)\n", __func__);
+                ggml_cuda_nvfp4_log_fattn_native_active("VP");
             }
         }
     }

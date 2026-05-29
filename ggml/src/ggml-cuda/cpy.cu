@@ -2,6 +2,7 @@
 #include "cpy-utils.cuh"
 #include "cuda-log.cuh"
 #include "dequantize.cuh"
+#include "expt/fp8/fp8-log.cuh"
 #if defined(GGML_USE_MUSA) && defined(GGML_MUSA_MUDNN_COPY)
 #include "ggml-musa/mudnn.cuh"
 #endif // GGML_USE_MUSA && GGML_MUSA_MUDNN_COPY
@@ -679,7 +680,7 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
 #endif
     if (ggml_cuda_is_fp8_e8m0_transpose_permute_repack(src0, src1)) {
         if (src1->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
-            ggml_cuda_log_fp8_e4m3_e8m0_32_e4m2_cpy_once("transpose_permute_repack", src0, src1, fp8_e4m2_experiment);
+            ggml_cuda_fp8_log_e4m3_e8m0_32_e4m2_cpy_once("transpose_permute_repack", src0, src1, fp8_e4m2_experiment);
             ggml_cpy_fp8_e8m0_transpose_permute_repack_cuda<block_fp8_e4m3_e8m0_32, QK_FP8_E4M3_E8M0_32, GGML_TYPE_FP8_E4M3_E8M0_32>(src0, src1, main_stream, fp8_e4m2_experiment);
         } else {
             GGML_ASSERT(src1->type == GGML_TYPE_FP8_E4M3_E8M0_16);
@@ -706,7 +707,7 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
     } else if (src0->type == GGML_TYPE_Q8_0 && src1->type == GGML_TYPE_F32) {
         ggml_cpy_q8_0_f32_cuda(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
     } else if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
-        ggml_cuda_log_fp8_e4m3_e8m0_32_e4m2_cpy_once("f32_to_fp8", src0, src1, fp8_e4m2_experiment);
+        ggml_cuda_fp8_log_e4m3_e8m0_32_e4m2_cpy_once("f32_to_fp8", src0, src1, fp8_e4m2_experiment);
         if (fp8_e4m2_experiment) {
             ggml_cpy_f32_q_cuda<cpy_blck_f32_fp8_e4m3_e8m0_32_e4m2, QK_FP8_E4M3_E8M0_32>(src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream, dest_ptrs_d, graph_cpynode_index);
         } else {

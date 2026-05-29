@@ -1,6 +1,7 @@
 #include "set-rows.cuh"
 #include "cpy-utils.cuh"
 #include "cuda-log.cuh"
+#include "expt/fp8/fp8-log.cuh"
 #include "expt/fp8/fp8-set-rows.cuh"
 #include "expt/nvfp4/kcache-outlier.cuh"
 #include "expt/nvfp4/nvfp4-set-rows.cuh"
@@ -329,7 +330,7 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         );
     } else if (dst->type == GGML_TYPE_FP8_E4M3_E8M0_32) {
         const bool fp8_e4m2_experiment = ggml_cuda_fp8_e4m3_e8m0_32_e4m2_experiment_enabled();
-        ggml_cuda_log_fp8_e4m3_e8m0_32_e4m2_set_rows_once(dst, fp8_e4m2_experiment);
+        ggml_cuda_fp8_log_e4m3_e8m0_32_e4m2_set_rows_once(dst, fp8_e4m2_experiment);
         ggml_cuda_set_rows_fp8_e4m3_e8m0_32(params, dst, fp8_e4m2_experiment);
     } else if (dst->type == GGML_TYPE_FP8_E4M3_E8M0_16) {
         ggml_cuda_set_rows_fp8_e4m3_e8m0_16(params, dst);

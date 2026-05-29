@@ -1,6 +1,6 @@
 #include "vcache-nvfp4-matmul.cuh"
 
-#include <atomic>
+#include "nvfp4-log.cuh"
 
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_P_AMAX_PREPASS_MIN_KV = 2048;
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K = 512;
@@ -12,26 +12,6 @@ static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K = 512;
 #else
 #define GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS 0
 #endif
-
-static void ggml_cuda_vcache_nvfp4_log_fp4_pv_once() {
-    static std::atomic<bool> logged(false);
-    if (logged.exchange(true)) {
-        return;
-    }
-
-    GGML_LOG_INFO(
-            "%s: CUDA NVFP4 V-cache p*v quantizes P to dynamic NVFP4 by default; using cuBLASLt FP4 when available, otherwise custom CUDA dot kernel\n",
-            __func__);
-}
-
-static void ggml_cuda_vcache_nvfp4_log_matmul_path_once(const char * path) {
-    static std::atomic<bool> logged(false);
-    if (logged.exchange(true)) {
-        return;
-    }
-
-    GGML_LOG_INFO("%s: CUDA NVFP4 V-cache p*v matmul path=%s\n", __func__, path);
-}
 
 static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_vcache(float x) {
     uint8_t best_index = 0;
@@ -648,27 +628,11 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
     }
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        static std::atomic<bool> logged(false);
-        if (!logged.exchange(true)) {
-            GGML_LOG_WARN(
-                    "%s: cuBLASLt FP4 P*V path failed at %s status=%d (%s); falling back to custom CUDA kernel\n",
-                    __func__, stage, (int) st, cublas_get_error_str(st));
-        }
+        ggml_cuda_nvfp4_log_vcache_lt_failure_once(stage, (int) st, cublas_get_error_str(st));
         return false;
     }
 
-    static std::atomic<bool> logged_success(false);
-    if (!logged_success.exchange(true)) {
-        GGML_LOG_INFO(
-                "%s: cuBLASLt FP4 P*V path active rows=%lld cols=%lld padded_cols=%lld kv_size=%lld q_heads=%lld q_streams=%lld\n",
-                __func__,
-                (long long) rows,
-                (long long) cols,
-                (long long) lt_cols,
-                (long long) kv_size,
-                (long long) q_heads,
-                (long long) q_streams);
-    }
+    ggml_cuda_nvfp4_log_vcache_lt_active_once(rows, cols, lt_cols, kv_size, q_heads, q_streams);
 
     return true;
 #else
@@ -698,10 +662,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
     GGML_UNUSED(dst_nb3);
     GGML_UNUSED(r2);
     GGML_UNUSED(r3);
-    static std::atomic<bool> logged(false);
-    if (!logged.exchange(true)) {
-        GGML_LOG_WARN("%s: cuBLASLt FP4 scale-channel attrs unavailable; falling back to custom CUDA kernel\n", __func__);
-    }
+    ggml_cuda_nvfp4_log_vcache_lt_scale_attrs_unavailable_once();
     return false;
 #endif
 }
@@ -760,7 +721,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
 
     const int64_t r2 = q_heads / kv_heads;
     const int64_t r3 = q_streams / kv_streams;
-    ggml_cuda_vcache_nvfp4_log_fp4_pv_once();
+    ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
 
     const dim3 grid((uint32_t) rows, (uint32_t) cols, (uint32_t) (q_heads * q_streams));
     const int64_t n_blocks = kv_size / QK_NVFP4;
@@ -829,7 +790,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
                 dst->nb[3],
                 r2,
                 r3)) {
-        ggml_cuda_vcache_nvfp4_log_matmul_path_once("cublasLt-fp4");
+        ggml_cuda_nvfp4_log_vcache_matmul_path_once("cublasLt-fp4");
         return true;
     }
 #endif
@@ -838,7 +799,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     while (fp4_block_threads < n_blocks && fp4_block_threads < 256) {
         fp4_block_threads *= 2;
     }
-    ggml_cuda_vcache_nvfp4_log_matmul_path_once("custom-cuda-fp4");
+    ggml_cuda_nvfp4_log_vcache_matmul_path_once("custom-cuda-fp4");
     k_vcache_nvfp4_matmul_fp4_p_4d<<<grid, dim3((uint32_t) fp4_block_threads, 1, 1), 0, ctx.stream()>>>(
             (const block_nvfp4 *) src0->data,
             (const float *) scale->data,

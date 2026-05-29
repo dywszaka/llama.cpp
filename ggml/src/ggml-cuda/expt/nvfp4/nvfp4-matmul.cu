@@ -1,6 +1,7 @@
 #include "nvfp4-matmul.cuh"
 
 #include "kcache-outlier.cuh"
+#include "nvfp4-log.cuh"
 #include "nvfp4-quantize.cuh"
 
 #include "ggml-backend.h"
@@ -737,255 +738,29 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     }
 
     if (debug_enabled) {
-        GGML_LOG_INFO(
-                "%s: native channel layout for %s: "
-                "A[data=%zu,scale=%zu,scale_shape=(outer=%lld,inner=%lld)] "
-                "B[data=%zu,scale=%zu,scale_shape=(outer=%lld,inner=%lld)]\n",
-                __func__, ggml_get_name(dst),
+        ggml_cuda_nvfp4_log_native_repack_debug(
+                dst,
+                (const block_nvfp4 *) src0->data,
+                (const block_nvfp4 *) src1_q_nvfp4.get(),
+                src0_repacked.data,
+                src0_repacked.scale,
                 src0_repacked.data_nbytes,
                 src0_repacked.scale_nbytes,
-                (long long) src0_repacked.scale_outer_padded,
-                (long long) src0_repacked.scale_inner_padded,
+                src0_repacked.scale_outer_padded,
+                src0_repacked.scale_inner_padded,
+                (const void *) src1_repacked_data.get(),
+                (const void *) src1_repacked_scale.get(),
                 (size_t) ne11_padded * (size_t) ne10 / 2,
                 (size_t) scale_outer_padded_b * (size_t) scale_inner_padded,
-                (long long) scale_outer_padded_b,
-                (long long) scale_inner_padded);
-        GGML_LOG_INFO("%s: scale layout mode for %s: %s\n",
-                __func__, ggml_get_name(dst), linear_scale_layout ? "linear" : "tiled-128x4");
-        GGML_LOG_INFO("%s: alpha mode for %s: out_scale/global_scale (%s)\n",
-                __func__, ggml_get_name(dst), used_dynamic_scale ? "dynamic-rhs" : "bound-scale");
-
-        // Compare first-row source scale bytes against repacked channel bytes.
-        // This helps verify channel split/indexing before Lt matmul.
-        const int64_t dump_blocks = std::min<int64_t>(nblk_k, 4);
-        if (dump_blocks > 0) {
-            std::vector<block_nvfp4> a_blocks((size_t) dump_blocks);
-            std::vector<block_nvfp4> b_blocks((size_t) dump_blocks);
-            std::vector<uint8_t> a_scale_src((size_t) dump_blocks, 0);
-            std::vector<uint8_t> b_scale_src((size_t) dump_blocks, 0);
-            std::vector<uint8_t> a_scale_repacked((size_t) dump_blocks, 0);
-            std::vector<uint8_t> b_scale_repacked((size_t) dump_blocks, 0);
-
-            CUDA_CHECK(cudaMemcpyAsync(
-                    a_blocks.data(),
-                    (const char *) src0->data,
-                    (size_t) dump_blocks * sizeof(block_nvfp4),
-                    cudaMemcpyDeviceToHost,
-                    stream));
-            CUDA_CHECK(cudaMemcpyAsync(
-                    b_blocks.data(),
-                    (const char *) src1_q_nvfp4.get(),
-                    (size_t) dump_blocks * sizeof(block_nvfp4),
-                    cudaMemcpyDeviceToHost,
-                    stream));
-
-            for (int64_t i = 0; i < dump_blocks; ++i) {
-                const int64_t scale_idx = linear_scale_layout ?
-                        i : ggml_cuda_nvfp4_scale_tiled_index(0, i, scale_inner_padded);
-                CUDA_CHECK(cudaMemcpyAsync(
-                        &a_scale_repacked[(size_t) i],
-                        (const uint8_t *) src0_repacked.scale + scale_idx,
-                        sizeof(uint8_t),
-                        cudaMemcpyDeviceToHost,
-                        stream));
-                CUDA_CHECK(cudaMemcpyAsync(
-                        &b_scale_repacked[(size_t) i],
-                        (const uint8_t *) src1_repacked_scale.get() + scale_idx,
-                        sizeof(uint8_t),
-                        cudaMemcpyDeviceToHost,
-                        stream));
-            }
-
-            CUDA_CHECK(cudaStreamSynchronize(stream));
-
-            for (int64_t i = 0; i < dump_blocks; ++i) {
-                a_scale_src[(size_t) i] = a_blocks[(size_t) i].e;
-                b_scale_src[(size_t) i] = b_blocks[(size_t) i].e;
-            }
-
-            GGML_LOG_INFO(
-                    "%s: scale-byte probe %s row0 first4 A[src=%u,%u,%u,%u repacked=%u,%u,%u,%u] "
-                    "B[src=%u,%u,%u,%u repacked=%u,%u,%u,%u]\n",
-                    __func__,
-                    ggml_get_name(dst),
-                    (unsigned) (dump_blocks > 0 ? a_scale_src[0] : 0),
-                    (unsigned) (dump_blocks > 1 ? a_scale_src[1] : 0),
-                    (unsigned) (dump_blocks > 2 ? a_scale_src[2] : 0),
-                    (unsigned) (dump_blocks > 3 ? a_scale_src[3] : 0),
-                    (unsigned) (dump_blocks > 0 ? a_scale_repacked[0] : 0),
-                    (unsigned) (dump_blocks > 1 ? a_scale_repacked[1] : 0),
-                    (unsigned) (dump_blocks > 2 ? a_scale_repacked[2] : 0),
-                    (unsigned) (dump_blocks > 3 ? a_scale_repacked[3] : 0),
-                    (unsigned) (dump_blocks > 0 ? b_scale_src[0] : 0),
-                    (unsigned) (dump_blocks > 1 ? b_scale_src[1] : 0),
-                    (unsigned) (dump_blocks > 2 ? b_scale_src[2] : 0),
-                    (unsigned) (dump_blocks > 3 ? b_scale_src[3] : 0),
-                    (unsigned) (dump_blocks > 0 ? b_scale_repacked[0] : 0),
-                    (unsigned) (dump_blocks > 1 ? b_scale_repacked[1] : 0),
-                    (unsigned) (dump_blocks > 2 ? b_scale_repacked[2] : 0),
-                    (unsigned) (dump_blocks > 3 ? b_scale_repacked[3] : 0));
-        }
-
-        // One-time deep probe: sample multiple outer/inner coordinates to validate
-        // both scale channel and packed data channel mapping.
-        static std::atomic<bool> deep_probe_logged(false);
-        const bool run_deep_probe = !deep_probe_logged.exchange(true);
-        if (run_deep_probe) {
-            auto probe_matrix = [&](const char * tag,
-                                    const block_nvfp4 * src_blocks,
-                                    const void * repacked_data,
-                                    const void * repacked_scale,
-                                    int64_t outer_valid,
-                                    int64_t scale_inner_padded_local) {
-                if (outer_valid <= 0 || nblk_k <= 0) {
-                    return;
-                }
-
-                std::vector<int64_t> outer_samples;
-                auto push_unique_outer = [&](int64_t v) {
-                    if (v < 0 || v >= outer_valid) {
-                        return;
-                    }
-                    for (int64_t x : outer_samples) {
-                        if (x == v) {
-                            return;
-                        }
-                    }
-                    if (outer_samples.size() < 4) {
-                        outer_samples.push_back(v);
-                    }
-                };
-
-                push_unique_outer(0);
-                push_unique_outer(1);
-                push_unique_outer(31);
-                push_unique_outer(32);
-                push_unique_outer(127);
-                push_unique_outer(128);
-                push_unique_outer(outer_valid - 1);
-                if (outer_samples.size() < 4) {
-                    push_unique_outer((outer_valid - 1) / 2);
-                }
-
-                std::vector<int64_t> inner_samples;
-                auto push_unique_inner = [&](int64_t v) {
-                    if (v < 0 || v >= nblk_k) {
-                        return;
-                    }
-                    for (int64_t x : inner_samples) {
-                        if (x == v) {
-                            return;
-                        }
-                    }
-                    if (inner_samples.size() < 4) {
-                        inner_samples.push_back(v);
-                    }
-                };
-
-                push_unique_inner(0);
-                push_unique_inner(1);
-                push_unique_inner(3);
-                push_unique_inner(4);
-                push_unique_inner(nblk_k / 2);
-                push_unique_inner(nblk_k - 1);
-                if (inner_samples.size() < 4) {
-                    push_unique_inner(2);
-                }
-
-                const int64_t row_data_bytes = ne10 / 2;
-                int samples = 0;
-                int scale_mismatch = 0;
-                int data_mismatch = 0;
-
-                for (int64_t outer : outer_samples) {
-                    for (int64_t inner : inner_samples) {
-                        const int64_t src_idx = outer * nblk_k + inner;
-                        const int64_t scale_idx = linear_scale_layout
-                                ? (outer * scale_inner_padded_local + inner)
-                                : ggml_cuda_nvfp4_scale_tiled_index(outer, inner, scale_inner_padded_local);
-                        const int64_t data_off = outer * row_data_bytes + inner * (QK_NVFP4 / 2);
-
-                        block_nvfp4 src_block = {};
-                        uint8_t rep_scale = 0;
-                        uint8_t rep_qs[QK_NVFP4 / 2] = { 0 };
-
-                        CUDA_CHECK(cudaMemcpyAsync(
-                                &src_block,
-                                src_blocks + src_idx,
-                                sizeof(src_block),
-                                cudaMemcpyDeviceToHost,
-                                stream));
-                        CUDA_CHECK(cudaMemcpyAsync(
-                                &rep_scale,
-                                (const uint8_t *) repacked_scale + scale_idx,
-                                sizeof(rep_scale),
-                                cudaMemcpyDeviceToHost,
-                                stream));
-                        CUDA_CHECK(cudaMemcpyAsync(
-                                rep_qs,
-                                (const uint8_t *) repacked_data + data_off,
-                                sizeof(rep_qs),
-                                cudaMemcpyDeviceToHost,
-                                stream));
-                        CUDA_CHECK(cudaStreamSynchronize(stream));
-
-                        const bool scale_ok = (src_block.e == rep_scale);
-                        const bool data_ok = (memcmp(src_block.qs, rep_qs, sizeof(rep_qs)) == 0);
-                        samples += 1;
-                        if (!scale_ok) {
-                            scale_mismatch += 1;
-                        }
-                        if (!data_ok) {
-                            data_mismatch += 1;
-                        }
-
-                        GGML_LOG_INFO(
-                                "%s: deep-probe %s %s o=%lld i=%lld "
-                                "scale[src=%u rep=%u ok=%d idx=%lld] "
-                                "data[src0=%u src7=%u rep0=%u rep7=%u ok=%d off=%lld]\n",
-                                __func__,
-                                ggml_get_name(dst),
-                                tag,
-                                (long long) outer,
-                                (long long) inner,
-                                (unsigned) src_block.e,
-                                (unsigned) rep_scale,
-                                scale_ok ? 1 : 0,
-                                (long long) scale_idx,
-                                (unsigned) src_block.qs[0],
-                                (unsigned) src_block.qs[QK_NVFP4 / 2 - 1],
-                                (unsigned) rep_qs[0],
-                                (unsigned) rep_qs[QK_NVFP4 / 2 - 1],
-                                data_ok ? 1 : 0,
-                                (long long) data_off);
-                    }
-                }
-
-                GGML_LOG_INFO(
-                        "%s: deep-probe summary %s %s samples=%d scale_mismatch=%d data_mismatch=%d\n",
-                        __func__,
-                        ggml_get_name(dst),
-                        tag,
-                        samples,
-                        scale_mismatch,
-                        data_mismatch);
-            };
-
-            probe_matrix(
-                    "A",
-                    (const block_nvfp4 *) src0->data,
-                    src0_repacked.data,
-                    src0_repacked.scale,
-                    ne01,
-                    src0_repacked.scale_inner_padded);
-            probe_matrix(
-                    "B",
-                    (const block_nvfp4 *) src1_q_nvfp4.get(),
-                    (const void *) src1_repacked_data.get(),
-                    (const void *) src1_repacked_scale.get(),
-                    ne11,
-                    scale_inner_padded);
-        }
+                scale_outer_padded_b,
+                scale_inner_padded,
+                ne10,
+                ne01,
+                ne11,
+                nblk_k,
+                linear_scale_layout,
+                used_dynamic_scale,
+                stream);
     }
 
     cublasLtMatmulDesc_t op_desc = nullptr;
@@ -1547,44 +1322,18 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                     max_sample_col = out_col;
                 }
 
-                if (sample_off > 0 && sample_off < (int) sizeof(sample_buf)) {
-                    sample_off += std::snprintf(sample_buf + sample_off, sizeof(sample_buf) - sample_off, " | ");
-                }
-                if (sample_off >= 0 && sample_off < (int) sizeof(sample_buf)) {
-                    sample_off += std::snprintf(
-                            sample_buf + sample_off,
-                            sizeof(sample_buf) - sample_off,
-                            "c%lld native=%g ref=%g abs=%g",
-                            (long long) out_col,
-                            (double) sample_native_v,
-                            sample_ref,
-                            sample_abs_err);
-                }
+                ggml_cuda_nvfp4_log_append_validate_sample(
+                        sample_buf, sizeof(sample_buf), sample_off,
+                        out_col, (double) sample_native_v, sample_ref, sample_abs_err);
             }
 
-            GGML_LOG_WARN(
-                    "%s: native validate %s sampled row0: %s (max_abs=%g at_col=%lld)\n",
-                    __func__,
-                    ggml_get_name(dst),
-                    sample_buf,
-                    max_sample_abs_err,
-                    (long long) max_sample_col);
+            ggml_cuda_nvfp4_log_validate_sampled_row(dst, sample_buf, max_sample_abs_err, max_sample_col);
 
             enum scale_probe_mode {
                 SCALE_PROBE_CURRENT_TILED = 0,
                 SCALE_PROBE_LINEAR = 1,
                 SCALE_PROBE_TRANSPOSED_LINEAR = 2,
                 SCALE_PROBE_TRANSPOSED_TILED = 3,
-            };
-
-            auto scale_probe_mode_name = [&](scale_probe_mode mode) {
-                switch (mode) {
-                    case SCALE_PROBE_CURRENT_TILED:     return "cur";
-                    case SCALE_PROBE_LINEAR:            return "lin";
-                    case SCALE_PROBE_TRANSPOSED_LINEAR: return "tlin";
-                    case SCALE_PROBE_TRANSPOSED_TILED:  return "ttile";
-                    default:                            return "unknown";
-                }
             };
 
             auto load_src0_repacked_col = [&](int64_t out_col, scale_probe_mode mode, std::vector<block_nvfp4> & out_blocks) {
@@ -1785,36 +1534,20 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                         CUDA_CHECK(cudaMemcpyAsync(&actual_v, probe_out_ptr, sizeof(actual_v), cudaMemcpyDeviceToHost, stream));
                         CUDA_CHECK(cudaStreamSynchronize(stream));
 
-                        GGML_LOG_WARN(
-                                "%s: src0-focus %s %s r=%lld c=%lld actual=%g "
-                                "ref_src=%g abs_src=%g | "
-                                "%s=%g abs=%g w=%g | "
-                                "%s=%g abs=%g w=%g | "
-                                "%s=%g abs=%g w=%g | "
-                                "%s=%g abs=%g w=%g\n",
-                                __func__,
-                                ggml_get_name(dst),
+                        ggml_cuda_nvfp4_log_src0_focus(
+                                dst,
                                 probe_tag,
-                                (long long) row,
-                                (long long) out_col,
+                                row,
+                                out_col,
                                 (double) actual_v,
                                 ref_src,
-                                fabs((double) actual_v - ref_src),
-                                scale_probe_mode_name(SCALE_PROBE_CURRENT_TILED),
                                 ref_cur,
-                                fabs((double) actual_v - ref_cur),
-                                weight_max_abs_cur,
-                                scale_probe_mode_name(SCALE_PROBE_LINEAR),
                                 ref_lin,
-                                fabs((double) actual_v - ref_lin),
-                                weight_max_abs_lin,
-                                scale_probe_mode_name(SCALE_PROBE_TRANSPOSED_LINEAR),
                                 ref_tlin,
-                                fabs((double) actual_v - ref_tlin),
-                                weight_max_abs_tlin,
-                                scale_probe_mode_name(SCALE_PROBE_TRANSPOSED_TILED),
                                 ref_ttile,
-                                fabs((double) actual_v - ref_ttile),
+                                weight_max_abs_cur,
+                                weight_max_abs_lin,
+                                weight_max_abs_tlin,
                                 weight_max_abs_ttile);
 
                         char group_buf[512];
@@ -1825,30 +1558,16 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                                 continue;
                             }
                             const double ref_group = ref_from(group_deq[group], x_roundtrip_row);
-                            group_off += std::snprintf(
-                                    group_buf + group_off,
-                                    sizeof(group_buf) - group_off,
-                                    "%sg%d%s=%g abs=%g w=%g",
-                                    group_off > 0 ? " | " : "",
-                                    group,
-                                    group == cur_group ? "*" : "",
-                                    ref_group,
-                                    fabs((double) actual_v - ref_group),
-                                    group_weight_max_abs[group]);
+                            ggml_cuda_nvfp4_log_append_src0_focus_group(
+                                    group_buf, sizeof(group_buf), group_off,
+                                    group, group == cur_group, ref_group,
+                                    fabs((double) actual_v - ref_group), group_weight_max_abs[group]);
                             if (group_off >= (int) sizeof(group_buf)) {
                                 break;
                             }
                         }
-                        GGML_LOG_WARN(
-                                "%s: src0-focus-groups %s %s r=%lld c=%lld cur_group=%d pos=%lld %s\n",
-                                __func__,
-                                ggml_get_name(dst),
-                                probe_tag,
-                                (long long) row,
-                                (long long) out_col,
-                                cur_group,
-                                (long long) tile_pos,
-                                group_buf);
+                        ggml_cuda_nvfp4_log_src0_focus_groups(
+                                dst, probe_tag, row, out_col, cur_group, tile_pos, group_buf);
                     }
                 }
             };
@@ -2013,30 +1732,19 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 int selective_off = 0;
 
                 for (int64_t ib : top_ref_idx) {
-                    top_ref_off += std::snprintf(
-                            top_ref_buf + top_ref_off,
-                            sizeof(top_ref_buf) - top_ref_off,
-                            "%sib%lld=%g(e=%u)",
-                            top_ref_off > 0 ? " | " : "",
-                            (long long) ib,
-                            block_ref[(size_t) ib],
-                            (unsigned) w_src_blocks[(size_t) ib].e);
+                    ggml_cuda_nvfp4_log_append_top_ref(
+                            top_ref_buf, sizeof(top_ref_buf), top_ref_off,
+                            ib, block_ref[(size_t) ib], w_src_blocks[(size_t) ib].e);
                     if (top_ref_off >= (int) sizeof(top_ref_buf)) {
                         break;
                     }
                 }
 
                 for (int64_t ib : top_missing_a_idx) {
-                    top_missing_a_off += std::snprintf(
-                            top_missing_a_buf + top_missing_a_off,
-                            sizeof(top_missing_a_buf) - top_missing_a_off,
-                            "%sib%lld=d%g(ref=%g noA=%g e=%u)",
-                            top_missing_a_off > 0 ? " | " : "",
-                            (long long) ib,
-                            block_missing_a[(size_t) ib],
-                            block_ref[(size_t) ib],
-                            block_no_a[(size_t) ib],
-                            (unsigned) w_src_blocks[(size_t) ib].e);
+                    ggml_cuda_nvfp4_log_append_top_missing_a(
+                            top_missing_a_buf, sizeof(top_missing_a_buf), top_missing_a_off,
+                            ib, block_missing_a[(size_t) ib], block_ref[(size_t) ib],
+                            block_no_a[(size_t) ib], w_src_blocks[(size_t) ib].e);
                     if (top_missing_a_off >= (int) sizeof(top_missing_a_buf)) {
                         break;
                     }
@@ -2135,23 +1843,18 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                         }
                     }
 
-                    selective_off += std::snprintf(
-                            selective_buf + selective_off,
-                            sizeof(selective_buf) - selective_off,
-                            "%sib%lld missA=%g abs=%g best_g%d=%g abs=%g best_inner_ib%lld=%g abs=%g "
-                            "best_e=%u out=%g abs=%g ratio=%g block_ref=%g block_g=%g block_inner=%g block_e=%g "
-                            "e=%u inner_e=%u",
-                            selective_off > 0 ? " | " : "",
-                            (long long) ib,
+                    ggml_cuda_nvfp4_log_append_selective(
+                            selective_buf, sizeof(selective_buf), selective_off,
+                            ib,
                             missing_a_out,
                             missing_a_abs,
                             best_group,
                             best_group_out,
                             best_group_abs,
-                            (long long) best_inner_src,
+                            best_inner_src,
                             best_inner_out,
                             best_inner_abs,
-                            (unsigned) best_e_byte,
+                            best_e_byte,
                             best_e_out,
                             best_e_abs,
                             block_ref[(size_t) ib] != 0.0 ? (best_e_block / block_ref[(size_t) ib]) : NAN,
@@ -2159,87 +1862,38 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                             best_group_block,
                             best_inner_block,
                             best_e_block,
-                            (unsigned) w_src_blocks[(size_t) ib].e,
-                            (unsigned) best_inner_e);
+                            w_src_blocks[(size_t) ib].e,
+                            best_inner_e);
                     if (selective_off >= (int) sizeof(selective_buf)) {
                         break;
                     }
                 }
 
                 for (int i = 0; i < 3 && i < (int) top_pos_ref_idx.size(); ++i) {
-                    attenuation_off += std::snprintf(
-                            attenuation_buf + attenuation_off,
-                            sizeof(attenuation_buf) - attenuation_off,
-                            "%stop%d fit=%g noA_ratio=%g",
-                            attenuation_off > 0 ? " | " : "",
-                            i + 1,
-                            top_pos_fit_factor[i],
+                    ggml_cuda_nvfp4_log_append_attenuation(
+                            attenuation_buf, sizeof(attenuation_buf), attenuation_off,
+                            i + 1, top_pos_fit_factor[i],
                             top_pos_ref_cum[i] != 0.0 ? (top_pos_no_a_cum[i] / top_pos_ref_cum[i]) : NAN);
                     if (attenuation_off >= (int) sizeof(attenuation_buf)) {
                         break;
                     }
                 }
 
-                GGML_LOG_WARN(
-                        "%s: src0-block-focus %s %s r=%lld c=%lld actual=%g ref=%g deficit=%g "
-                        "top_pos_needed=%d top_pos_cum=%g\n",
-                        __func__,
-                        ggml_get_name(dst),
+                ggml_cuda_nvfp4_log_src0_block_focus(
+                        dst,
                         probe_tag,
-                        (long long) row,
-                        (long long) out_col,
+                        row,
+                        out_col,
                         (double) actual_v,
                         ref_total,
                         deficit,
                         top_pos_needed,
-                        top_pos_cum);
-                GGML_LOG_WARN(
-                        "%s: src0-block-focus %s %s missingA combos "
-                        "top1=%g abs=%g | top2=%g abs=%g | top3=%g abs=%g\n",
-                        __func__,
-                        ggml_get_name(dst),
-                        probe_tag,
-                        top_missing_a_ref[0],
-                        fabs((double) actual_v - top_missing_a_ref[0]),
-                        top_missing_a_ref[1],
-                        fabs((double) actual_v - top_missing_a_ref[1]),
-                        top_missing_a_ref[2],
-                        fabs((double) actual_v - top_missing_a_ref[2]));
-                GGML_LOG_WARN(
-                        "%s: src0-block-focus %s %s signFlip combos "
-                        "top1=%g abs=%g | top2=%g abs=%g | top3=%g abs=%g\n",
-                        __func__,
-                        ggml_get_name(dst),
-                        probe_tag,
-                        top_sign_flip_ref[0],
-                        fabs((double) actual_v - top_sign_flip_ref[0]),
-                        top_sign_flip_ref[1],
-                        fabs((double) actual_v - top_sign_flip_ref[1]),
-                        top_sign_flip_ref[2],
-                        fabs((double) actual_v - top_sign_flip_ref[2]));
-                GGML_LOG_WARN(
-                        "%s: src0-block-focus %s %s attenuation-fit %s\n",
-                        __func__,
-                        ggml_get_name(dst),
-                        probe_tag,
-                        attenuation_buf);
-                GGML_LOG_WARN(
-                        "%s: src0-block-focus %s %s top_ref=%s\n",
-                        __func__,
-                        ggml_get_name(dst),
-                        probe_tag,
-                        top_ref_buf);
-                GGML_LOG_WARN(
-                        "%s: src0-block-focus %s %s top_missing_a=%s\n",
-                        __func__,
-                        ggml_get_name(dst),
-                        probe_tag,
-                        top_missing_a_buf);
-                GGML_LOG_WARN(
-                        "%s: src0-block-focus %s %s selective=%s\n",
-                        __func__,
-                        ggml_get_name(dst),
-                        probe_tag,
+                        top_pos_cum,
+                        top_missing_a_ref,
+                        top_sign_flip_ref,
+                        attenuation_buf,
+                        top_ref_buf,
+                        top_missing_a_buf,
                         selective_buf);
             };
 

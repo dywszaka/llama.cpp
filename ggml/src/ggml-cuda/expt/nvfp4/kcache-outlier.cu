@@ -1,12 +1,11 @@
 #include "kcache-outlier.cuh"
 
 #include "../../common.cuh"
+#include "nvfp4-log.cuh"
 #include "ggml-impl.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <vector>
 
 namespace {
 
@@ -410,12 +409,6 @@ static __global__ void k_f16_set_rows_compact_outliers(
     }
 }
 
-static bool can_copy_counts_for_log(cudaStream_t stream) {
-    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
-    const cudaError_t err = cudaStreamIsCapturing(stream, &status);
-    return err == cudaSuccess && status == cudaStreamCaptureStatusNone;
-}
-
 } // namespace
 
 bool ggml_cuda_nvfp4_kcache_outlier_enabled() {
@@ -520,37 +513,10 @@ void ggml_cuda_nvfp4_kcache_outlier_extract(
         CUDA_CHECK(cudaGetLastError());
     }
 
-    if (ggml_cuda_nvfp4_kcache_outlier_log_enabled() && can_copy_counts_for_log(stream)) {
-        std::vector<int64_t> dst_rows_h((size_t) ne01);
-        std::vector<int32_t> counts_h((size_t) sidecar_rows);
-        CUDA_CHECK(cudaMemcpyAsync(dst_rows_h.data(), dst_rows, (size_t) ne01 * sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaMemcpyAsync(counts_h.data(), counts, (size_t) sidecar_rows * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-
-        int64_t total = 0;
-        int32_t max_count = 0;
-        int64_t overflow_rows = 0;
-        for (int64_t i = 0; i < ne01; ++i) {
-            const int64_t dst_row = dst_rows_h[(size_t) i];
-            if (dst_row < 0 || dst_row >= sidecar_rows) {
-                continue;
-            }
-            const int32_t c = counts_h[(size_t) dst_row];
-            total += c;
-            max_count = std::max(max_count, c);
-            overflow_rows += offsets != nullptr ? 0 : (c > max_outliers ? 1 : 0);
-        }
-
-        GGML_LOG_INFO(
-                "%s: rows=%lld threshold=%g stored_max=%lld compact_capacity=%lld total_outliers=%lld max_row_outliers=%d overflow_rows=%lld\n",
-                __func__,
-                (long long) ne01,
-                (double) threshold,
-                (long long) max_outliers,
-                (long long) compact_capacity,
-                (long long) total,
-                max_count,
-                (long long) overflow_rows);
+    if (ggml_cuda_nvfp4_kcache_outlier_log_enabled() && ggml_cuda_nvfp4_log_can_copy_from_stream(stream)) {
+        ggml_cuda_nvfp4_log_kcache_outlier_counts(
+                __func__, dst_rows, counts, offsets,
+                ne01, dst_rows_stride, sidecar_rows, max_outliers, compact_capacity, threshold, stream);
     }
 }
 
@@ -615,37 +581,10 @@ void ggml_cuda_f16_kcache_outlier_set_rows(
         CUDA_CHECK(cudaGetLastError());
     }
 
-    if (ggml_cuda_f16_kcache_outlier_log_enabled() && can_copy_counts_for_log(stream)) {
-        std::vector<int64_t> dst_rows_h((size_t) ne01);
-        std::vector<int32_t> counts_h((size_t) sidecar_rows);
-        CUDA_CHECK(cudaMemcpyAsync(dst_rows_h.data(), dst_rows, (size_t) ne01 * sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaMemcpyAsync(counts_h.data(), counts, (size_t) sidecar_rows * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-
-        int64_t total = 0;
-        int32_t max_count = 0;
-        int64_t overflow_rows = 0;
-        for (int64_t i = 0; i < ne01; ++i) {
-            const int64_t dst_row = dst_rows_h[(size_t) i];
-            if (dst_row < 0 || dst_row >= sidecar_rows) {
-                continue;
-            }
-            const int32_t c = counts_h[(size_t) dst_row];
-            total += c;
-            max_count = std::max(max_count, c);
-            overflow_rows += offsets != nullptr ? 0 : (c > max_outliers ? 1 : 0);
-        }
-
-        GGML_LOG_INFO(
-                "%s: rows=%lld threshold=%g stored_max=%lld compact_capacity=%lld total_outliers=%lld max_row_outliers=%d overflow_rows=%lld\n",
-                __func__,
-                (long long) ne01,
-                (double) threshold,
-                (long long) max_outliers,
-                (long long) compact_capacity,
-                (long long) total,
-                max_count,
-                (long long) overflow_rows);
+    if (ggml_cuda_f16_kcache_outlier_log_enabled() && ggml_cuda_nvfp4_log_can_copy_from_stream(stream)) {
+        ggml_cuda_nvfp4_log_kcache_outlier_counts(
+                __func__, dst_rows, counts, offsets,
+                ne01, dst_rows_stride, sidecar_rows, max_outliers, compact_capacity, threshold, stream);
     }
 }
 
