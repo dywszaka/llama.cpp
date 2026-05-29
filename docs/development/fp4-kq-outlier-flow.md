@@ -166,10 +166,8 @@ for col in 0 .. ne00-1:
 - 如果 `count[dst_row] > max_outliers`，说明 sidecar 槽位溢出，只保存了前
   `max_outliers` 个 outlier。
 - `value` 保存的是原始 signed F32 K 值。
-- `residual_amax` 只统计非 outlier 值。默认 outlier NVFP4 K 写入仍然用它
-  计算 per-row global scale；只有打开
-  `LLAMA_NVFP4_KCACHE_OUTLIER_TENSOR_SCALE=1` 时，K 写入才改用 threshold
-  作为 per-tensor amax。
+- `residual_amax` 只统计非 outlier 值。启用 NVFP4 K-cache outlier 后，K 写入
+  默认使用 threshold 作为 per-tensor amax。
 
 ## 4. K Residual 的 NVFP4 量化
 
@@ -185,8 +183,8 @@ xi = abs(raw_xi) > threshold ? 0.0f : raw_xi
 
 也就是说，被 sidecar 抽走的 outlier，在主 K cache 中写成 `0`。
 
-然后对 residual row 做 NVFP4 量化。默认逻辑和原始 NVFP4 K cache 一样，按
-row residual amax 计算：
+然后对 residual row 做 NVFP4 量化。原始 NVFP4 K cache 会按 row residual
+amax 计算：
 
 ```text
 global_scale = 1344 / residual_amax[row]
@@ -194,8 +192,8 @@ block_scale  = quantize_e4m3(global_scale * block_absmax / 6)
 fp4_code     = nearest_nvfp4_code(xi * global_scale / block_scale)
 ```
 
-打开 `LLAMA_NVFP4_KCACHE_OUTLIER_TENSOR_SCALE=1` 后，K 写入 cache 使用
-threshold 作为 per-tensor amax，所有写入 row 共用同一个 global scale：
+启用 `LLAMA_NVFP4_KCACHE_OUTLIER=1` 后，K 写入 cache 使用 threshold 作为
+per-tensor amax，所有写入 row 共用同一个 global scale：
 
 ```text
 global_scale = 1344 / threshold
@@ -209,13 +207,13 @@ fp4_code     = nearest_nvfp4_code(xi * global_scale / block_scale)
 - block 内每 16 个值共享一个 E4M3 scale byte；
 - FP4 数据本身按 2 个 4-bit 值打包到 1 byte。
 
-同时写入 K scale sidecar。默认：
+同时写入 K scale sidecar。原始 per-row 模式：
 
 ```text
 k_scale[dst_row] = residual_amax[row] / 1344
 ```
 
-tensor-scale 模式：
+NVFP4 K-cache outlier 模式：
 
 ```text
 k_scale[dst_row] = threshold / 1344
@@ -244,7 +242,7 @@ Q_nvfp4[row]       = quantize_nvfp4(Q_f32[row], global_scale_q)
 ```
 
 当 K operand 绑定了 NVFP4 K-cache outlier sidecar 且
-`LLAMA_NVFP4_KCACHE_OUTLIER_TENSOR_SCALE=1` 时，Q 改为对当前 Q 矩阵计算一个
+`LLAMA_NVFP4_KCACHE_OUTLIER=1` 时，Q 改为对当前 Q 矩阵计算一个
 动态 per-tensor amax，并用同一个 global scale 量化所有 Q row：
 
 ```text

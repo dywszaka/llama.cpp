@@ -653,7 +653,6 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     float global_scale = ggml_cuda_nvfp4_input_global_scale(dst, &used_dynamic_scale);
     const bool use_outlier_q_tensor_scale =
             used_dynamic_scale &&
-            ggml_cuda_nvfp4_kcache_outlier_tensor_scale_enabled() &&
             ggml_tensor_get_nvfp4_kcache_outlier_counts(src0) != nullptr &&
             ggml_tensor_get_nvfp4_kcache_outlier_indices(src0) != nullptr &&
             ggml_tensor_get_nvfp4_kcache_outlier_values(src0) != nullptr;

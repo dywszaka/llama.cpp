@@ -207,7 +207,7 @@ static void ggml_cuda_set_rows_nvfp4_common(
     const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(dst);
     const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(dst);
     const bool use_outliers = outlier_counts != nullptr && outlier_indices != nullptr && outlier_values != nullptr;
-    const bool use_tensor_scale = use_outliers && ggml_cuda_nvfp4_kcache_outlier_tensor_scale_enabled();
+    const bool use_tensor_scale = use_outliers;
     if (use_outliers) {
         GGML_ASSERT(outlier_counts->type == GGML_TYPE_I32);
         GGML_ASSERT(outlier_indices->type == GGML_TYPE_I32);

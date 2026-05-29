@@ -41,10 +41,8 @@ positions are quantized as zero, and the extracted signed F32 values are added
 back into KQ by multiplying them with the corresponding pre-quantization F32 Q
 values. By default, residual K cache quantization keeps the original per-row
 global scale based on residual row amax, and dynamic Q quantization keeps its
-original per-row amax behavior.
-
-Set `LLAMA_NVFP4_KCACHE_OUTLIER_TENSOR_SCALE=1` to use the experimental
-per-tensor scale mode. In that mode, the residual NVFP4 K cache uses the
+original per-row amax behavior. In the NVFP4 K-cache outlier path, outlier
+sidecar tensors are bound and residual K cache quantization instead uses the
 threshold as the per-tensor amax:
 
 ```text
@@ -56,16 +54,6 @@ per-tensor amax across the active Q matrix and derives its own global scale from
 that value. Q does not use the K outlier threshold for this scale.
 
 Initial scope: CUDA NVFP4 K-cache, non-flash-attention KQ.
-
-### `LLAMA_NVFP4_KCACHE_OUTLIER_TENSOR_SCALE`
-
-Enables the experimental tensor-scale variant for NVFP4 K-cache outliers.
-Default: off.
-
-When off, K residual quantization uses the original per-row residual amax and Q
-dynamic quantization uses the original per-row Q amax. When on, K residual
-quantization uses the threshold-derived per-tensor scale, and Q dynamic
-quantization uses one runtime per-tensor amax across the active Q matrix.
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD`
 

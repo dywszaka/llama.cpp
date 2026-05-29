@@ -12,7 +12,6 @@ static constexpr float GGML_CUDA_NVFP4_KCACHE_OUTLIER_GLOBAL_SCALE_MAX = 1344.0f
 
 bool ggml_cuda_nvfp4_kcache_outlier_enabled();
 bool ggml_cuda_nvfp4_kcache_outlier_log_enabled();
-bool ggml_cuda_nvfp4_kcache_outlier_tensor_scale_enabled();
 float ggml_cuda_nvfp4_kcache_outlier_threshold();
 int64_t ggml_cuda_nvfp4_kcache_outlier_max();
 

@@ -421,10 +421,6 @@ bool ggml_cuda_nvfp4_kcache_outlier_log_enabled() {
     return value;
 }
 
-bool ggml_cuda_nvfp4_kcache_outlier_tensor_scale_enabled() {
-    return env_flag_enabled("LLAMA_NVFP4_KCACHE_OUTLIER_TENSOR_SCALE");
-}
-
 float ggml_cuda_nvfp4_kcache_outlier_threshold() {
     static const float value = env_float_or_default("LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD", 16.0f);
     return value;
