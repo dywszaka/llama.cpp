@@ -191,6 +191,8 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     const float * src0_d   = (const float *)src0->data;
     const int64_t * src1_d = (const int64_t *)src1->data;
+    float kcache_outlier_threshold = 0.0f;
+    memcpy(&kcache_outlier_threshold, &dst->op_params[0], sizeof(kcache_outlier_threshold));
 
     cudaStream_t stream = ctx.stream();
     const ggml_cuda_set_rows_params params = {
@@ -200,6 +202,7 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         nb01, nb02, nb03,
         nb10, nb11, nb12,
         nb1, nb2, nb3,
+        kcache_outlier_threshold,
         stream,
     };
 
@@ -255,7 +258,7 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                     outlier_counts->ne[0],
                     outlier_indices->ne[0],
                     outlier_offsets != nullptr ? outlier_indices->ne[0] : outlier_indices->ne[0],
-                    ggml_cuda_f16_kcache_outlier_threshold(),
+                    params.kcache_outlier_threshold > 0.0f ? params.kcache_outlier_threshold : ggml_cuda_f16_kcache_outlier_threshold(),
                     stream);
         } else {
             set_rows_cuda(

@@ -65,6 +65,16 @@ The predicate is:
 abs(K) > LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD
 ```
 
+### `LLAMA_NVFP4_KCACHE_OUTLIER_LAYER_THRESHOLDS`
+
+Optional comma-separated per-layer absolute-value thresholds for NVFP4 K-cache
+outlier extraction. Default: unset.
+
+When set, layer `i` uses entry `i` from this list. Layers beyond the provided
+entries fall back to `LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD`. This switch only
+affects NVFP4 K-cache outlier set_rows extraction and residual K quantization;
+it is ignored for F16 K-cache outliers.
+
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_MAX`
 
 Maximum number of outlier values stored per K-cache row. Default: `32`.
@@ -94,8 +104,21 @@ Default: `0.004`.
 The allocated pool capacity per layer and stream is:
 
 ```text
-max(kv_size, ceil(kv_size * n_embd_k_gqa * ratio))
+max(LLAMA_NVFP4_KCACHE_OUTLIER_MIN_CAPACITY,
+    ceil(kv_size * n_embd_k_gqa * ratio))
 ```
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_MIN_CAPACITY`
+
+Minimum compact outlier pool entries allocated per layer and stream. Default:
+`kv_size`.
+
+Set this to a smaller value for capacity-ratio experiments that need the actual
+pool size to match the ratio-derived capacity. For example, with `n_ctx=512`,
+`n_embd_k_gqa=1024`, and
+`LLAMA_NVFP4_KCACHE_OUTLIER_CAPACITY_RATIO=0.0003108978271484375`, setting this
+to `1` makes the allocated compact capacity `163` entries instead of the
+default minimum of `512`.
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_LOG`
 
@@ -146,6 +169,12 @@ Default: off. Semantics match `LLAMA_NVFP4_KCACHE_OUTLIER_COMPACT`.
 Fraction of dense K-cache elements reserved as compact F16 outlier pool entries.
 Default: `0.004`. Capacity calculation matches
 `LLAMA_NVFP4_KCACHE_OUTLIER_CAPACITY_RATIO`.
+
+### `LLAMA_F16_KCACHE_OUTLIER_MIN_CAPACITY`
+
+Minimum compact outlier pool entries allocated per layer and stream for the F16
+K-cache outlier sidecar. Default: `kv_size`. Semantics match
+`LLAMA_NVFP4_KCACHE_OUTLIER_MIN_CAPACITY`.
 
 ### `LLAMA_F16_KCACHE_OUTLIER_LOG`
 

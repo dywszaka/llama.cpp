@@ -27,6 +27,8 @@ struct ggml_cuda_set_rows_params {
     size_t nb2;
     size_t nb3;
 
+    float kcache_outlier_threshold;
+
     cudaStream_t stream;
 };
 

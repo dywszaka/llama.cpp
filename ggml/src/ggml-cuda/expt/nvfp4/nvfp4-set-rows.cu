@@ -208,6 +208,9 @@ static void ggml_cuda_set_rows_nvfp4_common(
     const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(dst);
     const bool use_outliers = outlier_counts != nullptr && outlier_indices != nullptr && outlier_values != nullptr;
     const bool use_tensor_scale = use_outliers;
+    const float outlier_threshold = p.kcache_outlier_threshold > 0.0f
+            ? p.kcache_outlier_threshold
+            : ggml_cuda_nvfp4_kcache_outlier_threshold();
     if (use_outliers) {
         GGML_ASSERT(outlier_counts->type == GGML_TYPE_I32);
         GGML_ASSERT(outlier_indices->type == GGML_TYPE_I32);
@@ -243,7 +246,7 @@ static void ggml_cuda_set_rows_nvfp4_common(
                     outlier_counts->ne[0],
                     outlier_indices->ne[0],
                     outlier_offsets != nullptr ? outlier_indices->ne[0] : outlier_indices->ne[0],
-                    ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                    outlier_threshold,
                     p.stream);
         } else {
             k_abs_max_f32_rows<<<(int) p.ne01, CUDA_SET_ROWS_BLOCK_SIZE, 0, p.stream>>>(
@@ -265,7 +268,7 @@ static void ggml_cuda_set_rows_nvfp4_common(
                     p.nb10/sizeof(int64_t),
                     p.nb1,
                     amax_d.get(),
-                    ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                    outlier_threshold,
                     use_tensor_scale,
                     use_outliers);
         } else {
@@ -278,7 +281,7 @@ static void ggml_cuda_set_rows_nvfp4_common(
                     p.nb10/sizeof(int64_t),
                     p.nb1,
                     amax_d.get(),
-                    ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                    outlier_threshold,
                     use_tensor_scale,
                     use_outliers);
         }
@@ -291,7 +294,7 @@ static void ggml_cuda_set_rows_nvfp4_common(
                 p.ne10,
                 p.nb10/sizeof(int64_t),
                 amax_d.get(),
-                ggml_cuda_nvfp4_kcache_outlier_threshold(),
+                outlier_threshold,
                 use_tensor_scale);
         CUDA_CHECK(cudaGetLastError());
     }

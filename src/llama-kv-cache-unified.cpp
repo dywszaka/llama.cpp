@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cassert>
 #include <cmath>
+#include <cstring>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
@@ -59,6 +60,44 @@ static float llama_env_f32_or_default_local(const char * name, float default_val
     }
 
     return parsed;
+}
+
+static std::vector<float> llama_env_f32_csv_local(const char * name) {
+    const char * value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return {};
+    }
+
+    std::vector<float> result;
+    std::stringstream ss(value);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        char * end = nullptr;
+        const float parsed = std::strtof(item.c_str(), &end);
+        if (end == item.c_str() || !std::isfinite(parsed) || parsed <= 0.0f) {
+            return {};
+        }
+        result.push_back(parsed);
+    }
+
+    return result;
+}
+
+static float llama_nvfp4_kcache_outlier_threshold_for_layer_local(int32_t il, bool f16_kcache_outlier) {
+    const float default_threshold = f16_kcache_outlier
+            ? llama_env_f32_or_default_local("LLAMA_F16_KCACHE_OUTLIER_THRESHOLD", 16.0f)
+            : llama_env_f32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD", 16.0f);
+
+    if (f16_kcache_outlier) {
+        return default_threshold;
+    }
+
+    static const std::vector<float> thresholds = llama_env_f32_csv_local("LLAMA_NVFP4_KCACHE_OUTLIER_LAYER_THRESHOLDS");
+    if (il >= 0 && (size_t) il < thresholds.size()) {
+        return thresholds[(size_t) il];
+    }
+
+    return default_threshold;
 }
 
 static bool llama_nvfp4_parse_json_number_after_key(
@@ -182,10 +221,13 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                     : llama_env_f32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_CAPACITY_RATIO", 0.004f))
             : 0.0f;
     if (nvfp4_kcache_outlier_log) {
+        const std::vector<float> nvfp4_layer_thresholds = f16_kcache_outlier
+                ? std::vector<float>()
+                : llama_env_f32_csv_local("LLAMA_NVFP4_KCACHE_OUTLIER_LAYER_THRESHOLDS");
         static std::atomic<bool> logged(false);
         if (!logged.exchange(true)) {
             LLAMA_LOG_INFO(
-                    "%s: %s K-cache outlier sidecar enabled: threshold=%g max_outliers=%u compact=%d capacity_ratio=%g\n",
+                    "%s: %s K-cache outlier sidecar enabled: threshold=%g max_outliers=%u compact=%d capacity_ratio=%g layer_thresholds=%zu\n",
                     __func__,
                     f16_kcache_outlier ? "F16" : "NVFP4",
                     (double) (f16_kcache_outlier
@@ -193,7 +235,8 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                             : llama_env_f32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD", 16.0f)),
                     nvfp4_kcache_outlier_max,
                     nvfp4_kcache_outlier_compact ? 1 : 0,
-                    (double) nvfp4_kcache_outlier_capacity_ratio);
+                    (double) nvfp4_kcache_outlier_capacity_ratio,
+                    nvfp4_layer_thresholds.size());
         }
     }
 
@@ -334,7 +377,11 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                         : 0.004;
                 const uint64_t dense_entries = (uint64_t) kv_size * (uint64_t) n_embd_k_gqa;
                 const uint64_t ratio_capacity = (uint64_t) std::ceil((double) dense_entries * ratio);
-                const uint64_t min_capacity = (uint64_t) kv_size;
+                const uint64_t min_capacity = (uint64_t) llama_env_u32_or_default_local(
+                        f16_kcache_outlier
+                                ? "LLAMA_F16_KCACHE_OUTLIER_MIN_CAPACITY"
+                                : "LLAMA_NVFP4_KCACHE_OUTLIER_MIN_CAPACITY",
+                        kv_size);
                 const uint32_t outlier_capacity = (uint32_t) std::min<uint64_t>(
                         std::max<uint64_t>(ratio_capacity, min_capacity),
                         (uint64_t) std::numeric_limits<uint32_t>::max());
@@ -1595,6 +1642,10 @@ ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_
         }
 
         ggml_tensor * res = ggml_set_rows(ctx, k, k_cur, k_idxs);
+        if (nvfp4_kcache_outlier) {
+            const float threshold = llama_nvfp4_kcache_outlier_threshold_for_layer_local(il, k->type == GGML_TYPE_F16);
+            std::memcpy(&res->op_params[0], &threshold, sizeof(threshold));
+        }
         if (layers[ikv].k_scale) {
             ggml_tensor_set_nvfp4_scale(res, layers[ikv].k_scale);
         }
