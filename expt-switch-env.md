@@ -12,6 +12,27 @@ K cache is `GGML_TYPE_FP8_E4M3_E8M0_32`; the F32 Q operand is quantized to
 temporary FP8 block32 inside the native CUDA FP8 matmul path before cuBLASLt
 execution.
 
+### `LLAMA_KCACHE_HYBRID_FP8_E4M3_E8M0_32_LAYERS`
+
+Enables experimental per-layer hybrid K-cache storage where selected K-cache
+layers use `GGML_TYPE_FP8_E4M3_E8M0_32` while the remaining layers keep the
+configured `--cache-type-k`. Default: unset/off.
+
+Supported values:
+
+```text
+high_medium
+0,1,4,5,6,8,10,11,12,14,23,35
+```
+
+The `high_medium` alias maps to the stable threshold-16 NVFP4 K-cache outlier
+high and medium layers observed in the prompt-consistency experiment:
+`0,1,4,5,6,8,10,11,12,14,23,35`. When enabled, the selected layer K tensors are
+allocated as FP8(E4M3+E8M0 block32), so CUDA `set_rows` quantization and KQ
+matmul dispatch use the existing FP8 K-cache paths for those layers. This
+hybrid mode inherits the FP8 K-cache runtime limits: flash attention is not
+supported, and KQ/V offload must be enabled.
+
 ## NVFP4 CUDA Native Matmul
 
 ### `GGML_CUDA_NVFP4_BF16_QUANT`
@@ -107,6 +128,25 @@ The allocated pool capacity per layer and stream is:
 max(LLAMA_NVFP4_KCACHE_OUTLIER_MIN_CAPACITY,
     ceil(kv_size * n_embd_k_gqa * ratio))
 ```
+
+This value is ignored for layers covered by
+`LLAMA_NVFP4_KCACHE_OUTLIER_LAYER_CAPACITIES`.
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_LAYER_CAPACITIES`
+
+Optional comma-separated per-layer compact outlier pool capacities. Default:
+unset.
+
+When set, layer `i` uses entry `i` as the compact `index/value` pool capacity
+instead of the ratio-derived capacity. Layers beyond the provided entries fall
+back to `LLAMA_NVFP4_KCACHE_OUTLIER_CAPACITY_RATIO` and
+`LLAMA_NVFP4_KCACHE_OUTLIER_MIN_CAPACITY`. This switch only affects NVFP4
+compact K-cache outliers. Layers whose K cache is overridden to FP8 by
+`LLAMA_KCACHE_HYBRID_FP8_E4M3_E8M0_32_LAYERS` do not allocate NVFP4 outlier
+sidecars, so a `0` capacity entry for those layers consumes no outlier sidecar
+memory. NVFP4 layers that still allocate compact outlier sidecars clamp the
+configured capacity to at least `1`, because the compact CUDA kernels require a
+non-empty pool.
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_MIN_CAPACITY`
 

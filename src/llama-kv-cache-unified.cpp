@@ -16,6 +16,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -81,6 +82,69 @@ static std::vector<float> llama_env_f32_csv_local(const char * name) {
     }
 
     return result;
+}
+
+static std::vector<uint32_t> llama_env_u32_csv_local(const char * name) {
+    const char * value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return {};
+    }
+
+    std::vector<uint32_t> result;
+    std::stringstream ss(value);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        char * end = nullptr;
+        const unsigned long parsed = std::strtoul(item.c_str(), &end, 10);
+        if (end == item.c_str() || parsed > std::numeric_limits<uint32_t>::max()) {
+            return {};
+        }
+        result.push_back((uint32_t) parsed);
+    }
+
+    return result;
+}
+
+static std::set<uint32_t> llama_kcache_hybrid_fp8_high_medium_layers_local() {
+    return { 0, 1, 4, 5, 6, 8, 10, 11, 12, 14, 23, 35 };
+}
+
+static std::set<uint32_t> llama_kcache_hybrid_fp8_layers_local() {
+    const char * value = std::getenv("LLAMA_KCACHE_HYBRID_FP8_E4M3_E8M0_32_LAYERS");
+    if (value == nullptr || value[0] == '\0') {
+        return {};
+    }
+
+    if (std::strcmp(value, "high_medium") == 0) {
+        return llama_kcache_hybrid_fp8_high_medium_layers_local();
+    }
+
+    std::set<uint32_t> result;
+    std::stringstream ss(value);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        char * end = nullptr;
+        const unsigned long parsed = std::strtoul(item.c_str(), &end, 10);
+        if (end == item.c_str() || parsed > std::numeric_limits<uint32_t>::max()) {
+            return {};
+        }
+        result.insert((uint32_t) parsed);
+    }
+
+    return result;
+}
+
+static std::string llama_kcache_hybrid_fp8_layers_to_string_local(const std::set<uint32_t> & layers) {
+    std::ostringstream ss;
+    bool first = true;
+    for (const uint32_t layer : layers) {
+        if (!first) {
+            ss << ",";
+        }
+        ss << layer;
+        first = false;
+    }
+    return ss.str();
 }
 
 static float llama_nvfp4_kcache_outlier_threshold_for_layer_local(int32_t il, bool f16_kcache_outlier) {
@@ -194,6 +258,7 @@ llama_kv_cache_unified::llama_kv_cache_unified(
 
     type_v_cache = type_v;
     has_k_scale = type_k == GGML_TYPE_NVFP4 || type_k == GGML_TYPE_NVFP4_8;
+    kcache_hybrid_fp8_layers = llama_kcache_hybrid_fp8_layers_local();
     non_flash_fp8_e8m0 = (type_v == GGML_TYPE_FP8_E4M3_E8M0_32 ||
                           type_v == GGML_TYPE_FP8_E4M3_E8M0_16) && !v_trans;
     nvfp4_vcache = llama_vcache_nvfp4_type_supported(type_v);
@@ -220,6 +285,10 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                     ? llama_env_f32_or_default_local("LLAMA_F16_KCACHE_OUTLIER_CAPACITY_RATIO", 0.004f)
                     : llama_env_f32_or_default_local("LLAMA_NVFP4_KCACHE_OUTLIER_CAPACITY_RATIO", 0.004f))
             : 0.0f;
+    const std::vector<uint32_t> nvfp4_kcache_outlier_layer_capacities =
+            nvfp4_kcache_outlier_compact && !f16_kcache_outlier
+                    ? llama_env_u32_csv_local("LLAMA_NVFP4_KCACHE_OUTLIER_LAYER_CAPACITIES")
+                    : std::vector<uint32_t>();
     if (nvfp4_kcache_outlier_log) {
         const std::vector<float> nvfp4_layer_thresholds = f16_kcache_outlier
                 ? std::vector<float>()
@@ -227,7 +296,7 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         static std::atomic<bool> logged(false);
         if (!logged.exchange(true)) {
             LLAMA_LOG_INFO(
-                    "%s: %s K-cache outlier sidecar enabled: threshold=%g max_outliers=%u compact=%d capacity_ratio=%g layer_thresholds=%zu\n",
+                    "%s: %s K-cache outlier sidecar enabled: threshold=%g max_outliers=%u compact=%d capacity_ratio=%g layer_thresholds=%zu layer_capacities=%zu\n",
                     __func__,
                     f16_kcache_outlier ? "F16" : "NVFP4",
                     (double) (f16_kcache_outlier
@@ -236,8 +305,13 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                     nvfp4_kcache_outlier_max,
                     nvfp4_kcache_outlier_compact ? 1 : 0,
                     (double) nvfp4_kcache_outlier_capacity_ratio,
-                    nvfp4_layer_thresholds.size());
+                    nvfp4_layer_thresholds.size(),
+                    nvfp4_kcache_outlier_layer_capacities.size());
         }
+    }
+    if (!kcache_hybrid_fp8_layers.empty()) {
+        LLAMA_LOG_INFO("%s: hybrid FP8(E4M3+E8M0 block32) K-cache layers enabled: %s\n",
+                __func__, llama_kcache_hybrid_fp8_layers_to_string_local(kcache_hybrid_fp8_layers).c_str());
     }
 
     // TODO: this is temporary until we support passing reuse layer filters [KV_REUSE]
@@ -325,6 +399,13 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         // [TAG_V_CACHE_VARIABLE]
         const uint32_t n_embd_k_gqa =            hparams.n_embd_k_gqa(il);
         const uint32_t n_embd_v_gqa = !v_trans ? hparams.n_embd_v_gqa(il) : hparams.n_embd_v_gqa_max();
+        const ggml_type layer_type_k = kcache_hybrid_fp8_layers.count(il) != 0
+                ? GGML_TYPE_FP8_E4M3_E8M0_32
+                : type_k;
+        const bool layer_has_k_scale = layer_type_k == GGML_TYPE_NVFP4 || layer_type_k == GGML_TYPE_NVFP4_8;
+        const bool layer_nvfp4_kcache_outlier = nvfp4_kcache_outlier && (
+                (layer_type_k == GGML_TYPE_NVFP4 && !f16_kcache_outlier) ||
+                (layer_type_k == GGML_TYPE_F16   &&  f16_kcache_outlier));
         const uint32_t kv_size_v = use_nvfp4_vcache_layout() ? GGML_PAD(kv_size, 16u) : kv_size;
         const uint32_t n_v_scale = use_nvfp4_vcache_layout()
                 ? (use_nvfp4_vcache_single_global_scale() ? 1u : n_embd_v_gqa * (kv_size_v / 16u))
@@ -358,18 +439,18 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         ggml_tensor * k_outlier_index = nullptr;
         ggml_tensor * k_outlier_value = nullptr;
 
-        k = ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream);
+        k = ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa, kv_size, n_stream);
         if (use_nvfp4_vcache_layout()) {
             v = ggml_new_tensor_3d(ctx, type_v, kv_size_v, n_embd_v_gqa, n_stream);
         } else {
             v = ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream);
         }
 
-        if (has_k_scale) {
+        if (layer_has_k_scale) {
             k_scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (int64_t) kv_size * n_stream);
             ggml_format_name(k_scale, "cache_k_gscale_l%d", il);
         }
-        if (nvfp4_kcache_outlier) {
+        if (layer_nvfp4_kcache_outlier) {
             k_outlier_count = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t) kv_size * n_stream);
             if (nvfp4_kcache_outlier_compact) {
                 const double ratio = std::isfinite(nvfp4_kcache_outlier_capacity_ratio) && nvfp4_kcache_outlier_capacity_ratio > 0.0f
@@ -382,8 +463,11 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                                 ? "LLAMA_F16_KCACHE_OUTLIER_MIN_CAPACITY"
                                 : "LLAMA_NVFP4_KCACHE_OUTLIER_MIN_CAPACITY",
                         kv_size);
+                const uint64_t configured_capacity = !f16_kcache_outlier && (size_t) il < nvfp4_kcache_outlier_layer_capacities.size()
+                        ? (uint64_t) nvfp4_kcache_outlier_layer_capacities[(size_t) il]
+                        : std::max<uint64_t>(ratio_capacity, min_capacity);
                 const uint32_t outlier_capacity = (uint32_t) std::min<uint64_t>(
-                        std::max<uint64_t>(ratio_capacity, min_capacity),
+                        std::max<uint64_t>(configured_capacity, 1),
                         (uint64_t) std::numeric_limits<uint32_t>::max());
                 k_outlier_offset = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t) kv_size * n_stream);
                 k_outlier_cursor = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_stream);
@@ -515,9 +599,12 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         const size_t memory_size_k = size_k_bytes();
         const size_t memory_size_v = size_v_bytes();
 
+        const std::string k_type_name = kcache_hybrid_fp8_layers.empty()
+                ? std::string(ggml_type_name(layers.empty() ? GGML_TYPE_F16 : layers.front().k->type))
+                : std::string(ggml_type_name(type_k)) + "+fp8_e4m3_e8m0_32";
         LLAMA_LOG_INFO("%s: size = %7.2f MiB (%6u cells, %3d layers, %2u/%u seqs), K (%s): %7.2f MiB, V (%s): %7.2f MiB\n", __func__,
                 (float)(memory_size_k + memory_size_v) / (1024.0f * 1024.0f), kv_size, (int) layers.size(), n_seq_max, n_stream,
-                ggml_type_name(type_k), (float)memory_size_k / (1024.0f * 1024.0f),
+                k_type_name.c_str(), (float)memory_size_k / (1024.0f * 1024.0f),
                 ggml_type_name(type_v), (float)memory_size_v / (1024.0f * 1024.0f));
     }
 
