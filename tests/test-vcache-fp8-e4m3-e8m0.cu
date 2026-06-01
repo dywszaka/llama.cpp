@@ -3,6 +3,7 @@
 #include <ggml-cuda.h>
 
 #include "../ggml/src/ggml-common.h"
+#include "../ggml/src/ggml-cuda/common.cuh"
 #include "../ggml/src/ggml-quants.h"
 
 #include <cmath>
@@ -26,6 +27,79 @@ static bool almost_equal(float a, float b, float atol, float rtol) {
     const float diff = fabsf(a - b);
     const float tol = atol + rtol * fmaxf(fabsf(a), fabsf(b));
     return diff <= tol;
+}
+
+static __global__ void e4m3fn_decode_kernel(float * out) {
+    const int i = threadIdx.x;
+    if (i < 16) {
+        const uint8_t byte = (uint8_t) (i < 8 ? 0x78 + i : 0xF8 + (i - 8));
+        out[i] = ggml_cuda_e4m3_to_fp32(byte);
+    }
+}
+
+static bool test_cuda_e4m3fn_decode_max_exponent_values() {
+    const float expected_pos[8] = {
+        256.0f, 288.0f, 320.0f, 352.0f, 384.0f, 416.0f, 448.0f, NAN,
+    };
+
+    for (int i = 0; i < 8; ++i) {
+        const uint8_t pos_byte = (uint8_t) (0x78 + i);
+        const uint8_t neg_byte = (uint8_t) (0xF8 + i);
+        const float pos = ggml_cuda_e4m3_to_fp32(pos_byte);
+        const float neg = ggml_cuda_e4m3_to_fp32(neg_byte);
+
+        if (i == 7) {
+            if (!std::isnan(pos) || !std::isnan(neg)) {
+                std::fprintf(stderr, "e4m3fn NaN decode mismatch: pos=%f neg=%f\n", pos, neg);
+                return false;
+            }
+        } else {
+            if (pos != expected_pos[i] || neg != -expected_pos[i]) {
+                std::fprintf(stderr, "e4m3fn host decode mismatch: mantissa=%d pos=%f neg=%f expected=%f/%f\n",
+                        i, pos, neg, expected_pos[i], -expected_pos[i]);
+                return false;
+            }
+        }
+    }
+
+    float * dev = nullptr;
+    if (cudaMalloc(&dev, 16 * sizeof(float)) != cudaSuccess) {
+        std::fprintf(stderr, "e4m3fn decode test cudaMalloc failed\n");
+        return false;
+    }
+
+    e4m3fn_decode_kernel<<<1, 16>>>(dev);
+    const cudaError_t kernel_err = cudaGetLastError();
+    if (kernel_err != cudaSuccess) {
+        std::fprintf(stderr, "e4m3fn decode kernel launch failed: %s\n", cudaGetErrorString(kernel_err));
+        cudaFree(dev);
+        return false;
+    }
+
+    float got[16] = {};
+    const cudaError_t copy_err = cudaMemcpy(got, dev, sizeof(got), cudaMemcpyDeviceToHost);
+    cudaFree(dev);
+    if (copy_err != cudaSuccess) {
+        std::fprintf(stderr, "e4m3fn decode cudaMemcpy failed: %s\n", cudaGetErrorString(copy_err));
+        return false;
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        const float pos = got[i];
+        const float neg = got[i + 8];
+        if (i == 7) {
+            if (!std::isnan(pos) || !std::isnan(neg)) {
+                std::fprintf(stderr, "e4m3fn device NaN decode mismatch: pos=%f neg=%f\n", pos, neg);
+                return false;
+            }
+        } else if (pos != expected_pos[i] || neg != -expected_pos[i]) {
+            std::fprintf(stderr, "e4m3fn device decode mismatch: mantissa=%d pos=%f neg=%f expected=%f/%f\n",
+                    i, pos, neg, expected_pos[i], -expected_pos[i]);
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static std::vector<float> make_signal(size_t n, float amplitude, float bias, float phase) {
@@ -753,6 +827,9 @@ int main() {
 
     disable_cuda_truncation();
 
+    if (!test_cuda_e4m3fn_decode_max_exponent_values()) {
+        return 1;
+    }
     if (!test_block32_roundtrip()) {
         return 1;
     }

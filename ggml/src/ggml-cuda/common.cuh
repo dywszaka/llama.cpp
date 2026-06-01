@@ -607,12 +607,8 @@ static __host__ __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32(uint8_t 
             const uint32_t exp = 127 - 6 - shift;
             bits = sign | (exp << 23) | (man & 0x7) << 20;
         }
-    } else if (exponent == 0x0F) {
-        if (mantissa == 0x7) {
-            bits = sign | 0x7F800000 | (1u << 22); // NaN
-        } else {
-            bits = sign | 0x43E00000; // max finite 448.0f
-        }
+    } else if (exponent == 0x0F && mantissa == 0x7) {
+        bits = sign | 0x7F800000 | (1u << 22); // NaN
     } else {
         const uint32_t exp = (exponent - 7 + 127) << 23;
         const uint32_t man = mantissa << (23 - 3);
