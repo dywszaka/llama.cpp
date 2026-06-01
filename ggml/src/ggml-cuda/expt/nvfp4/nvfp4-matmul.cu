@@ -476,11 +476,12 @@ static void ggml_cuda_nvfp4_materialize_contiguous_matrix(
 
 } // namespace
 
-bool ggml_cuda_mul_mat_nvfp4_native(
+static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,
         const ggml_tensor * src1,
-        ggml_tensor * dst) {
+        ggml_tensor * dst,
+        bool apply_outlier_correction) {
 #if GGML_CUDA_HAS_CUBLASLT && GGML_CUDA_HAS_FP4 && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     GGML_ASSERT(src0 != nullptr);
     GGML_ASSERT(src1 != nullptr);
@@ -537,7 +538,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src0_slice, src0_contig, stream);
                 ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src1_slice, src1_contig, stream);
 
-                if (!ggml_cuda_mul_mat_nvfp4_native(ctx, &src0_slice, &src1_slice, &dst_slice)) {
+                if (!ggml_cuda_mul_mat_nvfp4_native_impl(ctx, &src0_slice, &src1_slice, &dst_slice, false)) {
                     return false;
                 }
 
@@ -1110,7 +1111,7 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 cudaMemcpyDeviceToDevice, stream));
     }
 
-    if (st == CUBLAS_STATUS_SUCCESS) {
+    if (st == CUBLAS_STATUS_SUCCESS && apply_outlier_correction) {
         const ggml_tensor * outlier_counts = ggml_tensor_get_nvfp4_kcache_outlier_counts(src0);
         const ggml_tensor * outlier_offsets = ggml_tensor_get_nvfp4_kcache_outlier_offsets(src0);
         const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(src0);
@@ -2501,6 +2502,15 @@ bool ggml_cuda_mul_mat_nvfp4_native(
     GGML_UNUSED(src0);
     GGML_UNUSED(src1);
     GGML_UNUSED(dst);
+    GGML_UNUSED(apply_outlier_correction);
     return false;
 #endif
+}
+
+bool ggml_cuda_mul_mat_nvfp4_native(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst) {
+    return ggml_cuda_mul_mat_nvfp4_native_impl(ctx, src0, src1, dst, true);
 }

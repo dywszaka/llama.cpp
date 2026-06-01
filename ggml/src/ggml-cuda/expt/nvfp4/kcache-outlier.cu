@@ -215,7 +215,7 @@ static __global__ void k_assign_compact_offsets(
     }
 
     const int32_t offset = atomicAdd(cursor, count);
-    offsets[dst_row] = offset < compact_capacity ? offset : -1;
+    offsets[dst_row] = ((int64_t) offset + count <= compact_capacity) ? offset : -1;
 }
 
 static __global__ void k_fill_compact_outliers(
@@ -296,6 +296,9 @@ static __global__ void k_apply_outlier_correction(
 
     const int32_t count = counts[kv_pos];
     const int64_t row_offset = offsets != nullptr ? (int64_t) offsets[kv_pos] : kv_pos * max_outliers;
+    if (offsets != nullptr && row_offset < 0) {
+        return;
+    }
     const int64_t row_limit = offsets != nullptr ? compact_capacity : row_offset + max_outliers;
     const int64_t row_capacity = row_limit - row_offset;
     const int64_t n = min((int64_t) count, row_capacity);
@@ -452,6 +455,7 @@ int64_t ggml_cuda_f16_kcache_outlier_max() {
 }
 
 void ggml_cuda_nvfp4_kcache_outlier_extract(
+        const char * target,
         const float * src,
         const int64_t * dst_rows,
         int32_t * counts,
@@ -482,6 +486,7 @@ void ggml_cuda_nvfp4_kcache_outlier_extract(
     if (offsets != nullptr) {
         GGML_ASSERT(cursor != nullptr);
         GGML_ASSERT(compact_capacity > 0);
+        CUDA_CHECK(cudaMemsetAsync(cursor, 0, sizeof(int32_t), stream));
         k_count_outliers<<<(int) ne01, block_size, 0, stream>>>(
                 src, dst_rows, counts, residual_amax,
                 ne00, ne01, src_stride, dst_rows_stride, sidecar_rows, threshold);
@@ -511,12 +516,13 @@ void ggml_cuda_nvfp4_kcache_outlier_extract(
 
     if (ggml_cuda_nvfp4_kcache_outlier_log_enabled() && ggml_cuda_nvfp4_log_can_copy_from_stream(stream)) {
         ggml_cuda_nvfp4_log_kcache_outlier_counts(
-                __func__, dst_rows, counts, offsets,
+                __func__, target, dst_rows, counts, offsets, cursor,
                 ne01, dst_rows_stride, sidecar_rows, max_outliers, compact_capacity, threshold, stream);
     }
 }
 
 void ggml_cuda_f16_kcache_outlier_set_rows(
+        const char * target,
         const float * src,
         const int64_t * dst_rows,
         half * dst,
@@ -550,6 +556,7 @@ void ggml_cuda_f16_kcache_outlier_set_rows(
     if (offsets != nullptr) {
         GGML_ASSERT(cursor != nullptr);
         GGML_ASSERT(compact_capacity > 0);
+        CUDA_CHECK(cudaMemsetAsync(cursor, 0, sizeof(int32_t), stream));
         k_count_outliers<<<(int) ne01, block_size, 0, stream>>>(
                 src, dst_rows, counts, nullptr,
                 ne00, ne01, src_stride, dst_rows_stride, sidecar_rows, threshold);
@@ -579,7 +586,7 @@ void ggml_cuda_f16_kcache_outlier_set_rows(
 
     if (ggml_cuda_f16_kcache_outlier_log_enabled() && ggml_cuda_nvfp4_log_can_copy_from_stream(stream)) {
         ggml_cuda_nvfp4_log_kcache_outlier_counts(
-                __func__, dst_rows, counts, offsets,
+                __func__, target, dst_rows, counts, offsets, cursor,
                 ne01, dst_rows_stride, sidecar_rows, max_outliers, compact_capacity, threshold, stream);
     }
 }

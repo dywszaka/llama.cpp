@@ -231,6 +231,7 @@ static void ggml_cuda_set_rows_nvfp4_common(
     if (p.ne01 > 0) {
         if (use_outliers) {
             ggml_cuda_nvfp4_kcache_outlier_extract(
+                    dst->name,
                     p.src0_d,
                     p.src1_d,
                     (int32_t *) outlier_counts->data,

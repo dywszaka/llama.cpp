@@ -27,9 +27,11 @@ void ggml_cuda_nvfp4_log_bf16_quant_once(const char * env, bool enabled) {
 
 void ggml_cuda_nvfp4_log_kcache_outlier_counts(
         const char * caller,
+        const char * target,
         const int64_t * dst_rows,
         const int32_t * counts,
         const int32_t * offsets,
+        const int32_t * cursor,
         int64_t ne01,
         int64_t dst_rows_stride,
         int64_t sidecar_rows,
@@ -41,8 +43,17 @@ void ggml_cuda_nvfp4_log_kcache_outlier_counts(
 
     std::vector<int64_t> dst_rows_h((size_t) ne01);
     std::vector<int32_t> counts_h((size_t) sidecar_rows);
+    std::vector<int32_t> offsets_h;
+    int32_t cursor_h = 0;
     CUDA_CHECK(cudaMemcpyAsync(dst_rows_h.data(), dst_rows, (size_t) ne01 * sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaMemcpyAsync(counts_h.data(), counts, (size_t) sidecar_rows * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    if (offsets != nullptr) {
+        offsets_h.resize((size_t) sidecar_rows);
+        CUDA_CHECK(cudaMemcpyAsync(offsets_h.data(), offsets, (size_t) sidecar_rows * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+        if (cursor != nullptr) {
+            CUDA_CHECK(cudaMemcpyAsync(&cursor_h, cursor, sizeof(cursor_h), cudaMemcpyDeviceToHost, stream));
+        }
+    }
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     int64_t total = 0;
@@ -56,16 +67,23 @@ void ggml_cuda_nvfp4_log_kcache_outlier_counts(
         const int32_t c = counts_h[(size_t) dst_row];
         total += c;
         max_count = std::max(max_count, c);
-        overflow_rows += offsets != nullptr ? 0 : (c > max_outliers ? 1 : 0);
+        if (offsets != nullptr) {
+            const int32_t offset = offsets_h[(size_t) dst_row];
+            overflow_rows += c > 0 && (offset < 0 || (int64_t) offset + c > compact_capacity) ? 1 : 0;
+        } else {
+            overflow_rows += c > max_outliers ? 1 : 0;
+        }
     }
 
     GGML_LOG_INFO(
-            "%s: rows=%lld threshold=%g stored_max=%lld compact_capacity=%lld total_outliers=%lld max_row_outliers=%d overflow_rows=%lld\n",
+            "%s: target=%s rows=%lld threshold=%g stored_max=%lld compact_capacity=%lld compact_used=%lld total_outliers=%lld max_row_outliers=%d overflow_rows=%lld\n",
             caller,
+            target != nullptr ? target : "(unknown)",
             (long long) ne01,
             (double) threshold,
             (long long) max_outliers,
             (long long) compact_capacity,
+            (long long) (offsets != nullptr ? cursor_h : 0),
             (long long) total,
             max_count,
             (long long) overflow_rows);

@@ -242,6 +242,7 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                 GGML_ASSERT(outlier_cursor->type == GGML_TYPE_I32);
             }
             ggml_cuda_f16_kcache_outlier_set_rows(
+                    dst->name,
                     src0_d,
                     src1_d,
                     (half *) dst->data,

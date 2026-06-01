@@ -50,6 +50,7 @@ float ggml_cuda_f16_kcache_outlier_threshold();
 int64_t ggml_cuda_f16_kcache_outlier_max();
 
 void ggml_cuda_nvfp4_kcache_outlier_extract(
+        const char * target,
         const float * src,
         const int64_t * dst_rows,
         int32_t * counts,
@@ -91,6 +92,7 @@ void ggml_cuda_nvfp4_kcache_outlier_apply_correction(
         cudaStream_t stream);
 
 void ggml_cuda_f16_kcache_outlier_set_rows(
+        const char * target,
         const float * src,
         const int64_t * dst_rows,
         half * dst,

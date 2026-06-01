@@ -78,7 +78,7 @@ static void test_extract_counts_positions_and_residual_amax() {
     CUDA_CHECK(cudaMemset(values_d, 0, (size_t) max_outliers * 8 * sizeof(float)));
 
     ggml_cuda_nvfp4_kcache_outlier_extract(
-            src_d, idx_d, counts_d, nullptr, nullptr, indices_d, values_d, amax_d,
+            "test_dense", src_d, idx_d, counts_d, nullptr, nullptr, indices_d, values_d, amax_d,
             k, rows, k, 1, 8, max_outliers, max_outliers, threshold, nullptr);
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -151,7 +151,7 @@ static void test_extract_compact_offsets_and_pool() {
     CUDA_CHECK(cudaMemset(values_d, 0, (size_t) compact_capacity * sizeof(float)));
 
     ggml_cuda_nvfp4_kcache_outlier_extract(
-            src_d, idx_d, counts_d, offsets_d, cursor_d, indices_d, values_d, amax_d,
+            "test_compact", src_d, idx_d, counts_d, offsets_d, cursor_d, indices_d, values_d, amax_d,
             k, rows, k, 1, sidecar_rows, compact_capacity, compact_capacity, threshold, nullptr);
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -181,6 +181,72 @@ static void test_extract_compact_offsets_and_pool() {
     require(nearly_equal(values[(size_t) off5 + 1], -19.0f), "compact row 5 second value");
     require(nearly_equal(values[(size_t) off2 + 0], -16.25f), "compact row 2 first value");
     require(nearly_equal(values[(size_t) off2 + 1], 23.0f), "compact row 2 second value");
+
+    CUDA_CHECK(cudaFree(src_d));
+    CUDA_CHECK(cudaFree(idx_d));
+    CUDA_CHECK(cudaFree(counts_d));
+    CUDA_CHECK(cudaFree(offsets_d));
+    CUDA_CHECK(cudaFree(cursor_d));
+    CUDA_CHECK(cudaFree(indices_d));
+    CUDA_CHECK(cudaFree(values_d));
+    CUDA_CHECK(cudaFree(amax_d));
+}
+
+static void test_extract_compact_requires_full_row_capacity() {
+    constexpr int64_t k = 16;
+    constexpr int64_t rows = 2;
+    constexpr int64_t sidecar_rows = 8;
+    constexpr int64_t compact_capacity = 3;
+    constexpr float threshold = 16.0f;
+
+    std::vector<float> src((size_t) rows * (size_t) k, 0.0f);
+    src[1] = 17.0f;
+    src[2] = 18.0f;
+    src[(size_t) k + 3] = 19.0f;
+    src[(size_t) k + 4] = 20.0f;
+    const int64_t idx_h[2] = { 0, 1 };
+
+    float * src_d = nullptr;
+    int64_t * idx_d = nullptr;
+    int32_t * counts_d = nullptr;
+    int32_t * offsets_d = nullptr;
+    int32_t * cursor_d = nullptr;
+    int32_t * indices_d = nullptr;
+    float * values_d = nullptr;
+    float * amax_d = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&src_d, src.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&idx_d, sizeof(idx_h)));
+    CUDA_CHECK(cudaMalloc(&counts_d, (size_t) sidecar_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&offsets_d, (size_t) sidecar_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&cursor_d, sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&indices_d, (size_t) compact_capacity * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&values_d, (size_t) compact_capacity * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&amax_d, (size_t) rows * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(src_d, src.data(), src.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(idx_d, idx_h, sizeof(idx_h), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(counts_d, 0, (size_t) sidecar_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(offsets_d, 0xff, (size_t) sidecar_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(cursor_d, 0x7f, sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(indices_d, 0, (size_t) compact_capacity * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(values_d, 0, (size_t) compact_capacity * sizeof(float)));
+
+    ggml_cuda_nvfp4_kcache_outlier_extract(
+            "test_compact_overflow", src_d, idx_d, counts_d, offsets_d, cursor_d, indices_d, values_d, amax_d,
+            k, rows, k, 1, sidecar_rows, compact_capacity, compact_capacity, threshold, nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<int32_t> counts((size_t) sidecar_rows);
+    std::vector<int32_t> offsets((size_t) sidecar_rows);
+    int32_t cursor = 0;
+    CUDA_CHECK(cudaMemcpy(counts.data(), counts_d, counts.size() * sizeof(int32_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(offsets.data(), offsets_d, offsets.size() * sizeof(int32_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&cursor, cursor_d, sizeof(cursor), cudaMemcpyDeviceToHost));
+
+    require(cursor == 4, "compact cursor should count all requested entries after reset");
+    require((counts[0] == 2 && offsets[0] == 0 && counts[1] == 0 && offsets[1] == -1) ||
+            (counts[1] == 2 && offsets[1] == 0 && counts[0] == 0 && offsets[0] == -1),
+            "compact extraction should store only rows that fully fit in capacity");
 
     CUDA_CHECK(cudaFree(src_d));
     CUDA_CHECK(cudaFree(idx_d));
@@ -307,6 +373,71 @@ static void test_apply_correction_filters_head() {
     CUDA_CHECK(cudaFree(kq_d));
 }
 
+static void test_apply_correction_compact_filters_gqa_head() {
+    constexpr int64_t head_dim = 4;
+    constexpr int64_t kv_len = 1;
+    constexpr int64_t q_len = 2;
+    constexpr int64_t q_heads = 4;
+    constexpr int64_t kv_heads = 2;
+    constexpr int64_t compact_capacity = 2;
+
+    std::vector<int32_t> counts = { 2 };
+    std::vector<int32_t> offsets = { 0 };
+    std::vector<int32_t> indices = { 1, (int32_t) head_dim + 2 };
+    std::vector<float> values = { 3.0f, 5.0f };
+    std::vector<float> q((size_t) head_dim * q_len * q_heads, 0.0f);
+    for (int64_t qh = 0; qh < q_heads; ++qh) {
+        for (int64_t qt = 0; qt < q_len; ++qt) {
+            for (int64_t d = 0; d < head_dim; ++d) {
+                q[(size_t) qh * q_len * head_dim + (size_t) qt * head_dim + (size_t) d] =
+                        10.0f * (float) qh + 1.0f * (float) qt + 0.25f * (float) d;
+            }
+        }
+    }
+    std::vector<float> kq((size_t) kv_len * q_len, 1.0f);
+
+    int32_t * counts_d = nullptr;
+    int32_t * offsets_d = nullptr;
+    int32_t * indices_d = nullptr;
+    float * values_d = nullptr;
+    float * q_d = nullptr;
+    float * kq_d = nullptr;
+    CUDA_CHECK(cudaMalloc(&counts_d, counts.size() * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&offsets_d, offsets.size() * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&indices_d, indices.size() * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&values_d, values.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&q_d, q.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&kq_d, kq.size() * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(counts_d, counts.data(), counts.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(offsets_d, offsets.data(), offsets.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(indices_d, indices.data(), indices.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(values_d, values.data(), values.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(q_d, q.data(), q.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(kq_d, kq.data(), kq.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+    ggml_cuda_nvfp4_kcache_outlier_apply_correction(
+            counts_d, offsets_d, indices_d, values_d, q_d + 2 * q_len * head_dim, kq_d, nullptr,
+            head_dim, kv_len, q_len, q_heads, kv_heads,
+            2, compact_capacity, compact_capacity,
+            1, head_dim, 1, kv_len,
+            nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(kq.data(), kq_d, kq.size() * sizeof(float), cudaMemcpyDeviceToHost));
+
+    for (int64_t qt = 0; qt < q_len; ++qt) {
+        const float qv = q[(size_t) 2 * q_len * head_dim + (size_t) qt * head_dim + 2];
+        require(nearly_equal(kq[(size_t) qt], 1.0f + 5.0f * qv), "compact correction should filter GQA KV head");
+    }
+
+    CUDA_CHECK(cudaFree(counts_d));
+    CUDA_CHECK(cudaFree(offsets_d));
+    CUDA_CHECK(cudaFree(indices_d));
+    CUDA_CHECK(cudaFree(values_d));
+    CUDA_CHECK(cudaFree(q_d));
+    CUDA_CHECK(cudaFree(kq_d));
+}
+
 static void test_apply_correction_compensates_for_downstream_k_scale() {
     constexpr int64_t head_dim = 4;
     constexpr int64_t kv_len = 1;
@@ -399,7 +530,7 @@ static void test_f16_set_rows_extracts_outliers_and_writes_residual() {
     CUDA_CHECK(cudaMemset(values_d, 0, (size_t) max_outliers * dst_rows * sizeof(float)));
 
     ggml_cuda_f16_kcache_outlier_set_rows(
-            src_d, idx_d, dst_d, counts_d, nullptr, nullptr, indices_d, values_d,
+            "test_f16", src_d, idx_d, dst_d, counts_d, nullptr, nullptr, indices_d, values_d,
             k, rows, k, 1, k, dst_rows, max_outliers, max_outliers, threshold, nullptr);
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -443,9 +574,11 @@ int main() {
 
     test_extract_counts_positions_and_residual_amax();
     test_extract_compact_offsets_and_pool();
+    test_extract_compact_requires_full_row_capacity();
     test_nvfp4_outlier_k_scale_mode_selects_row_or_threshold_amax();
     test_nvfp4_outlier_q_scale_uses_dynamic_tensor_amax();
     test_apply_correction_filters_head();
+    test_apply_correction_compact_filters_gqa_head();
     test_apply_correction_compensates_for_downstream_k_scale();
     test_f16_set_rows_extracts_outliers_and_writes_residual();
 
