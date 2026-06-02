@@ -180,14 +180,21 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     nvfp4_vcache_per_block_scale = nvfp4_vcache && v_trans && !nvfp4_vcache_layer_global_scale && llama_vcache_nvfp4_per_block_scale_enabled();
     llama_vcache_nvfp4_log_scale_mode_once(nvfp4_vcache && v_trans);
     nvfp4_kcache_outlier = type_k == GGML_TYPE_NVFP4;
+    const uint32_t * nvfp4_kcache_outlier_layer_capacities =
+            llama_nvfp4_kcache_outlier_layer_capacities_for_ctx(kv_size);
+    const size_t nvfp4_kcache_outlier_layer_capacity_count =
+            llama_nvfp4_kcache_outlier_layer_capacity_count_for_ctx(kv_size);
+    const char * nvfp4_kcache_outlier_layer_capacity_profile =
+            llama_nvfp4_kcache_outlier_layer_capacity_profile_for_ctx(kv_size);
     if (nvfp4_kcache_outlier) {
         static std::atomic<bool> logged(false);
         if (!logged.exchange(true)) {
             LLAMA_LOG_INFO(
-                    "%s: NVFP4 K-cache compact outlier sidecar enabled by default: threshold=%g layer_capacities=%zu\n",
+                    "%s: NVFP4 K-cache compact outlier sidecar enabled by default: threshold=%g layer_capacity_profile=%s layer_capacities=%zu\n",
                     __func__,
                     (double) llama_nvfp4_kcache_outlier_threshold,
-                    llama_nvfp4_kcache_outlier_layer_capacity_count);
+                    nvfp4_kcache_outlier_layer_capacity_profile,
+                    nvfp4_kcache_outlier_layer_capacity_count);
         }
     }
     if (!kcache_hybrid_fp8_layers.empty()) {
@@ -332,8 +339,8 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         if (layer_nvfp4_kcache_outlier) {
             k_outlier_count = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t) kv_size * n_stream);
             const uint32_t configured_capacity =
-                    (size_t) il < llama_nvfp4_kcache_outlier_layer_capacity_count
-                            ? llama_nvfp4_kcache_outlier_layer_capacities[(size_t) il]
+                    (size_t) il < nvfp4_kcache_outlier_layer_capacity_count
+                            ? nvfp4_kcache_outlier_layer_capacities[(size_t) il]
                             : 1u;
             const uint32_t outlier_capacity = std::max<uint32_t>(configured_capacity, 1u);
             k_outlier_offset = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t) kv_size * n_stream);
