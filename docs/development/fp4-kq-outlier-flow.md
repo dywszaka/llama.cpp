@@ -67,22 +67,6 @@ k_scale[dst_row] = input_scale = 1 / global_scale
 开启 K-cache outlier 后，每层额外分配：
 
 ```text
-cache_k_outlier_count_l{layer}: I32[kv_size * n_stream]
-cache_k_outlier_index_l{layer}: I32[max_outliers, kv_size * n_stream]
-cache_k_outlier_value_l{layer}: F32[max_outliers, kv_size * n_stream]
-```
-
-默认逻辑结构是固定 per-row slot：
-
-```text
-count[kv_pos]       = 当前 K row 检测到的 outlier 数量
-index[kv_pos][slot] = outlier 在完整 K row 里的维度编号
-value[kv_pos][slot] = outlier 的原始 signed K 值
-```
-
-开启 `LLAMA_NVFP4_KCACHE_OUTLIER_COMPACT=1` 后，sidecar 改为固定容量稀疏池：
-
-```text
 cache_k_outlier_count_l{layer}:  I32[kv_size * n_stream]
 cache_k_outlier_offset_l{layer}: I32[kv_size * n_stream]
 cache_k_outlier_cursor_l{layer}: I32[n_stream]
@@ -100,11 +84,9 @@ value[offset+i]      = outlier 的原始 signed K 值
 cursor[stream]       = sparse pool 的单调追加位置
 ```
 
-compact pool 容量由 `LLAMA_NVFP4_KCACHE_OUTLIER_CAPACITY_RATIO` 控制：
-
-```text
-capacity = max(kv_size, ceil(kv_size * n_embd_k_gqa * ratio))
-```
+compact pool 容量由 `src/llama-kv-cache-nvfp4-outlier-config.h` 中的
+`llama_nvfp4_kcache_outlier_layer_capacities` 固定配置。该配置和模型、prompt
+分布、context size、K-cache layout 相关，换模型或实验条件后需要重新跑 outlier 分布实验。
 
 compact pool 在 KV cache 生命周期内单调追加，row 重写时会更新该 row 的
 `offset/count`，但旧 pool 段不回收；`clear(true)` 清零 KV buffer 后 cursor 也归零。
@@ -145,26 +127,28 @@ ggml_cuda_nvfp4_kcache_outlier_extract()
 
 ```cpp
 counts[dst_row] = 0;
+offsets[dst_row] = -1;
 
 for col in 0 .. ne00-1:
     v = K_f32[row][col]
 
     if abs(v) > threshold:
-        slot = atomicAdd(counts + dst_row, 1)
-
-        if slot < max_outliers:
-            index[dst_row][slot] = col
-            value[dst_row][slot] = v
+        counts[dst_row] += 1
     else:
         residual_amax[row] = max(residual_amax[row], abs(v))
+
+offset = atomicAdd(cursor, counts[dst_row])
+if offset + counts[dst_row] <= capacity:
+    offsets[dst_row] = offset
+    append index/value entries into the compact pool
 ```
 
 关键点：
 
-- `threshold` 来自 outlier 实验开关，默认是 `16`。
+- `threshold` 来自固定配置，当前是 `16`。
 - `count[dst_row]` 记录检测到的真实 outlier 数量。
-- 如果 `count[dst_row] > max_outliers`，说明 sidecar 槽位溢出，只保存了前
-  `max_outliers` 个 outlier。
+- 如果 compact pool 剩余容量不足以容纳整行 outlier，`offset[dst_row] = -1`，
+  该行 correction 不会恢复 outlier。
 - `value` 保存的是原始 signed F32 K 值。
 - `residual_amax` 只统计非 outlier 值。启用 NVFP4 K-cache outlier 后，K 写入
   默认使用 threshold 作为 per-tensor amax。
@@ -192,8 +176,8 @@ block_scale  = quantize_e4m3(global_scale * block_absmax / 6)
 fp4_code     = nearest_nvfp4_code(xi * global_scale / block_scale)
 ```
 
-启用 `LLAMA_NVFP4_KCACHE_OUTLIER=1` 后，K 写入 cache 使用 threshold 作为
-per-tensor amax，所有写入 row 共用同一个 global scale：
+当 `--cache-type-k nvfp4` 时，compact K outlier 默认启用。K 写入 cache 使用固定
+threshold 作为 per-tensor amax，所有写入 row 共用同一个 global scale：
 
 ```text
 global_scale = 1344 / threshold
@@ -242,7 +226,7 @@ Q_nvfp4[row]       = quantize_nvfp4(Q_f32[row], global_scale_q)
 ```
 
 当 K operand 绑定了 NVFP4 K-cache outlier sidecar 且
-`LLAMA_NVFP4_KCACHE_OUTLIER=1` 时，Q 改为对当前 Q 矩阵计算一个
+使用 compact outlier 路径时，Q 改为对当前 Q 矩阵计算一个
 动态 per-tensor amax，并用同一个 global scale 量化所有 Q row：
 
 ```text
@@ -335,11 +319,15 @@ kv_head = q_head / gqa;
 head_begin = kv_head * head_dim;
 head_end   = head_begin + head_dim;
 
-n = min(count[kv_pos], max_outliers);
+offset = offsets[kv_pos];
+if offset < 0:
+    return;
+
+n = min(count[kv_pos], capacity - offset);
 corr = 0;
 
 for i in 0 .. n-1:
-    global_dim = index[kv_pos][i];
+    global_dim = index[offset + i];
 
     if global_dim < head_begin || global_dim >= head_end:
         continue;
@@ -442,5 +430,5 @@ dst += corr / k_scale
 - `count` 必须记录真实检测数量，用于 correction 读取有效 slot 和判断 overflow。
 - correction 必须按 GQA 映射过滤到当前 KV head。
 - NVFP4 K path 中，correction 必须在图级 `kq * k_scale` 前预除以 `k_scale`。
-- 如果 `count > max_outliers`，当前 row 的 correction 不完整，PPL/精度结果需要
-  结合 overflow 统计判断。
+- 如果 `offset < 0`，当前 row 的 correction 不完整，PPL/精度结果需要结合
+  compact pool overflow 统计判断。

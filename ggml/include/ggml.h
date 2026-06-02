@@ -831,13 +831,7 @@ extern "C" {
     GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_scale(
             const struct ggml_tensor * tensor);
 
-    // bind optional NVFP4 K-cache outlier sidecar metadata to a tensor or op result
-    GGML_API void ggml_tensor_set_nvfp4_kcache_outliers(
-            struct ggml_tensor       * tensor,
-            const struct ggml_tensor * counts,
-            const struct ggml_tensor * indices,
-            const struct ggml_tensor * values);
-
+    // bind optional compact NVFP4 K-cache outlier sidecar metadata to a tensor or op result
     GGML_API void ggml_tensor_set_nvfp4_kcache_outliers_compact(
             struct ggml_tensor       * tensor,
             const struct ggml_tensor * counts,

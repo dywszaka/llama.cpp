@@ -9,11 +9,7 @@ struct ggml_backend_cuda_context;
 struct ggml_tensor;
 
 static constexpr float GGML_CUDA_NVFP4_KCACHE_OUTLIER_GLOBAL_SCALE_MAX = 1344.0f;
-
-bool ggml_cuda_nvfp4_kcache_outlier_enabled();
-bool ggml_cuda_nvfp4_kcache_outlier_log_enabled();
-float ggml_cuda_nvfp4_kcache_outlier_threshold();
-int64_t ggml_cuda_nvfp4_kcache_outlier_max();
+static constexpr float GGML_CUDA_NVFP4_KCACHE_OUTLIER_THRESHOLD = 16.0f;
 
 static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_global_scale_from_amax(float amax) {
     return (amax > 0.0f && isfinite(amax)) ? (GGML_CUDA_NVFP4_KCACHE_OUTLIER_GLOBAL_SCALE_MAX / amax) : 0.0f;
@@ -44,11 +40,6 @@ static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_
     return (global_scale != 0.0f && isfinite(global_scale)) ? (out_scale / global_scale) : 0.0f;
 }
 
-bool ggml_cuda_f16_kcache_outlier_enabled();
-bool ggml_cuda_f16_kcache_outlier_log_enabled();
-float ggml_cuda_f16_kcache_outlier_threshold();
-int64_t ggml_cuda_f16_kcache_outlier_max();
-
 void ggml_cuda_nvfp4_kcache_outlier_extract(
         const char * target,
         const float * src,
@@ -64,7 +55,6 @@ void ggml_cuda_nvfp4_kcache_outlier_extract(
         int64_t src_stride,
         int64_t dst_rows_stride,
         int64_t sidecar_rows,
-        int64_t max_outliers,
         int64_t compact_capacity,
         float threshold,
         cudaStream_t stream);
@@ -83,37 +73,9 @@ void ggml_cuda_nvfp4_kcache_outlier_apply_correction(
         int64_t q_heads,
         int64_t kv_heads,
         int64_t q_head,
-        int64_t max_outliers,
         int64_t compact_capacity,
         int64_t q_nb0_f32,
         int64_t q_nb1_f32,
         int64_t kq_nb0_f32,
         int64_t kq_nb1_f32,
         cudaStream_t stream);
-
-void ggml_cuda_f16_kcache_outlier_set_rows(
-        const char * target,
-        const float * src,
-        const int64_t * dst_rows,
-        half * dst,
-        int32_t * counts,
-        int32_t * offsets,
-        int32_t * cursor,
-        int32_t * indices,
-        float * values,
-        int64_t ne00,
-        int64_t ne01,
-        int64_t src_stride,
-        int64_t dst_rows_stride,
-        int64_t dst_stride,
-        int64_t sidecar_rows,
-        int64_t max_outliers,
-        int64_t compact_capacity,
-        float threshold,
-        cudaStream_t stream);
-
-void ggml_cuda_f16_kcache_outlier_apply_correction(
-        ggml_backend_cuda_context & ctx,
-        const ggml_tensor * src0,
-        const ggml_tensor * src1,
-        ggml_tensor * dst);

@@ -35,7 +35,7 @@ void ggml_cuda_nvfp4_log_kcache_outlier_counts(
         int64_t ne01,
         int64_t dst_rows_stride,
         int64_t sidecar_rows,
-        int64_t max_outliers,
+        int64_t capacity_limit,
         int64_t compact_capacity,
         float threshold,
         cudaStream_t stream) {
@@ -71,7 +71,7 @@ void ggml_cuda_nvfp4_log_kcache_outlier_counts(
             const int32_t offset = offsets_h[(size_t) dst_row];
             overflow_rows += c > 0 && (offset < 0 || (int64_t) offset + c > compact_capacity) ? 1 : 0;
         } else {
-            overflow_rows += c > max_outliers ? 1 : 0;
+            overflow_rows += c > capacity_limit ? 1 : 0;
         }
     }
 
@@ -81,7 +81,7 @@ void ggml_cuda_nvfp4_log_kcache_outlier_counts(
             target != nullptr ? target : "(unknown)",
             (long long) ne01,
             (double) threshold,
-            (long long) max_outliers,
+            (long long) capacity_limit,
             (long long) compact_capacity,
             (long long) (offsets != nullptr ? cursor_h : 0),
             (long long) total,

@@ -2361,7 +2361,8 @@ llama_context * llama_init_from_model(
     }
 
     const char * hybrid_fp8_kcache_layers = getenv("LLAMA_KCACHE_HYBRID_FP8_E4M3_E8M0_32_LAYERS");
-    const bool hybrid_fp8_kcache = hybrid_fp8_kcache_layers != nullptr && hybrid_fp8_kcache_layers[0] != '\0';
+    const bool hybrid_fp8_kcache = params.type_k == GGML_TYPE_NVFP4 &&
+            hybrid_fp8_kcache_layers != nullptr && hybrid_fp8_kcache_layers[0] != '\0';
 
     if (hybrid_fp8_kcache && params.flash_attn) {
         LLAMA_LOG_ERROR("%s: hybrid FP8(E4M3+E8M0) K cache does not support flash_attn yet\n", __func__);

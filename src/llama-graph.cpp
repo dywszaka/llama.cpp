@@ -1263,12 +1263,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_tensor_set_nvfp4_scale(k, k_scale);
     }
     if (k_outlier_count) {
-        if (k_outlier_offset) {
-            ggml_tensor_set_nvfp4_kcache_outliers_compact(k, k_outlier_count, k_outlier_offset, k_outlier_index, k_outlier_value);
-            ggml_tensor_set_nvfp4_kcache_outlier_cursor(k, k_outlier_cursor);
-        } else {
-            ggml_tensor_set_nvfp4_kcache_outliers(k, k_outlier_count, k_outlier_index, k_outlier_value);
-        }
+        GGML_ASSERT(k_outlier_offset != nullptr);
+        GGML_ASSERT(k_outlier_cursor != nullptr);
+        ggml_tensor_set_nvfp4_kcache_outliers_compact(k, k_outlier_count, k_outlier_offset, k_outlier_index, k_outlier_value);
+        ggml_tensor_set_nvfp4_kcache_outlier_cursor(k, k_outlier_cursor);
     }
     if (v_scale) {
         ggml_tensor_set_nvfp4_scale(v, v_scale);

@@ -16,7 +16,7 @@ void ggml_cuda_nvfp4_log_kcache_outlier_counts(
         int64_t ne01,
         int64_t dst_rows_stride,
         int64_t sidecar_rows,
-        int64_t max_outliers,
+        int64_t capacity_limit,
         int64_t compact_capacity,
         float threshold,
         cudaStream_t stream);

@@ -237,9 +237,6 @@ private:
     bool nvfp4_vcache_layer_global_scale = false;
     bool nvfp4_vcache_per_block_scale = false;
     bool nvfp4_kcache_outlier = false;
-    bool nvfp4_kcache_outlier_log = false;
-    bool nvfp4_kcache_outlier_compact = false;
-    uint32_t nvfp4_kcache_outlier_max = 0;
     std::set<uint32_t> kcache_hybrid_fp8_layers;
     std::vector<float> nvfp4_vcache_layer_global_scales;
     ggml_type type_v_cache = GGML_TYPE_F16;

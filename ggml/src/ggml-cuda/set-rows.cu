@@ -222,56 +222,15 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
             stream
         );
     } else if (dst->type == GGML_TYPE_F16) {
-        const ggml_tensor * outlier_counts = ggml_tensor_get_nvfp4_kcache_outlier_counts(dst);
-        const ggml_tensor * outlier_offsets = ggml_tensor_get_nvfp4_kcache_outlier_offsets(dst);
-        const ggml_tensor * outlier_cursor = ggml_tensor_get_nvfp4_kcache_outlier_cursor(dst);
-        const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(dst);
-        const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(dst);
-        const bool use_outliers =
-                ne02 == 1 && ne03 == 1 &&
-                outlier_counts != nullptr &&
-                outlier_indices != nullptr &&
-                outlier_values != nullptr;
-        if (use_outliers) {
-            GGML_ASSERT(outlier_counts->type == GGML_TYPE_I32);
-            GGML_ASSERT(outlier_indices->type == GGML_TYPE_I32);
-            GGML_ASSERT(outlier_values->type == GGML_TYPE_F32);
-            if (outlier_offsets != nullptr) {
-                GGML_ASSERT(outlier_offsets->type == GGML_TYPE_I32);
-                GGML_ASSERT(outlier_cursor != nullptr);
-                GGML_ASSERT(outlier_cursor->type == GGML_TYPE_I32);
-            }
-            ggml_cuda_f16_kcache_outlier_set_rows(
-                    dst->name,
-                    src0_d,
-                    src1_d,
-                    (half *) dst->data,
-                    (int32_t *) outlier_counts->data,
-                    outlier_offsets != nullptr ? (int32_t *) outlier_offsets->data : nullptr,
-                    outlier_cursor != nullptr ? (int32_t *) outlier_cursor->data : nullptr,
-                    (int32_t *) outlier_indices->data,
-                    (float *) outlier_values->data,
-                    ne00,
-                    ne01,
-                    nb01 / sizeof(float),
-                    nb10 / sizeof(int64_t),
-                    nb1 / sizeof(half),
-                    outlier_counts->ne[0],
-                    outlier_indices->ne[0],
-                    outlier_offsets != nullptr ? outlier_indices->ne[0] : outlier_indices->ne[0],
-                    params.kcache_outlier_threshold > 0.0f ? params.kcache_outlier_threshold : ggml_cuda_f16_kcache_outlier_threshold(),
-                    stream);
-        } else {
-            set_rows_cuda(
-                src0_d, src1_d, (half*)dst->data,
-                ne00, ne01, ne02, ne03,
-                ne10, ne11, ne12, ne13,
-                nb01, nb02, nb03,
-                nb10, nb11, nb12,
-                nb1, nb2, nb3,
-                stream
-            );
-        }
+        set_rows_cuda(
+            src0_d, src1_d, (half*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
     } else if (dst->type == GGML_TYPE_BF16) {
         set_rows_cuda(
             src0_d, src1_d, (nv_bfloat16*)dst->data,
