@@ -8,6 +8,7 @@
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
+#include "llama-kv-cache-nvfp4-outlier-config.h"
 #include "llama-vcache-nvfp4.h"
 
 #include <cinttypes>
@@ -2360,7 +2361,7 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
-    const char * hybrid_fp8_kcache_layers = getenv("LLAMA_KCACHE_HYBRID_FP8_E4M3_E8M0_32_LAYERS");
+    const char * hybrid_fp8_kcache_layers = llama_nvfp4_kcache_hybrid_fp8_layers_env();
     const bool hybrid_fp8_kcache = params.type_k == GGML_TYPE_NVFP4 &&
             hybrid_fp8_kcache_layers != nullptr && hybrid_fp8_kcache_layers[0] != '\0';
 

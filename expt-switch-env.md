@@ -18,6 +18,9 @@ Enables experimental per-layer hybrid K-cache storage where selected K-cache
 layers use `GGML_TYPE_FP8_E4M3_E8M0_32` while the remaining layers keep the
 configured `--cache-type-k`. Default: unset/off.
 
+Compatibility alias for the newer B switch
+`LLAMA_NVFP4_KCACHE_OUTLIER_HYBRID_FP8=1`.
+
 Supported values:
 
 ```text
@@ -53,11 +56,44 @@ weights or generic dequantization paths.
 
 ## NVFP4 K-Cache Outlier Sidecar
 
-When `--cache-type-k nvfp4` is selected, the compact K-cache outlier sidecar is
-enabled by default. This path is no longer controlled by environment variables.
-The threshold, model-dependent compact layer capacities, and the
-`high_medium` hybrid FP8 layer alias are fixed in
+### `LLAMA_NVFP4_KCACHE_OUTLIER`
+
+Enables the compact NVFP4 K-cache outlier sidecar. Default: off.
+
+When this switch is off, `--cache-type-k nvfp4` uses the normal NVFP4 K-cache
+path with per-row K global scales and no outlier extraction/correction.
+
+When this switch is on and hybrid FP8 K-cache is not enabled, each NVFP4 K-cache
+layer uses the balanced per-layer threshold and compact capacity profile fixed
+in `src/llama-kv-cache-nvfp4-outlier-config.h`. The K-cache residual
+quantization uses the layer threshold as tensor amax for the K global scale.
+
+When this switch is on together with
+`LLAMA_NVFP4_KCACHE_OUTLIER_HYBRID_FP8=1`, the selected high/medium layers are
+stored as FP8(E4M3+E8M0 block32), and the remaining NVFP4 K-cache layers use the
+current hybrid threshold/capacity profile fixed in
 `src/llama-kv-cache-nvfp4-outlier-config.h`.
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_HYBRID_FP8`
+
+Switch B. Enables the fixed high/medium hybrid FP8 K-cache layer set:
+
+```text
+0,1,4,5,6,8,10,11,12,14,23,35
+```
+
+Default: off. This switch only affects `--cache-type-k nvfp4`. On its own, it
+does not enable NVFP4 K-cache outlier sidecar; combine it with switch A
+`LLAMA_NVFP4_KCACHE_OUTLIER=1` to run the current hybrid outlier configuration.
+
+Scripts for deriving a new balanced profile from threshold sweep artifacts live
+in:
+
+```text
+scripts/parse-kcache-outlier-threshold-sweep.py
+scripts/derive-kcache-outlier-balanced-config.py
+scripts/run-kcache-outlier-balanced-experiment.sh
+```
 
 ## NVFP4 V-Cache
 

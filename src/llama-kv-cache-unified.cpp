@@ -38,7 +38,7 @@ static std::set<uint32_t> llama_kcache_hybrid_fp8_high_medium_layers_local() {
 }
 
 static std::set<uint32_t> llama_kcache_hybrid_fp8_layers_local() {
-    const char * value = std::getenv("LLAMA_KCACHE_HYBRID_FP8_E4M3_E8M0_32_LAYERS");
+    const char * value = llama_nvfp4_kcache_hybrid_fp8_layers_env();
     if (value == nullptr || value[0] == '\0') {
         return {};
     }
@@ -179,20 +179,23 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     nvfp4_vcache_layer_global_scale = nvfp4_vcache && v_trans && nvfp4_layer_scale_path != nullptr;
     nvfp4_vcache_per_block_scale = nvfp4_vcache && v_trans && !nvfp4_vcache_layer_global_scale && llama_vcache_nvfp4_per_block_scale_enabled();
     llama_vcache_nvfp4_log_scale_mode_once(nvfp4_vcache && v_trans);
-    nvfp4_kcache_outlier = type_k == GGML_TYPE_NVFP4;
+    nvfp4_kcache_outlier = type_k == GGML_TYPE_NVFP4 && llama_nvfp4_kcache_outlier_enabled();
+    const bool kcache_hybrid_fp8 = !kcache_hybrid_fp8_layers.empty();
     const uint32_t * nvfp4_kcache_outlier_layer_capacities =
-            llama_nvfp4_kcache_outlier_layer_capacities_for_ctx(kv_size);
+            llama_nvfp4_kcache_outlier_layer_capacities_for_mode(kv_size, kcache_hybrid_fp8);
     const size_t nvfp4_kcache_outlier_layer_capacity_count =
-            llama_nvfp4_kcache_outlier_layer_capacity_count_for_ctx(kv_size);
+            llama_nvfp4_kcache_outlier_layer_capacity_count_for_mode(kv_size, kcache_hybrid_fp8);
     const char * nvfp4_kcache_outlier_layer_capacity_profile =
-            llama_nvfp4_kcache_outlier_layer_capacity_profile_for_ctx(kv_size);
+            llama_nvfp4_kcache_outlier_layer_capacity_profile_for_mode(kv_size, kcache_hybrid_fp8);
+    const char * nvfp4_kcache_outlier_layer_threshold_profile =
+            llama_nvfp4_kcache_outlier_layer_threshold_profile(kcache_hybrid_fp8);
     if (nvfp4_kcache_outlier) {
         static std::atomic<bool> logged(false);
         if (!logged.exchange(true)) {
             LLAMA_LOG_INFO(
-                    "%s: NVFP4 K-cache compact outlier sidecar enabled by default: threshold=%g layer_capacity_profile=%s layer_capacities=%zu\n",
+                    "%s: NVFP4 K-cache compact outlier sidecar enabled: threshold_profile=%s layer_capacity_profile=%s layer_capacities=%zu\n",
                     __func__,
-                    (double) llama_nvfp4_kcache_outlier_threshold,
+                    nvfp4_kcache_outlier_layer_threshold_profile,
                     nvfp4_kcache_outlier_layer_capacity_profile,
                     nvfp4_kcache_outlier_layer_capacity_count);
         }
@@ -1581,7 +1584,7 @@ ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_
 
         ggml_tensor * res = ggml_set_rows(ctx, k, k_cur, k_idxs);
         if (nvfp4_kcache_outlier) {
-            const float threshold = llama_nvfp4_kcache_outlier_threshold;
+            const float threshold = llama_nvfp4_kcache_outlier_layer_threshold((uint32_t) il, !kcache_hybrid_fp8_layers.empty());
             std::memcpy(&res->op_params[0], &threshold, sizeof(threshold));
         }
         if (layers[ikv].k_scale) {

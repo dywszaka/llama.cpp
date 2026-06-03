@@ -332,6 +332,30 @@ if (GGML_CUDA)
 
     llama_test_cmd(
         bash
+        NAME test-kcache-nvfp4-default-no-outlier-smoke
+        LABEL "cuda"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS
+            ${CMAKE_CURRENT_SOURCE_DIR}/test-kcache-nvfp4-default-no-outlier-smoke.sh
+            $<TARGET_FILE:llama-perplexity>
+            ${PROJECT_SOURCE_DIR}/../models/qwen3-8b-nvfp4.gguf
+            ${PROJECT_SOURCE_DIR}/data/wikitext/wikitext-2-raw/wiki.test.raw
+    )
+
+    llama_test_cmd(
+        bash
+        NAME test-kcache-outlier-hybrid-b-switch-smoke
+        LABEL "cuda"
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS
+            ${CMAKE_CURRENT_SOURCE_DIR}/test-kcache-outlier-hybrid-b-switch-smoke.sh
+            $<TARGET_FILE:llama-perplexity>
+            ${PROJECT_SOURCE_DIR}/../models/qwen3-8b-nvfp4.gguf
+            ${PROJECT_SOURCE_DIR}/data/wikitext/wikitext-2-raw/wiki.test.raw
+    )
+
+    llama_test_cmd(
+        bash
         NAME test-kcache-hybrid-outlier-layer-capacity-smoke
         LABEL "cuda"
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
