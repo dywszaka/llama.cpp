@@ -231,172 +231,321 @@ static __host__ __device__ __forceinline__ uint16_t bf16_abs_bits(uint16_t x) {
     return (uint16_t) (x & (uint16_t) low_bits_mask_u64(15u));
 }
 
-static __host__ __device__ __forceinline__ uint64_t shift_hw(uint64_t value, uint8_t shift_amt, uint8_t shift_right) {
-    const uint64_t value_q = value & low_bits_mask_u64(32u);
-    return ((shift_right & 1u) == 0u)
-            ? ((value_q << shift_amt) & low_bits_mask_u64(36u))
-            : ((value_q >> shift_amt) & low_bits_mask_u64(36u));
-}
-
-static __host__ __device__ __forceinline__ uint32_t float_to_ufixed_q_hw(float val, uint8_t frac_bits) {
+static __host__ __device__ __forceinline__ uint32_t f32_to_u32_bits_hw(float v) {
     union {
         float f;
         uint32_t u;
     } bits;
-    bits.f = val;
-
-    const uint32_t sign = bits.u >> 31;
-    const uint32_t exponent = (bits.u >> 23) & (uint32_t) low_bits_mask_u64(8u);
-    const uint32_t mantissa = bits.u & (uint32_t) low_bits_mask_u64(23u);
-    if (sign != 0u || (exponent == 0u && mantissa == 0u)) {
-        return 0;
-    }
-    if (exponent == 0xffu) {
-        return mantissa == 0u ? (uint32_t) low_bits_mask_u64(32u) : 0u;
-    }
-
-    const uint32_t significand =
-            ((exponent == 0u) ? mantissa : ((1u << 23) | mantissa)) &
-            (uint32_t) low_bits_mask_u64(24u);
-    const uint32_t exponent_unbiased =
-            (exponent == 0u) ? 0x82u : ((exponent - 127u) & (uint32_t) low_bits_mask_u64(8u));
-    uint32_t exponent_unbiased_ext = exponent_unbiased;
-    if ((exponent_unbiased_ext & 0x80u) != 0u) {
-        exponent_unbiased_ext |= 0x100u;
-    }
-
-    const uint32_t total_shift =
-            (exponent_unbiased_ext + (uint32_t) frac_bits + 0x1e9u) &
-            (uint32_t) low_bits_mask_u64(9u);
-    const uint8_t shift_right = (uint8_t) ((total_shift >> 8) & 1u);
-    uint32_t shift_mag = total_shift;
-    if (shift_right != 0u) {
-        shift_mag = ((~shift_mag) + 1u) & (uint32_t) low_bits_mask_u64(9u);
-    }
-    return (uint32_t) (shift_hw(significand, (uint8_t) (shift_mag & 0xffu), shift_right) &
-                       low_bits_mask_u64(32u));
+    bits.f = v;
+    return bits.u;
 }
 
-static __host__ __device__ __forceinline__ uint64_t bf16_abs_mul_uq_hw(
-        uint16_t abs_bits,
-        uint32_t factor_q,
-        int factor_frac_bits,
-        int out_frac_bits) {
-    if (abs_bits == 0u || factor_q == 0u) {
-        return 0;
-    }
-
-    const uint32_t exponent = (abs_bits >> 7) & (uint32_t) low_bits_mask_u64(8u);
-    const uint32_t mantissa = abs_bits & (uint32_t) low_bits_mask_u64(7u);
-    const uint32_t significand =
-            ((exponent == 0u) ? mantissa : (0x80u | mantissa)) &
-            (uint32_t) low_bits_mask_u64(8u);
-    const uint32_t exp_mask = (uint32_t) low_bits_mask_u64(9u);
-    const uint32_t exp_sign = 1u << 8;
-    const uint32_t value_exp2_tc = (exponent == 0u) ? ((0u - 133u) & exp_mask) : ((exponent - 134u) & exp_mask);
-    const uint32_t value_exp2_ext = (value_exp2_tc & exp_sign) != 0u ? (value_exp2_tc | ~exp_mask) : value_exp2_tc;
-    const uint32_t frac_delta = (uint32_t) (out_frac_bits - factor_frac_bits) & (uint32_t) low_bits_mask_u64(9u);
-    const uint32_t total_shift = (value_exp2_ext + frac_delta) & (uint32_t) low_bits_mask_u64(9u);
-    const uint8_t shift_right = (uint8_t) ((total_shift >> 8) & 1u);
-    uint32_t shift_mag = total_shift;
-    if (shift_right != 0u) {
-        shift_mag = ((~shift_mag) + 1u) & (uint32_t) low_bits_mask_u64(9u);
-    }
-
-    const uint64_t product = (uint64_t) significand * factor_q;
-    uint64_t result = 0;
-    if ((shift_mag & 0xffu) < 64u) {
-        result = shift_right != 0u ? (product >> (shift_mag & 0xffu)) : (product << (shift_mag & 0xffu));
-    }
-    return result & low_bits_mask_u64(36u);
+static __host__ __device__ __forceinline__ float u32_to_f32_bits_hw(uint32_t v) {
+    union {
+        uint32_t u;
+        float f;
+    } bits;
+    bits.u = v;
+    return bits.f;
 }
 
-static __host__ __device__ __forceinline__ uint8_t block_scale_msb_hw(uint64_t block_scale_q) {
-    uint64_t msb_probe = block_scale_q & low_bits_mask_u64(34u);
-    uint8_t msb = 0u;
-    if (msb_probe >= (1ull << 32)) { msb_probe >>= 32; msb = (uint8_t) ((msb + 32u) & 0x3fu); }
-    if (msb_probe >= (1ull << 16)) { msb_probe >>= 16; msb = (uint8_t) ((msb + 16u) & 0x3fu); }
-    if (msb_probe >= (1ull << 8))  { msb_probe >>= 8;  msb = (uint8_t) ((msb + 8u)  & 0x3fu); }
-    if (msb_probe >= (1ull << 4))  { msb_probe >>= 4;  msb = (uint8_t) ((msb + 4u)  & 0x3fu); }
-    if (msb_probe >= (1ull << 2))  { msb_probe >>= 2;  msb = (uint8_t) ((msb + 2u)  & 0x3fu); }
-    if (msb_probe >= (1ull << 1))  { msb = (uint8_t) ((msb + 1u) & 0x3fu); }
-    return (uint8_t) (msb & 0x3fu);
+static __host__ __device__ __forceinline__ float bf16_abs_to_fp32_bits_hw(uint16_t abs_bits) {
+    return u32_to_f32_bits_hw((uint32_t) abs_bits << 16);
 }
 
-static __host__ __device__ __forceinline__ uint8_t compute_block_scale_hw(uint16_t block_abs_max_bits, uint32_t global_scale_q) {
+static __host__ __device__ __forceinline__ uint16_t fp32_to_bf16_trunc_bits_hw(float v) {
+    return (uint16_t) (f32_to_u32_bits_hw(v) >> 16);
+}
+
+static __host__ __device__ __forceinline__ uint16_t bf16_mul_bf16_rne_bits_hw(uint16_t a, uint16_t b) {
+    const uint32_t a_sign = (a >> 15) & 1u;
+    const uint32_t b_sign = (b >> 15) & 1u;
+    const uint32_t a_exp = (a >> 7) & 0xffu;
+    const uint32_t b_exp = (b >> 7) & 0xffu;
+    const uint32_t a_mant = a & 0x7fu;
+    const uint32_t b_mant = b & 0x7fu;
+
+    const bool a_zero = (a & 0x7fffu) == 0u;
+    const bool b_zero = (b & 0x7fffu) == 0u;
+    const bool a_inf = (a & 0x7fffu) == 0x7f80u;
+    const bool b_inf = (b & 0x7fffu) == 0x7f80u;
+    const bool a_nan = a_exp == 0xffu && a_mant != 0u;
+    const bool b_nan = b_exp == 0xffu && b_mant != 0u;
+
+    const uint32_t sign_out = a_sign ^ b_sign;
+    const bool is_nan = a_nan || b_nan || (a_inf && b_zero) || (a_zero && b_inf);
+    const bool is_inf = (a_inf || b_inf) && !is_nan;
+    const bool is_zero = (a_zero || b_zero) && !is_inf;
+
+    const uint32_t ma = 0x80u | a_mant;
+    const uint32_t mb = 0x80u | b_mant;
+    const uint32_t product = ma * mb;
+    const int32_t exp_sum = (int32_t) a_exp + (int32_t) b_exp - 127;
+
+    const bool product_overflow = (product & 0x8000u) != 0u;
+    const int32_t exp_norm = product_overflow ? exp_sum + 1 : exp_sum;
+    const uint32_t mant_pre = product_overflow ? ((product >> 8) & 0x7fu) : ((product >> 7) & 0x7fu);
+    const bool guard = product_overflow ? (((product >> 7) & 1u) != 0u) : (((product >> 6) & 1u) != 0u);
+    const bool sticky = product_overflow ? ((product & 0x7fu) != 0u) : ((product & 0x3fu) != 0u);
+    const bool round_up = guard && (sticky || ((mant_pre & 1u) != 0u));
+    const uint32_t mant_rnd = mant_pre + (round_up ? 1u : 0u);
+
+    const int32_t exp_rnd = (mant_rnd & 0x80u) ? exp_norm + 1 : exp_norm;
+    const uint32_t mant_final = (mant_rnd & 0x80u) ? 0u : (mant_rnd & 0x7fu);
+
+    const uint16_t normal_result = (uint16_t) ((sign_out << 15) | (((uint32_t) exp_rnd & 0xffu) << 7) | mant_final);
+    uint16_t result = normal_result;
+    result = exp_rnd < 0 ? (uint16_t) (sign_out << 15) : result;
+    result = exp_rnd >= 255 ? (uint16_t) ((sign_out << 15) | 0x7f80u) : result;
+    result = is_zero ? (uint16_t) (sign_out << 15) : result;
+    result = is_inf ? (uint16_t) ((sign_out << 15) | 0x7f80u) : result;
+    result = is_nan ? 0x7fc0u : result;
+    return result;
+}
+
+static __host__ __device__ __forceinline__ uint16_t bf16_mul_bf16_rne_operands_bits_hw(uint16_t a, float b) {
+    const uint16_t a_bf16 = bf16_abs_bits(a);
+    const uint16_t b_bf16 = fp32_to_bf16_trunc_bits_hw(b);
+    return bf16_mul_bf16_rne_bits_hw(a_bf16, b_bf16);
+}
+
+static __host__ __device__ __forceinline__ uint32_t clz_u32_hw(uint32_t value) {
+    if (value == 0u) {
+        return 32u;
+    }
+
+    uint32_t count = 0u;
+    if ((value & 0xffff0000u) == 0u) {
+        count += 16u;
+        value <<= 16;
+    }
+    if ((value & 0xff000000u) == 0u) {
+        count += 8u;
+        value <<= 8;
+    }
+    if ((value & 0xf0000000u) == 0u) {
+        count += 4u;
+        value <<= 4;
+    }
+    if ((value & 0xc0000000u) == 0u) {
+        count += 2u;
+        value <<= 2;
+    }
+    if ((value & 0x80000000u) == 0u) {
+        count += 1u;
+    }
+    return count;
+}
+
+static __host__ __device__ __forceinline__ uint16_t bf16_add_pos_trunc_bits_hw(uint16_t a, uint16_t b) {
+    a = bf16_abs_bits(a);
+    b = bf16_abs_bits(b);
+
+    uint32_t exp_a = (a >> 7) & 0xffu;
+    uint32_t exp_b = (b >> 7) & 0xffu;
+    const bool a_zero_in = (a & 0x7fffu) == 0u;
+    const bool b_zero_in = (b & 0x7fffu) == 0u;
+    const bool a_subnormal_in = exp_a == 0u && !a_zero_in;
+    const bool b_subnormal_in = exp_b == 0u && !b_zero_in;
+    const bool any_non_finite_in = exp_a == 0xffu || exp_b == 0xffu;
+    uint32_t sig_a = 0x80u | (a & 0x7fu);
+    uint32_t sig_b = 0x80u | (b & 0x7fu);
+
+    if (exp_a < exp_b || (exp_a == exp_b && sig_a < sig_b)) {
+        const uint32_t tmp_exp = exp_a;
+        const uint32_t tmp_sig = sig_a;
+        exp_a = exp_b;
+        sig_a = sig_b;
+        exp_b = tmp_exp;
+        sig_b = tmp_sig;
+    }
+
+    constexpr uint32_t guard_bits = 16u;
+    const uint32_t shift = exp_a - exp_b;
+    const uint32_t sig_a_ext = sig_a << guard_bits;
+    const uint32_t sig_b_ext = (shift >= 24u) ? 0u : ((sig_b << guard_bits) >> shift);
+    const uint32_t sum_sig = sig_a_ext + sig_b_ext;
+
+    const bool sum_zero = sum_sig == 0u;
+    const uint32_t sum_sig_safe = sum_zero ? 1u : sum_sig;
+    const int32_t msb_pos = 31 - (int32_t) clz_u32_hw(sum_sig_safe);
+    constexpr int32_t target_msb_pos = 7 + (int32_t) guard_bits;
+    const int32_t shift_amt = msb_pos - target_msb_pos;
+    const int32_t res_exp = (int32_t) exp_a + shift_amt;
+    const uint32_t final_sig = (shift_amt < 0) ? (sum_sig_safe << (uint32_t) (-shift_amt)) : (sum_sig_safe >> (uint32_t) shift_amt);
+    const uint32_t final_mant = (final_sig >> guard_bits) & 0x7fu;
+
+    const bool overflow = res_exp >= 255;
+    const bool underflow = res_exp <= 0;
+
+    const uint16_t result_normal = (uint16_t) (((uint32_t) res_exp << 7) | final_mant);
+    if (b_zero_in) {
+        return a;
+    }
+    if (a_zero_in) {
+        return b;
+    }
+    if (a_subnormal_in) {
+        return b;
+    }
+    if (b_subnormal_in) {
+        return a;
+    }
+    if (any_non_finite_in) {
+        return 0x7f80u;
+    }
+    if (underflow || sum_zero) {
+        return 0u;
+    }
+    if (overflow) {
+        return 0x7f80u;
+    }
+    return result_normal;
+}
+
+static __host__ __device__ __forceinline__ bool bf16_pos_le_hw(uint16_t a, uint16_t b) {
+    return bf16_abs_bits(a) <= bf16_abs_bits(b);
+}
+
+static __host__ __device__ __forceinline__ uint16_t bf16_pos_mul2_bits_hw(uint16_t value) {
+    value = bf16_abs_bits(value);
+    const uint32_t exp = (value >> 7) & 0xffu;
+    const uint32_t mant = value & 0x7fu;
+
+    if ((value & 0x7fffu) == 0u) {
+        return 0u;
+    }
+    if (exp == 0xffu) {
+        return value;
+    }
+    if (exp == 0u) {
+        return (mant & 0x40u) != 0u ? (uint16_t) ((1u << 7) | ((mant & 0x3fu) << 1)) : (uint16_t) ((mant & 0x3fu) << 1);
+    }
+    if (exp == 0xfeu) {
+        return 0x7f80u;
+    }
+    return (uint16_t) (((exp + 1u) << 7) | mant);
+}
+
+static __host__ __device__ __forceinline__ uint32_t round_right_ties_down(uint32_t value, int shift) {
+    constexpr int max_left_shift = 8;
+    constexpr int max_right_shift = 24;
+    if (shift <= 0) {
+        const int lshift = -shift;
+        return (lshift > max_left_shift) ? 0xffffffffu : (value << lshift);
+    }
+    if (shift > max_right_shift) {
+        return 0u;
+    }
+
+    const uint32_t shifted = value >> shift;
+    const uint32_t half = 1u << (shift - 1);
+    const uint32_t mask = (1u << shift) - 1u;
+    const uint32_t remainder = value & mask;
+    return shifted + ((remainder > half) ? 1u : 0u);
+}
+
+static __host__ __device__ __forceinline__ uint8_t e4m3_subnormal_from_fp32_bits_hw(uint32_t exponent, uint32_t mantissa) {
+    const bool fp32_subnormal = exponent == 0u;
+    const int32_t exp_unbiased = fp32_subnormal ? -126 : (int32_t) exponent - 127;
+    const uint32_t significand = fp32_subnormal ? mantissa : (0x00800000u | mantissa);
+    const uint32_t mant_q = round_right_ties_down(significand, 14 - exp_unbiased);
+    return (uint8_t) (mant_q > 15u ? 15u : mant_q);
+}
+
+static __host__ __device__ __forceinline__ uint8_t e4m3_scale_from_fp32_bits_hw(float scale) {
+    const uint32_t bits = f32_to_u32_bits_hw(scale);
+    const uint32_t sign = bits >> 31;
+    const uint32_t exponent = (bits >> 23) & 0xffu;
+    const uint32_t mantissa = bits & 0x007fffffu;
+    if (sign != 0u || exponent == 0xffu) {
+        return 0u;
+    }
+
+    if (scale <= 0.0302734375f) {
+        return e4m3_subnormal_from_fp32_bits_hw(exponent, mantissa);
+    }
+
+    const int32_t exp_unbiased = (int32_t) exponent - 127;
+    int32_t exp_field = exp_unbiased + 7;
+    const uint32_t significand = 0x00800000u | mantissa;
+
+    uint32_t signif_q = round_right_ties_down(significand, 20);
+    if (signif_q >= 16u) {
+        signif_q = 8u;
+        ++exp_field;
+    }
+
+    if (exp_field > 15 || (exp_field == 15 && signif_q >= 15u)) {
+        return 0x7Eu;
+    }
+
+    return (uint8_t) (((uint32_t) exp_field << 3) | ((signif_q - 8u) & 0x7u));
+}
+
+static __host__ __device__ __forceinline__ float compute_block_scale_value_bf16_internal_fp32_blockscale_hw(
+        uint16_t block_abs_max_bits,
+        float global_scale) {
     if (block_abs_max_bits == 0u) {
-        return 0u;
+        return 0.0f;
     }
 
-    uint64_t block_scale_q = bf16_abs_mul_uq_hw(block_abs_max_bits, global_scale_q, 16, 24);
-    block_scale_q = ((block_scale_q + 3u) >> 3) + ((block_scale_q + 3u) >> 5) +
-                    ((block_scale_q + 3u) >> 7) + ((block_scale_q + 3u) >> 9) +
-                    ((block_scale_q + 3u) >> 11) + ((block_scale_q + 3u) >> 13);
-    block_scale_q &= low_bits_mask_u64(34u);
-
-    const uint8_t msb = block_scale_msb_hw(block_scale_q);
-    const uint8_t exp_field_tc = (uint8_t) ((msb - 24 + 7) & 0x3fu);
-    int32_t exp_field = ((uint32_t) exp_field_tc & 0x20u) != 0u ? (int32_t) ((uint32_t) exp_field_tc | ~0x3fu) : (int32_t) exp_field_tc;
-    if (exp_field <= 0) {
-        uint64_t mant_q = block_scale_q >> (24 - 9);
-        mant_q &= 0xffu;
-        return mant_q >= 8u ? 0x08u : (uint8_t) mant_q;
-    }
-
-    if (exp_field > 15) {
-        exp_field = 15;
-    }
-    const int rshift = 24 + exp_field - 10;
-    uint32_t signif_q_rounded = (uint32_t) (block_scale_q & low_bits_mask_u64(5u));
-    if (rshift > 0) {
-        const uint64_t shifted = (block_scale_q >> rshift) & low_bits_mask_u64(19u);
-        const uint64_t half = (1ull << (rshift - 1)) & low_bits_mask_u64(29u);
-        const uint64_t mask = low_bits_mask_u64((uint8_t) rshift) & low_bits_mask_u64(29u);
-        const uint64_t remainder = block_scale_q & mask;
-        const uint64_t round = remainder > half ? 1ull : 0ull;
-        signif_q_rounded = (uint32_t) ((shifted + round) & low_bits_mask_u64(5u));
-    }
-    const uint8_t carry = ((exp_field < 15) && ((signif_q_rounded & (1u << 4)) != 0u)) ? 1u : 0u;
-    const int32_t exp_field_norm = (exp_field + (int32_t) carry) & 0xf;
-    const uint32_t signif_q_norm = carry != 0u ? 8u : signif_q_rounded;
-    const uint32_t signif_q_floor = signif_q_norm < 8u ? 8u : signif_q_norm;
-    const uint32_t signif_q_clamped = exp_field_norm >= 15 ? (signif_q_floor > 14u ? 14u : signif_q_floor) : signif_q_floor;
-    return (uint8_t) ((exp_field_norm << 3) | ((signif_q_clamped - 8u) & 0x7u));
+    const float block_abs_max = bf16_abs_to_fp32_bits_hw(block_abs_max_bits);
+    return block_abs_max * global_scale * 0.1666666716f;
 }
 
-static __host__ __device__ __forceinline__ uint64_t compute_block_scale_half_q(uint8_t scale) {
-    const uint32_t scale_exp = (scale >> 3) & 0xfu;
-    const uint32_t scale_mant = scale & 0x7u;
-    return scale_exp == 0u
-            ? (shift_hw(scale_mant, (uint8_t) ((24 - 10) & 0xffu), 0u) & 0xffffffffu)
-            : (shift_hw(8u + scale_mant, (uint8_t) ((24 + (int) scale_exp - 11) & 0xffu), 0u) & 0xffffffffu);
+static __host__ __device__ __forceinline__ uint16_t fp32_scale_half_to_bf16_bits_hw(float scale) {
+    const uint32_t bits = f32_to_u32_bits_hw(scale);
+    const uint32_t sign = bits & 0x80000000u;
+    const uint32_t abs_bits = bits & 0x7fffffffu;
+    uint32_t half_abs_bits = 0u;
+
+    if (abs_bits >= 0x01000000u && abs_bits < 0x7f800000u) {
+        half_abs_bits = abs_bits - 0x00800000u;
+    } else if (abs_bits >= 0x00800000u && abs_bits < 0x01000000u) {
+        half_abs_bits = ((abs_bits & 0x007fffffu) | 0x00800000u) >> 1;
+    } else if (abs_bits < 0x00800000u) {
+        half_abs_bits = abs_bits >> 1;
+    } else {
+        half_abs_bits = abs_bits;
+    }
+
+    return (uint16_t) ((sign | half_abs_bits) >> 16);
 }
 
-static __device__ __forceinline__ uint8_t bf16_quant_mag(
+static __device__ __forceinline__ uint8_t quant_mag_bf16_internal_hw(
         uint16_t abs_bits,
-        uint32_t global_scale_q,
-        uint64_t block_scale_half_q) {
-    const uint64_t target_q = bf16_abs_mul_uq_hw(abs_bits, global_scale_q, 16, 24) & low_bits_mask_u64(36u);
-    const uint64_t target_2x_q = target_q << 1;
-    if (target_2x_q < block_scale_half_q) {
+        float global_scale,
+        uint16_t block_scale_half_bits) {
+    const uint16_t target = bf16_mul_bf16_rne_operands_bits_hw(abs_bits, global_scale);
+    const uint16_t target_2x = bf16_pos_mul2_bits_hw(target);
+    const uint16_t scale_2x = bf16_pos_mul2_bits_hw(block_scale_half_bits);
+    const uint16_t scale_3x = bf16_add_pos_trunc_bits_hw(scale_2x, block_scale_half_bits);
+    const uint16_t scale_5x = bf16_add_pos_trunc_bits_hw(scale_3x, scale_2x);
+    const uint16_t scale_7x = bf16_add_pos_trunc_bits_hw(scale_5x, scale_2x);
+    const uint16_t scale_10x = bf16_pos_mul2_bits_hw(scale_5x);
+    const uint16_t scale_14x = bf16_pos_mul2_bits_hw(scale_7x);
+    const uint16_t scale_20x = bf16_pos_mul2_bits_hw(scale_10x);
+
+    if (bf16_pos_le_hw(target_2x, block_scale_half_bits)) {
         return 0u;
     }
-    if (target_2x_q < 3ull * block_scale_half_q) {
+    if (bf16_pos_le_hw(target_2x, scale_3x)) {
         return 1u;
     }
-    if (target_2x_q < 5ull * block_scale_half_q) {
+    if (bf16_pos_le_hw(target_2x, scale_5x)) {
         return 2u;
     }
-    if (target_2x_q < 7ull * block_scale_half_q) {
+    if (bf16_pos_le_hw(target_2x, scale_7x)) {
         return 3u;
     }
-    if (target_2x_q < 10ull * block_scale_half_q) {
+    if (bf16_pos_le_hw(target_2x, scale_10x)) {
         return 4u;
     }
-    if (target_2x_q < 14ull * block_scale_half_q) {
+    if (bf16_pos_le_hw(target_2x, scale_14x)) {
         return 5u;
     }
-    if (target_2x_q < 20ull * block_scale_half_q) {
+    if (bf16_pos_le_hw(target_2x, scale_20x)) {
         return 6u;
     }
     return 7u;
@@ -424,21 +573,20 @@ static __device__ __forceinline__ void quantize_row_nvfp4_bf16_block(
     block_abs_max = max(block_abs_max, __shfl_xor_sync(0xFFFFFFFF, block_abs_max, 1, WARP_SIZE));
     block_abs_max = __shfl_sync(0xFFFFFFFF, block_abs_max, 0, WARP_SIZE);
 
-    const uint32_t global_scale_q = float_to_ufixed_q_hw(global_scale, 16);
-
     uint8_t scale = 0u;
-    uint64_t block_scale_half_q = 0u;
+    uint16_t block_scale_half_bits = 0u;
     if (lane == 0) {
-        scale = compute_block_scale_hw(block_abs_max, global_scale_q);
+        const float block_scale = compute_block_scale_value_bf16_internal_fp32_blockscale_hw(block_abs_max, global_scale);
+        scale = e4m3_scale_from_fp32_bits_hw(block_scale);
         y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].e = scale;
-        block_scale_half_q = compute_block_scale_half_q(scale);
+        block_scale_half_bits = fp32_scale_half_to_bf16_bits_hw(block_scale);
     }
     scale = __shfl_sync(0xFFFFFFFF, scale, 0, WARP_SIZE);
-    block_scale_half_q = __shfl_sync(0xFFFFFFFF, block_scale_half_q, 0, WARP_SIZE);
+    block_scale_half_bits = __shfl_sync(0xFFFFFFFF, block_scale_half_bits, 0, WARP_SIZE);
 
     uint8_t q = 0u;
     if (scale != 0u) {
-        const uint8_t mag = bf16_quant_mag(bf16_abs_bits(bf16), global_scale_q, block_scale_half_q);
+        const uint8_t mag = quant_mag_bf16_internal_hw(bf16_abs_bits(bf16), global_scale, block_scale_half_bits);
         q = mag == 0u ? 0u : (uint8_t) (((bf16 >> 15) & 1u) << 3 | mag);
     }
     const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
