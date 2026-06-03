@@ -284,13 +284,17 @@ void ggml_cuda_nvfp4_kcache_outlier_extract(
             ne00, ne01, src_stride, dst_rows_stride, sidecar_rows, compact_capacity, threshold);
     CUDA_CHECK(cudaGetLastError());
 
-#ifndef NDEBUG
     if (ggml_cuda_nvfp4_log_can_copy_from_stream(stream)) {
+#ifndef NDEBUG
         ggml_cuda_nvfp4_log_kcache_outlier_counts(
                 __func__, target, dst_rows, counts, offsets, cursor,
                 ne01, dst_rows_stride, sidecar_rows, compact_capacity, compact_capacity, threshold, stream);
-    }
+#else
+        ggml_cuda_nvfp4_log_kcache_outlier_overflow_if_any(
+                __func__, target, dst_rows, counts, offsets, cursor,
+                ne01, dst_rows_stride, sidecar_rows, compact_capacity, threshold, stream);
 #endif
+    }
 }
 
 void ggml_cuda_nvfp4_kcache_outlier_apply_correction(

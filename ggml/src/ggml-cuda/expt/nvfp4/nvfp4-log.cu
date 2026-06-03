@@ -75,8 +75,10 @@ void ggml_cuda_nvfp4_log_kcache_outlier_counts(
         }
     }
 
+    const bool compact_overflow = offsets != nullptr && (int64_t) cursor_h > compact_capacity;
+
     GGML_LOG_INFO(
-            "%s: target=%s rows=%lld threshold=%g stored_max=%lld compact_capacity=%lld compact_used=%lld total_outliers=%lld max_row_outliers=%d overflow_rows=%lld\n",
+            "%s: target=%s rows=%lld threshold=%g stored_max=%lld compact_capacity=%lld compact_used=%lld compact_overflow=%d total_outliers=%lld max_row_outliers=%d overflow_rows=%lld\n",
             caller,
             target != nullptr ? target : "(unknown)",
             (long long) ne01,
@@ -84,9 +86,39 @@ void ggml_cuda_nvfp4_log_kcache_outlier_counts(
             (long long) capacity_limit,
             (long long) compact_capacity,
             (long long) (offsets != nullptr ? cursor_h : 0),
+            compact_overflow ? 1 : 0,
             (long long) total,
             max_count,
             (long long) overflow_rows);
+}
+
+void ggml_cuda_nvfp4_log_kcache_outlier_overflow_if_any(
+        const char * caller,
+        const char * target,
+        const int64_t * dst_rows,
+        const int32_t * counts,
+        const int32_t * offsets,
+        const int32_t * cursor,
+        int64_t ne01,
+        int64_t dst_rows_stride,
+        int64_t sidecar_rows,
+        int64_t compact_capacity,
+        float threshold,
+        cudaStream_t stream) {
+    if (cursor == nullptr || compact_capacity <= 0 || !ggml_cuda_nvfp4_log_can_copy_from_stream(stream)) {
+        return;
+    }
+
+    int32_t cursor_h = 0;
+    CUDA_CHECK(cudaMemcpyAsync(&cursor_h, cursor, sizeof(cursor_h), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if ((int64_t) cursor_h <= compact_capacity) {
+        return;
+    }
+
+    ggml_cuda_nvfp4_log_kcache_outlier_counts(
+            caller, target, dst_rows, counts, offsets, cursor,
+            ne01, dst_rows_stride, sidecar_rows, compact_capacity, compact_capacity, threshold, stream);
 }
 
 void ggml_cuda_nvfp4_log_vcache_fast_update_once(bool enabled) {
