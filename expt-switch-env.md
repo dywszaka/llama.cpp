@@ -41,13 +41,15 @@ flash attention is not supported, and KQ/V offload must be enabled.
 
 ### `GGML_CUDA_NVFP4_BF16_QUANT`
 
-Enables the experimental BF16-round NVFP4 RHS activation quantizer in the CUDA
-native NVFP4 matmul path. Default: off.
+Parent switch for the experimental BF16 trunc-NN NVFP4 RHS activation quantizer
+in the CUDA native NVFP4 matmul path. Default: off.
 
-When enabled, CUDA native NVFP4 matmul converts each F32 RHS activation value to
-rounded BF16 bits first, then uses the QuantBF16-style fixed-point NVFP4 block
-scale and E2M1 magnitude threshold algorithm. When disabled, the existing FP32
-nearest-neighbor NVFP4 quantizer remains active.
+This switch only changes behavior together with
+`GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=1`. When disabled, or when
+`GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN` is disabled, the existing FP32
+nearest-neighbor NVFP4 quantizer remains active unless
+`GGML_CUDA_NVFP4_TRUNC_BF16_INPUT=1` selects the separate trunc-input FP32
+nearest-neighbor path.
 
 Initial scope: `GGML_TYPE_NVFP4 x GGML_TYPE_F32 -> GGML_TYPE_F32` CUDA native
 matmul activation quantization, including static input-scale and dynamic
@@ -63,6 +65,70 @@ cuBLASLt instead of one batched `N` dimension call when `N > 1`. This is useful
 for isolating whether ubatch-dependent GEMM shape changes affect upstream F32
 activations before K-cache outlier extraction. It should not be used for
 performance measurements.
+
+### `GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN`
+
+Enables an experimental hardware-friendly BF16-input NVFP4 RHS activation
+quantizer that more closely follows `GGML_CUDA_NVFP4_TRUNC_BF16_INPUT=1`.
+Default: off.
+
+When enabled with `GGML_CUDA_NVFP4_BF16_QUANT=1`, the CUDA quantizer truncates
+each F32 RHS activation value to the BF16 value range by clearing the lower 16
+bits of the FP32 representation, then performs the internal block-scale and
+E2M1 magnitude-selection arithmetic with FP32 multiply/add/compare operations.
+The E4M3 block scale is generated from FP32 bit fields, and FP4 magnitudes are
+selected with nearest-neighbor thresholds whose exact ties choose the lower code,
+matching the existing table-search nearest-neighbor behavior.
+
+The implementation avoids runtime division, FP8 conversion intrinsics,
+lookup-table nearest-neighbor searches, and special math functions in the BF16
+quantization inner path. Dynamic RHS scale discovery uses the same BF16-truncated
+values for `amax`.
+
+### `GGML_CUDA_NVFP4_BF16_QUANT_BF16_INTERNAL`
+
+Enables an experimental BF16-precision internal arithmetic variant of the BF16
+trunc-NN NVFP4 RHS activation quantizer. Default: off.
+
+This switch only changes behavior when both `GGML_CUDA_NVFP4_BF16_QUANT=1` and
+`GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=1` are also enabled. The activation input
+is still truncated to BF16 bits, and block maximum search still compares BF16
+absolute-value bits. With this switch enabled, the target and nearest-neighbor
+threshold multiply/add operations used for E2M1 magnitude selection are
+truncated to the BF16 value range before comparison. The default blockscale
+calculation still uses the FP32 tensor/global scale arithmetic unless
+`GGML_CUDA_NVFP4_BF16_QUANT_BF16_BLOCK_SCALE=1` is also enabled.
+
+### `GGML_CUDA_NVFP4_BF16_QUANT_BF16_BLOCK_SCALE`
+
+Enables an experimental BF16-precision blockscale calculation for the BF16
+trunc-NN NVFP4 RHS activation quantizer. Default: off.
+
+This switch only changes behavior when `GGML_CUDA_NVFP4_BF16_QUANT=1`,
+`GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=1`, and
+`GGML_CUDA_NVFP4_BF16_QUANT_BF16_INTERNAL=1` are also enabled. The activation
+input is truncated to BF16 bits and group maximum search compares BF16
+absolute-value bits. In addition, the tensor/global scale operand is truncated
+to the BF16 value range and blockscale multiply operations are truncated after
+each multiply. This models a lower-cost hardware path where both blockscale and
+quantized-value selection use BF16-like arithmetic while preserving the
+hardware-friendly bit-field E4M3 scale encoder.
+
+### `GGML_CUDA_NVFP4_TRUNC_BF16_INPUT`
+
+Enables an experimental pre-quantization truncation step in the CUDA native NVFP4
+FP32 nearest-neighbor RHS activation quantizer. Default: off.
+
+When enabled and the BF16 trunc-NN path is disabled, the FP32 RHS activation
+value is first truncated to the BF16 value range by clearing the lower 16 bits
+of the FP32 representation. The existing FP32 nearest-neighbor NVFP4 block-scale
+and E2M1 code selection then runs on the truncated value. Dynamic RHS scale
+discovery uses the same truncated values for its `amax` computation.
+
+Initial scope: `GGML_TYPE_NVFP4 x GGML_TYPE_F32 -> GGML_TYPE_F32` CUDA native
+matmul activation quantization. This switch is intended to model callers whose
+activation input values are already BF16-truncated while preserving the existing
+nearest-neighbor NVFP4 quantizer.
 
 ## NVFP4 K-Cache Outlier Sidecar
 

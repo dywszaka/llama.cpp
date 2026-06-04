@@ -30,11 +30,11 @@ static float e4m3_to_f32(uint8_t x) {
             const int leading = __builtin_clz(mantissa);
             const int shift = leading - 29;
             const uint32_t man = mantissa << shift;
-            const uint32_t exp = 127 - 6 - shift;
-            bits = sign | (exp << 23) | (man & 0x7) << 20;
+            const uint32_t exp = 120 - shift;
+            bits = sign | (exp << 23) | (man & 0x3) << 21;
         }
-    } else if (exponent == 0x0F) {
-        bits = mantissa == 0x7 ? (sign | 0x7F800000 | (1u << 22)) : (sign | 0x43E00000);
+    } else if (exponent == 0x0F && mantissa == 0x7) {
+        bits = sign | 0x7F800000 | (1u << 22);
     } else {
         const uint32_t exp = (exponent - 7 + 127) << 23;
         const uint32_t man = mantissa << (23 - 3);

@@ -656,20 +656,30 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             ggml_tensor_get_nvfp4_kcache_outlier_offsets(src0) != nullptr &&
             ggml_tensor_get_nvfp4_kcache_outlier_indices(src0) != nullptr &&
             ggml_tensor_get_nvfp4_kcache_outlier_values(src0) != nullptr;
-    const bool use_bf16_quant = ggml_cuda_nvfp4_bf16_quant_enabled();
+    const bool use_bf16_trunc_nn =
+            ggml_cuda_nvfp4_bf16_quant_enabled() &&
+            ggml_cuda_nvfp4_bf16_quant_trunc_nn_enabled();
+    const bool use_bf16_internal_arith =
+            use_bf16_trunc_nn &&
+            ggml_cuda_nvfp4_bf16_quant_bf16_internal_enabled();
+    const bool use_bf16_block_scale =
+            use_bf16_internal_arith &&
+            ggml_cuda_nvfp4_bf16_quant_bf16_block_scale_enabled();
+    const bool use_trunc_bf16_input = !use_bf16_trunc_nn && ggml_cuda_nvfp4_trunc_bf16_input_enabled();
+    const bool use_trunc_for_amax = use_trunc_bf16_input || use_bf16_trunc_nn;
     if (used_dynamic_scale) {
         if (use_outlier_q_tensor_scale) {
             CUDA_CHECK(cudaMemsetAsync(dynamic_amax_rows.get(), 0, sizeof(float), stream));
             ggml_cuda_nvfp4_abs_max_tensor_f32(
                     (const float *) src1->data,
                     dynamic_amax_rows.get(), ne10, ne11,
-                    src1->nb[1] / (int64_t) sizeof(float), stream);
+                    src1->nb[1] / (int64_t) sizeof(float), use_trunc_for_amax, stream);
             CUDA_CHECK(cudaGetLastError());
         } else {
             ggml_cuda_nvfp4_abs_max_rows_f32(
                     (const float *) src1->data,
                     dynamic_amax_rows.get(), ne10, ne11,
-                    src1->nb[1] / (int64_t) sizeof(float), stream);
+                    src1->nb[1] / (int64_t) sizeof(float), use_trunc_for_amax, stream);
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -682,19 +692,20 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                 stream);
         CUDA_CHECK(cudaGetLastError());
 
-        if (use_bf16_quant) {
+        if (use_bf16_trunc_nn) {
             ggml_cuda_nvfp4_quantize_rows_dynamic_bf16_f32(
                     (const float *) src1->data, src1_q_nvfp4.get(),
                     ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
-                    dynamic_amax_rows.get(), use_outlier_q_tensor_scale, stream);
+                    dynamic_amax_rows.get(), use_outlier_q_tensor_scale,
+                    use_bf16_internal_arith, use_bf16_block_scale, stream);
         } else {
             ggml_cuda_nvfp4_quantize_rows_dynamic_f32(
                     (const float *) src1->data, src1_q_nvfp4.get(),
                     ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
-                    dynamic_amax_rows.get(), use_outlier_q_tensor_scale, stream);
+                    dynamic_amax_rows.get(), use_outlier_q_tensor_scale, use_trunc_bf16_input, stream);
         }
     } else {
-        if (use_bf16_quant) {
+        if (use_bf16_trunc_nn) {
             CUDA_CHECK(cudaMemcpyAsync(
                     dynamic_input_scales.get(),
                     &global_scale,
@@ -704,12 +715,13 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             ggml_cuda_nvfp4_quantize_rows_bf16_f32(
                     (const float *) src1->data, src1_q_nvfp4.get(),
                     ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
-                    dynamic_input_scales.get(), true, stream);
+                    dynamic_input_scales.get(), true,
+                    use_bf16_internal_arith, use_bf16_block_scale, stream);
         } else {
             ggml_cuda_nvfp4_quantize_rows_f32(
                     (const float *) src1->data, src1_q_nvfp4.get(),
                     ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
-                    global_scale, stream);
+                    global_scale, use_trunc_bf16_input, stream);
         }
     }
     CUDA_CHECK(cudaGetLastError());
@@ -880,7 +892,8 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     // cuBLASLt FP4 path applies the channel scale directly to packed FP4 values.
     // For statically-bound activations we recover the missing 1/global_scale in alpha.
     // For dynamic RHS quantization we apply per-column input_scale after matmul.
-    const float matmul_alpha = used_dynamic_scale ? 1.0f : ((global_scale != 0.0f) ? (out_scale / global_scale) : out_scale);
+    const float matmul_alpha = used_dynamic_scale ? 1.0f :
+            ((global_scale != 0.0f) ? (out_scale / global_scale) : out_scale);
 
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = row_split_mode ? "matmul_row_split" : "matmul";

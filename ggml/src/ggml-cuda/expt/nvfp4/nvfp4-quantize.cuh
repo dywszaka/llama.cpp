@@ -8,6 +8,10 @@
 #include <cstdint>
 
 bool ggml_cuda_nvfp4_bf16_quant_enabled();
+bool ggml_cuda_nvfp4_bf16_quant_trunc_nn_enabled();
+bool ggml_cuda_nvfp4_bf16_quant_bf16_internal_enabled();
+bool ggml_cuda_nvfp4_bf16_quant_bf16_block_scale_enabled();
+bool ggml_cuda_nvfp4_trunc_bf16_input_enabled();
 
 void ggml_cuda_nvfp4_abs_max_rows_f32(
         const float * src,
@@ -15,6 +19,7 @@ void ggml_cuda_nvfp4_abs_max_rows_f32(
         int64_t ne00,
         int64_t ne01,
         int64_t s01,
+        bool truncate_bf16_input,
         cudaStream_t stream);
 
 void ggml_cuda_nvfp4_abs_max_tensor_f32(
@@ -23,6 +28,7 @@ void ggml_cuda_nvfp4_abs_max_tensor_f32(
         int64_t ne00,
         int64_t ne01,
         int64_t s01,
+        bool truncate_bf16_input,
         cudaStream_t stream);
 
 void ggml_cuda_nvfp4_prepare_dynamic_input_scales(
@@ -40,6 +46,7 @@ void ggml_cuda_nvfp4_quantize_rows_f32(
         int64_t s01,
         int64_t ne01,
         float global_scale,
+        bool truncate_bf16_input,
         cudaStream_t stream);
 
 void ggml_cuda_nvfp4_quantize_rows_dynamic_f32(
@@ -50,6 +57,7 @@ void ggml_cuda_nvfp4_quantize_rows_dynamic_f32(
         int64_t ne01,
         const float * amax_rows,
         bool per_tensor_scale,
+        bool truncate_bf16_input,
         cudaStream_t stream);
 
 void ggml_cuda_nvfp4_quantize_rows_bf16_f32(
@@ -60,6 +68,8 @@ void ggml_cuda_nvfp4_quantize_rows_bf16_f32(
         int64_t ne01,
         const float * global_scales,
         bool per_tensor_scale,
+        bool bf16_internal_arith,
+        bool bf16_block_scale,
         cudaStream_t stream);
 
 void ggml_cuda_nvfp4_quantize_rows_dynamic_bf16_f32(
@@ -70,4 +80,6 @@ void ggml_cuda_nvfp4_quantize_rows_dynamic_bf16_f32(
         int64_t ne01,
         const float * amax_rows,
         bool per_tensor_scale,
+        bool bf16_internal_arith,
+        bool bf16_block_scale,
         cudaStream_t stream);

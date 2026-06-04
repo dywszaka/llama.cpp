@@ -499,11 +499,12 @@ static inline float ggml_e4m3_to_fp32(uint8_t x) {
             // normalize mantissa
             int shift = __builtin_clz(mantissa) - 29; // position to normalize
             mantissa <<= shift;
-            uint32_t exp = 127 - 6 - shift;
-            bits = sign | (exp << 23) | ((mantissa & 0x7) << 20);
+            uint32_t exp = 120 - shift;
+            bits = sign | (exp << 23) | ((mantissa & 0x3) << 21);
         }
     } else if (exponent == 0x0F && mantissa == 0x7) {
-        // float8_e4m3fn: no Inf. exp=0x0F, mantissa=7 -> NaN.
+        // float8_e4m3fn has no Inf. Only S.1111.111 is NaN; the other
+        // exp=0x0F encodings are finite normals from 256.0f to 448.0f.
         uint32_t man = 1u << 22; // quiet NaN
         bits = sign | 0x7F800000 | man;
     } else {

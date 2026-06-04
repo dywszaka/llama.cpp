@@ -12,7 +12,14 @@ static constexpr float GGML_CUDA_NVFP4_KCACHE_OUTLIER_GLOBAL_SCALE_MAX = 1344.0f
 static constexpr float GGML_CUDA_NVFP4_KCACHE_OUTLIER_THRESHOLD = 16.0f;
 
 static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_global_scale_from_amax(float amax) {
-    return (amax > 0.0f && isfinite(amax)) ? (GGML_CUDA_NVFP4_KCACHE_OUTLIER_GLOBAL_SCALE_MAX / amax) : 0.0f;
+    if (!(amax > 0.0f) || !isfinite(amax)) {
+        return 0.0f;
+    }
+#ifdef __CUDA_ARCH__
+    return __fdiv_rn(GGML_CUDA_NVFP4_KCACHE_OUTLIER_GLOBAL_SCALE_MAX, amax);
+#else
+    return GGML_CUDA_NVFP4_KCACHE_OUTLIER_GLOBAL_SCALE_MAX / amax;
+#endif
 }
 
 static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_k_global_scale(

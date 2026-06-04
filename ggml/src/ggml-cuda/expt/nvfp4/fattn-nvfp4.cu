@@ -953,9 +953,9 @@ static bool ggml_cuda_flash_attn_ext_nvfp4_gpu_native(ggml_backend_cuda_context 
     ggml_cuda_pool_alloc<block_nvfp4> k_q(ctx.pool(), k_nvfp4_cache ? 0 : (size_t) k_rows * (size_t) (d / QK_NVFP4));
     ggml_cuda_pool_alloc<block_nvfp4> v_q(ctx.pool(), (size_t) v_rows * (size_t) (kv_len / QK_NVFP4));
     if (!k_nvfp4_cache) {
-        ggml_cuda_nvfp4_quantize_rows_f32(k_centered.get(), k_q.get(), d, d, k_rows, k_global_scale, stream);
+        ggml_cuda_nvfp4_quantize_rows_f32(k_centered.get(), k_q.get(), d, d, k_rows, k_global_scale, false, stream);
     }
-    ggml_cuda_nvfp4_quantize_rows_f32(v_by_dim.get(), v_q.get(), kv_len, kv_len, v_rows, v_global_scale, stream);
+    ggml_cuda_nvfp4_quantize_rows_f32(v_by_dim.get(), v_q.get(), kv_len, kv_len, v_rows, v_global_scale, false, stream);
     CUDA_CHECK(cudaGetLastError());
 
     ggml_cuda_pool_alloc<float> qk(ctx.pool(), (size_t) bh_rows * (size_t) kv_len * (size_t) q_len);

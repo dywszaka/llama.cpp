@@ -22,8 +22,40 @@ void ggml_cuda_nvfp4_log_bf16_quant_once(const char * env, bool enabled) {
     GGML_LOG_INFO("%s: GGML_CUDA_NVFP4_BF16_QUANT=%s -> %s\n",
             __func__,
             env != nullptr ? env : "(unset)",
-            enabled ? "enabled, F32 activations round to BF16 before NVFP4 quantization"
+            enabled ? "enabled, BF16 activation quantization parent switch is active"
                     : "disabled, using FP32 nearest-neighbor NVFP4 quantization");
+}
+
+void ggml_cuda_nvfp4_log_bf16_quant_trunc_nn_once(const char * env, bool enabled) {
+    GGML_LOG_INFO("%s: GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=%s -> %s\n",
+            __func__,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, BF16 activation quantizer truncates FP32 inputs to BF16 and uses hardware-friendly NN thresholds"
+                    : "disabled, BF16 activation quantizer does not use the truncation NN variant");
+}
+
+void ggml_cuda_nvfp4_log_bf16_quant_bf16_internal_once(const char * env, bool enabled) {
+    GGML_LOG_INFO("%s: GGML_CUDA_NVFP4_BF16_QUANT_BF16_INTERNAL=%s -> %s\n",
+            __func__,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, BF16 trunc-NN quantizer uses BF16 RNE target multiply and BF16 threshold arithmetic"
+                    : "disabled, BF16 trunc-NN quantizer keeps internal scale/threshold arithmetic in FP32 precision");
+}
+
+void ggml_cuda_nvfp4_log_bf16_quant_bf16_block_scale_once(const char * env, bool enabled) {
+    GGML_LOG_INFO("%s: GGML_CUDA_NVFP4_BF16_QUANT_BF16_BLOCK_SCALE=%s -> %s\n",
+            __func__,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, BF16 trunc-NN quantizer truncates tensor scale and blockscale multiply arithmetic to BF16 precision"
+                    : "disabled, BF16 trunc-NN quantizer computes blockscale with FP32 tensor scale arithmetic");
+}
+
+void ggml_cuda_nvfp4_log_trunc_bf16_input_once(const char * env, bool enabled) {
+    GGML_LOG_INFO("%s: GGML_CUDA_NVFP4_TRUNC_BF16_INPUT=%s -> %s\n",
+            __func__,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, FP32 nearest-neighbor NVFP4 quantization truncates activations to BF16-value range first"
+                    : "disabled, FP32 nearest-neighbor NVFP4 quantization uses full FP32 activations");
 }
 
 void ggml_cuda_nvfp4_log_kcache_outlier_counts(

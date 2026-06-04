@@ -604,10 +604,12 @@ static __host__ __device__ __forceinline__ float ggml_cuda_e4m3_to_fp32(uint8_t 
 #endif
             const int shift = leading - 29;
             const uint32_t man = mantissa << shift;
-            const uint32_t exp = 127 - 6 - shift;
-            bits = sign | (exp << 23) | (man & 0x7) << 20;
+            const uint32_t exp = 120 - shift;
+            bits = sign | (exp << 23) | ((man & 0x3) << 21);
         }
     } else if (exponent == 0x0F && mantissa == 0x7) {
+        // E4M3FN has no Inf. Only S.1111.111 is NaN; the other exp=0x0F
+        // encodings are finite normals from 256.0f to 448.0f.
         bits = sign | 0x7F800000 | (1u << 22); // NaN
     } else {
         const uint32_t exp = (exponent - 7 + 127) << 23;

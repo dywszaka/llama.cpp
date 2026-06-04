@@ -5,6 +5,10 @@
 bool ggml_cuda_nvfp4_log_can_copy_from_stream(cudaStream_t stream);
 
 void ggml_cuda_nvfp4_log_bf16_quant_once(const char * env, bool enabled);
+void ggml_cuda_nvfp4_log_bf16_quant_trunc_nn_once(const char * env, bool enabled);
+void ggml_cuda_nvfp4_log_bf16_quant_bf16_internal_once(const char * env, bool enabled);
+void ggml_cuda_nvfp4_log_bf16_quant_bf16_block_scale_once(const char * env, bool enabled);
+void ggml_cuda_nvfp4_log_trunc_bf16_input_once(const char * env, bool enabled);
 
 void ggml_cuda_nvfp4_log_kcache_outlier_counts(
         const char * caller,
