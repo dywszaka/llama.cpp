@@ -256,7 +256,7 @@ if (GGML_CUDA)
     endif()
     target_include_directories(${LLAMA_TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
     llama_test(test-vcache-fp8-e4m3-e8m0 LABEL "cuda")
-    target_link_libraries(${LLAMA_TEST_NAME} PRIVATE CUDA::cudart)
+    target_link_libraries(${LLAMA_TEST_NAME} PRIVATE CUDA::cudart CUDA::cublas CUDA::cuda_driver)
     unset(LLAMA_TEST_NAME)
 
     set(LLAMA_TEST_NAME test-vcache-nvfp4-8)
