@@ -281,6 +281,8 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                 __func__, hparams.n_embd_v_gqa_max());
     }
 
+    size_t nvfp4_kcache_outlier_sidecar_bytes = 0;
+
     for (uint32_t il = 0; il < n_layer_cache; il++) {
         if (filter && !filter(il)) {
             LLAMA_LOG_DEBUG("%s: layer %3d: skipped\n", __func__, il);
@@ -355,6 +357,11 @@ llama_kv_cache_unified::llama_kv_cache_unified(
             ggml_format_name(k_outlier_count, "cache_k_outlier_count_l%d", il);
             ggml_format_name(k_outlier_index, "cache_k_outlier_index_l%d", il);
             ggml_format_name(k_outlier_value, "cache_k_outlier_value_l%d", il);
+            nvfp4_kcache_outlier_sidecar_bytes += ggml_nbytes(k_outlier_count);
+            nvfp4_kcache_outlier_sidecar_bytes += ggml_nbytes(k_outlier_offset);
+            nvfp4_kcache_outlier_sidecar_bytes += ggml_nbytes(k_outlier_cursor);
+            nvfp4_kcache_outlier_sidecar_bytes += ggml_nbytes(k_outlier_index);
+            nvfp4_kcache_outlier_sidecar_bytes += ggml_nbytes(k_outlier_value);
         }
         if (use_nvfp4_vcache_layout()) {
             v_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_v_scale, n_stream);
@@ -427,6 +434,11 @@ llama_kv_cache_unified::llama_kv_cache_unified(
 
             LLAMA_LOG_DEBUG("%s: layer %3d: reuse layer %d, isw = %d\n", __func__, il, il_reuse, is_swa);
         }
+    }
+
+    if (nvfp4_kcache_outlier) {
+        LLAMA_LOG_INFO("%s: NVFP4 K-cache compact outlier sidecar size = %8.2f MiB (%zu bytes)\n",
+                __func__, nvfp4_kcache_outlier_sidecar_bytes/1024.0/1024.0, nvfp4_kcache_outlier_sidecar_bytes);
     }
 
     // allocate tensors and initialize the buffers to avoid NaNs in the padding

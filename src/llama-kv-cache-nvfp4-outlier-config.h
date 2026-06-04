@@ -18,12 +18,12 @@
 // layer. Layers listed in hybrid_fp8_e4m3_e8m0_32_layers do not allocate NVFP4
 // outlier sidecars when hybrid mode is enabled.
 //
-// The ctx8192 table was derived from:
-//   experiments/20260602T061500Z-kcache-outlier-capacity-nctx-scaling/
-// using:
-//   scripts/run_hybrid_capacity_nctx.sh 8192
-// with V=nvfp4, --no-warmup, --chunks 1, and capacity scale=16 to avoid
-// clipping. Values are max(base_ctx512_capacity, ceil(ctx8192_peak * 1.25)).
+// The ctx8192 table was re-derived for the balanced threshold profile from:
+//   experiments/20260604T085500Z-balanced-threshold-ctx8192-capacity-derive/
+// using the full fourth-case PPL profile at n_ctx=8192. Values are
+// max(base_ctx512_capacity, ceil(observed_peak_compact_used * 1.5)). For this
+// balanced-threshold run, the derived ctx8192 capacities match the ctx512
+// compact-min capacities and validate with no compact overflow.
 
 static constexpr float llama_nvfp4_kcache_outlier_threshold = 16.0f;
 
@@ -58,21 +58,14 @@ static constexpr uint32_t llama_nvfp4_kcache_outlier_layer_capacities[] = {
 };
 
 static constexpr uint32_t llama_nvfp4_kcache_outlier_layer_capacities_ctx8192[] = {
-        0,   0, 695,  72,   0,   0,   0,  68,   0,
+        0,   0, 418,  72,   0,   0,   0,  68,   0,
        14,   0,   0,   0,  29,   0,  46, 174,  31,
-      409,  16, 129, 564, 580,   0,  17, 128,  26,
-       77,  28,  29,1664,  30,   8,  18,1667,   0,
+      294,  16, 129, 321, 221,   0,  17,  61,  26,
+       48,  28,  29, 883,  30,   8,  18, 751,   0,
 };
 
 static constexpr uint32_t llama_nvfp4_kcache_hybrid_fp8_e4m3_e8m0_32_layers[] = {
         0, 1, 4, 5, 6, 8, 10, 11, 12, 14, 23, 35,
-};
-
-static constexpr float llama_nvfp4_kcache_outlier_layer_thresholds_hybrid[] = {
-       16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f,
-       16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f,
-       16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f,
-       16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f, 16.0f,
 };
 
 static constexpr size_t llama_nvfp4_kcache_outlier_layer_capacity_count =
@@ -94,10 +87,6 @@ static constexpr size_t llama_nvfp4_kcache_outlier_layer_thresholds_balanced_cou
 static constexpr size_t llama_nvfp4_kcache_outlier_layer_capacities_balanced_count =
         sizeof(llama_nvfp4_kcache_outlier_layer_capacities_balanced) /
         sizeof(llama_nvfp4_kcache_outlier_layer_capacities_balanced[0]);
-
-static constexpr size_t llama_nvfp4_kcache_outlier_layer_thresholds_hybrid_count =
-        sizeof(llama_nvfp4_kcache_outlier_layer_thresholds_hybrid) /
-        sizeof(llama_nvfp4_kcache_outlier_layer_thresholds_hybrid[0]);
 
 static inline bool llama_nvfp4_kcache_outlier_enabled() {
     const char * value = std::getenv("LLAMA_NVFP4_KCACHE_OUTLIER");
@@ -149,13 +138,13 @@ static inline const char * llama_nvfp4_kcache_outlier_layer_capacity_profile_for
 }
 
 static inline float llama_nvfp4_kcache_outlier_layer_threshold(uint32_t layer, bool hybrid_fp8) {
-    const float * thresholds = hybrid_fp8 ? llama_nvfp4_kcache_outlier_layer_thresholds_hybrid
-                                          : llama_nvfp4_kcache_outlier_layer_thresholds_balanced;
-    const size_t count = hybrid_fp8 ? llama_nvfp4_kcache_outlier_layer_thresholds_hybrid_count
-                                    : llama_nvfp4_kcache_outlier_layer_thresholds_balanced_count;
-    return (size_t) layer < count ? thresholds[layer] : llama_nvfp4_kcache_outlier_threshold;
+    (void) hybrid_fp8;
+    return (size_t) layer < llama_nvfp4_kcache_outlier_layer_thresholds_balanced_count
+                   ? llama_nvfp4_kcache_outlier_layer_thresholds_balanced[layer]
+                   : llama_nvfp4_kcache_outlier_threshold;
 }
 
 static inline const char * llama_nvfp4_kcache_outlier_layer_threshold_profile(bool hybrid_fp8) {
-    return hybrid_fp8 ? "hybrid_threshold16" : "balanced";
+    (void) hybrid_fp8;
+    return "balanced";
 }

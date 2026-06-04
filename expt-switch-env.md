@@ -71,8 +71,8 @@ quantization uses the layer threshold as tensor amax for the K global scale.
 When this switch is on together with
 `LLAMA_NVFP4_KCACHE_OUTLIER_HYBRID_FP8=1`, the selected high/medium layers are
 stored as FP8(E4M3+E8M0 block32), and the remaining NVFP4 K-cache layers use the
-current hybrid threshold/capacity profile fixed in
-`src/llama-kv-cache-nvfp4-outlier-config.h`.
+balanced threshold profile and current context-specific capacity profile fixed
+in `src/llama-kv-cache-nvfp4-outlier-config.h`.
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_HYBRID_FP8`
 

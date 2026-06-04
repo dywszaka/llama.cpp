@@ -35,5 +35,6 @@ if grep -q "CPU KV buffer size" "${TMP_OUTPUT}"; then
 fi
 
 grep -q "hybrid FP8(E4M3+E8M0 block32) K-cache layers enabled: 0,1,4,5,6,8,10,11,12,14,23,35" "${TMP_OUTPUT}"
-grep -q "NVFP4 K-cache compact outlier sidecar enabled: threshold_profile=.* layer_capacity_profile=.* layer_capacities=36" "${TMP_OUTPUT}"
+grep -q "NVFP4 K-cache compact outlier sidecar enabled: threshold_profile=balanced layer_capacity_profile=.* layer_capacities=36" "${TMP_OUTPUT}"
+grep -q "NVFP4 K-cache compact outlier sidecar size = .* MiB (.* bytes)" "${TMP_OUTPUT}"
 grep -q "K (nvfp4+fp8_e4m3_e8m0_32)" "${TMP_OUTPUT}"
