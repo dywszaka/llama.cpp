@@ -74,6 +74,27 @@ stored as FP8(E4M3+E8M0 block32), and the remaining NVFP4 K-cache layers use the
 balanced threshold profile and current context-specific capacity profile fixed
 in `src/llama-kv-cache-nvfp4-outlier-config.h`.
 
+### `LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE`
+
+Selects the full-NVFP4 K-cache outlier threshold/capacity profile when
+`LLAMA_NVFP4_KCACHE_OUTLIER=1` and hybrid FP8 K-cache is not enabled. Default:
+unset, which uses the original `balanced` profile.
+
+Supported values:
+
+- `new`: use the ratio-1e-4 profile derived from
+  `experiments/20260605T072559Z-kcache-outlier-threshold-ratio-sweep/`, with
+  capacities calibrated by
+  `experiments/20260605T081206Z-kcache-outlier-ratio1e4-default-ppl/`.
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD`
+
+Overrides the per-layer balanced NVFP4 K-cache outlier threshold with one global
+absolute-value threshold. Default: unset/off.
+
+This is intended for threshold sweep diagnostics. When unset,
+`LLAMA_NVFP4_KCACHE_OUTLIER=1` uses the selected per-layer profile.
+
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_HYBRID_FP8`
 
 Switch B. Enables the fixed high/medium hybrid FP8 K-cache layer set:

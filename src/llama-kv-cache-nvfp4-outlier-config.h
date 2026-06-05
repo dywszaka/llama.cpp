@@ -35,7 +35,7 @@ static constexpr float llama_nvfp4_kcache_outlier_threshold = 16.0f;
 // This profile targets closer per-layer outlier counts than the earlier
 // density-only profile while avoiding global thresholds that showed large PPL
 // regression in the sweep data. It is used when NVFP4 K-cache outlier sidecar is
-// enabled without hybrid FP8 K-cache layers.
+// enabled without hybrid FP8 K-cache layers and no alternate profile is selected.
 static constexpr float llama_nvfp4_kcache_outlier_layer_thresholds_balanced[] = {
       256.0f,  48.0f,  24.0f,  32.0f,  48.0f, 192.0f,  32.0f,  24.0f, 192.0f,
        24.0f, 192.0f,  32.0f,  24.0f,  24.0f,  24.0f,  24.0f,  24.0f,  32.0f,
@@ -48,6 +48,31 @@ static constexpr uint32_t llama_nvfp4_kcache_outlier_layer_capacities_balanced[]
         2,  1,  5, 24,  5,  5,  3,  3,  1,
         1,  4,  1,  1,  4, 29,  3,  1,  1,
         1,  1,  1,  1,  1,  1,  1,  1, 25,
+};
+
+// New full-NVFP4 profile selected by:
+//   LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE=new
+//
+// It was derived from the real-data max-batch outlier-ratio sweep in:
+//   experiments/20260605T072559Z-kcache-outlier-threshold-ratio-sweep/
+// Capacity peaks were calibrated with the full PPL run in:
+//   experiments/20260605T081206Z-kcache-outlier-ratio1e4-default-ppl/
+//
+// This profile targets per-layer max 512-row batch outlier_ratio ~= 1e-4 using
+// the Wikitext PPL baseline input. Capacities are ceil(observed full-PPL
+// max-batch outliers * 2.0) from the selected thresholds.
+static constexpr float llama_nvfp4_kcache_outlier_layer_thresholds_new[] = {
+      214.00f,  42.00f,  19.00f,  16.25f,  42.00f,  72.00f,  26.00f,  15.25f,  40.00f,
+       13.00f,  38.00f,  27.00f,  23.00f,  14.50f,  21.00f,  14.50f,  17.00f,  13.50f,
+       17.75f,  12.50f,  13.50f,  18.25f,  17.75f,  23.00f,  13.00f,  16.25f,  14.50f,
+       15.50f,  14.50f,  15.50f,  20.25f,  15.00f,  15.75f,  13.00f,  20.25f,  30.00f,
+};
+
+static constexpr uint32_t llama_nvfp4_kcache_outlier_layer_capacities_new[] = {
+      138,  98, 126, 124, 292, 100, 190, 252, 234,
+      102, 164, 124,  94, 106, 116, 188, 194, 222,
+      234, 234, 322, 170, 156,  82, 164,  84, 124,
+      112, 100,  74, 100,  96,  32, 238,  96, 164,
 };
 
 static constexpr uint32_t llama_nvfp4_kcache_outlier_layer_capacities[] = {
@@ -88,9 +113,27 @@ static constexpr size_t llama_nvfp4_kcache_outlier_layer_capacities_balanced_cou
         sizeof(llama_nvfp4_kcache_outlier_layer_capacities_balanced) /
         sizeof(llama_nvfp4_kcache_outlier_layer_capacities_balanced[0]);
 
+static constexpr size_t llama_nvfp4_kcache_outlier_layer_thresholds_new_count =
+        sizeof(llama_nvfp4_kcache_outlier_layer_thresholds_new) /
+        sizeof(llama_nvfp4_kcache_outlier_layer_thresholds_new[0]);
+
+static constexpr size_t llama_nvfp4_kcache_outlier_layer_capacities_new_count =
+        sizeof(llama_nvfp4_kcache_outlier_layer_capacities_new) /
+        sizeof(llama_nvfp4_kcache_outlier_layer_capacities_new[0]);
+
 static inline bool llama_nvfp4_kcache_outlier_enabled() {
     const char * value = std::getenv("LLAMA_NVFP4_KCACHE_OUTLIER");
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+static inline const char * llama_nvfp4_kcache_outlier_threshold_override_env() {
+    const char * value = std::getenv("LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD");
+    return value != nullptr && value[0] != '\0' ? value : nullptr;
+}
+
+static inline bool llama_nvfp4_kcache_outlier_new_profile_enabled() {
+    const char * value = std::getenv("LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE");
+    return value != nullptr && std::strcmp(value, "new") == 0;
 }
 
 static inline const char * llama_nvfp4_kcache_hybrid_fp8_layers_env() {
@@ -119,32 +162,62 @@ static inline const char * llama_nvfp4_kcache_outlier_layer_capacity_profile_for
 static inline const uint32_t * llama_nvfp4_kcache_outlier_layer_capacities_for_mode(
         uint32_t kv_size,
         bool hybrid_fp8) {
-    return hybrid_fp8 ? llama_nvfp4_kcache_outlier_layer_capacities_for_ctx(kv_size)
-                      : llama_nvfp4_kcache_outlier_layer_capacities_balanced;
+    if (hybrid_fp8) {
+        return llama_nvfp4_kcache_outlier_layer_capacities_for_ctx(kv_size);
+    }
+    return llama_nvfp4_kcache_outlier_new_profile_enabled()
+                   ? llama_nvfp4_kcache_outlier_layer_capacities_new
+                   : llama_nvfp4_kcache_outlier_layer_capacities_balanced;
 }
 
 static inline size_t llama_nvfp4_kcache_outlier_layer_capacity_count_for_mode(
         uint32_t kv_size,
         bool hybrid_fp8) {
-    return hybrid_fp8 ? llama_nvfp4_kcache_outlier_layer_capacity_count_for_ctx(kv_size)
-                      : llama_nvfp4_kcache_outlier_layer_capacities_balanced_count;
+    if (hybrid_fp8) {
+        return llama_nvfp4_kcache_outlier_layer_capacity_count_for_ctx(kv_size);
+    }
+    return llama_nvfp4_kcache_outlier_new_profile_enabled()
+                   ? llama_nvfp4_kcache_outlier_layer_capacities_new_count
+                   : llama_nvfp4_kcache_outlier_layer_capacities_balanced_count;
 }
 
 static inline const char * llama_nvfp4_kcache_outlier_layer_capacity_profile_for_mode(
         uint32_t kv_size,
         bool hybrid_fp8) {
-    return hybrid_fp8 ? llama_nvfp4_kcache_outlier_layer_capacity_profile_for_ctx(kv_size)
-                      : "balanced";
+    if (hybrid_fp8) {
+        return llama_nvfp4_kcache_outlier_layer_capacity_profile_for_ctx(kv_size);
+    }
+    return llama_nvfp4_kcache_outlier_new_profile_enabled() ? "new" : "balanced";
 }
 
 static inline float llama_nvfp4_kcache_outlier_layer_threshold(uint32_t layer, bool hybrid_fp8) {
     (void) hybrid_fp8;
+    const char * override_value = llama_nvfp4_kcache_outlier_threshold_override_env();
+    if (override_value != nullptr) {
+        char * end = nullptr;
+        const float parsed = std::strtof(override_value, &end);
+        if (end != override_value && parsed > 0.0f) {
+            return parsed;
+        }
+    }
+
+    if (!hybrid_fp8 && llama_nvfp4_kcache_outlier_new_profile_enabled()) {
+        return (size_t) layer < llama_nvfp4_kcache_outlier_layer_thresholds_new_count
+                       ? llama_nvfp4_kcache_outlier_layer_thresholds_new[layer]
+                       : llama_nvfp4_kcache_outlier_threshold;
+    }
+
     return (size_t) layer < llama_nvfp4_kcache_outlier_layer_thresholds_balanced_count
                    ? llama_nvfp4_kcache_outlier_layer_thresholds_balanced[layer]
                    : llama_nvfp4_kcache_outlier_threshold;
 }
 
 static inline const char * llama_nvfp4_kcache_outlier_layer_threshold_profile(bool hybrid_fp8) {
-    (void) hybrid_fp8;
+    if (llama_nvfp4_kcache_outlier_threshold_override_env() != nullptr) {
+        return "env-override";
+    }
+    if (!hybrid_fp8 && llama_nvfp4_kcache_outlier_new_profile_enabled()) {
+        return "new";
+    }
     return "balanced";
 }
