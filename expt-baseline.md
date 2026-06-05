@@ -71,11 +71,11 @@ LLAMA_STDOUT_FILE="${WORKSPACE}/gpu.log" \
     -m /home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf \
     --n_gpu_layers 40 \
     --host 127.0.0.1 \
-    --batch-size 2048 \
+    --batch-size 512 \
     --ubatch-size 512 \
     --port 8080 \
     -t 32 \
-    -c 2048 \
+    -c 8192 \
     --cache-type-k f16 \
     --cache-type-v f16 \
     --kv-unified \
@@ -89,10 +89,10 @@ Fixed `llama-server` arguments:
 - Host: `--host 127.0.0.1`
 - Port: `--port 8080`
 - GPU layers: `--n_gpu_layers 40`
-- Batch size: `--batch-size 2048`
+- Batch size: `--batch-size 512`
 - UBatch size: `--ubatch-size 512`
 - Threads: `-t 32`
-- Context size: `-c 2048`
+- Context size: `-c 8192`
 - K cache type: `--cache-type-k f16`
 - V cache type: `--cache-type-v f16`
 - Flash attention: disabled by default; do not pass `--flash-attn`
