@@ -14,14 +14,16 @@
 // and the `hybrid_threshold16_compact_min` result in summary.md.
 //
 // Recompute these values when changing model, context size, prompt/data mix, or
-// K-cache layout. The layer capacities are compact sidecar entry counts per
-// layer. Layers listed in hybrid_fp8_e4m3_e8m0_32_layers do not allocate NVFP4
-// outlier sidecars when hybrid mode is enabled.
+// K-cache layout. The layer capacities are compact sidecar slot counts per KV
+// row for each layer; allocation multiplies this by kv_size so outlier entries
+// persist for the lifetime of their KV row. Layers listed in
+// hybrid_fp8_e4m3_e8m0_32_layers do not allocate NVFP4 outlier sidecars when
+// hybrid mode is enabled.
 //
 // The ctx8192 table was re-derived for the balanced threshold profile from:
 //   experiments/20260604T085500Z-balanced-threshold-ctx8192-capacity-derive/
 // using the full fourth-case PPL profile at n_ctx=8192. Values are
-// max(base_ctx512_capacity, ceil(observed_peak_compact_used * 1.5)). For this
+// max(base_ctx512_capacity, ceil(observed_peak_row_outliers * 1.5)). For this
 // balanced-threshold run, the derived ctx8192 capacities match the ctx512
 // compact-min capacities and validate with no compact overflow.
 

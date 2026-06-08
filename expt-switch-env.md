@@ -54,6 +54,16 @@ matmul activation quantization, including static input-scale and dynamic
 per-row/per-tensor RHS scale modes. This switch does not change stored NVFP4
 weights or generic dequantization paths.
 
+### `GGML_CUDA_NVFP4_NATIVE_ROW_SPLIT`
+
+Diagnostic switch for native CUDA NVFP4 matmul. Default: unset/off.
+
+When enabled, native NVFP4 matmul runs each RHS token column separately through
+cuBLASLt instead of one batched `N` dimension call when `N > 1`. This is useful
+for isolating whether ubatch-dependent GEMM shape changes affect upstream F32
+activations before K-cache outlier extraction. It should not be used for
+performance measurements.
+
 ## NVFP4 K-Cache Outlier Sidecar
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER`
@@ -115,6 +125,40 @@ scripts/parse-kcache-outlier-threshold-sweep.py
 scripts/derive-kcache-outlier-balanced-config.py
 scripts/run-kcache-outlier-balanced-experiment.sh
 ```
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_DETERMINISTIC_FILL`
+
+Diagnostic switch for the compact NVFP4 K-cache outlier sidecar. Default:
+unset/off.
+
+When enabled, CUDA fills each compact outlier row in ascending column order
+using a slow deterministic kernel instead of the default parallel atomic fill.
+This is intended to isolate whether compact sidecar entry order affects KQ
+correction and PPL. It should not be used for performance measurements.
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_NO_CORRECTION`
+
+Diagnostic switch for the compact NVFP4 K-cache outlier sidecar. Default:
+unset/off.
+
+When enabled, CUDA still extracts outliers and quantizes the residual K cache,
+but skips applying the outlier correction to KQ. This isolates residual K-cache
+quantization from correction accumulation behavior. It is expected to change
+model quality and should not be used as a correctness mode.
+
+### `LLAMA_NVFP4_KCACHE_OUTLIER_FINGERPRINT`
+
+Diagnostic switch for the compact NVFP4 K-cache outlier sidecar. Default:
+unset/off.
+
+When enabled, CUDA logs host-side hashes of the touched sidecar counts,
+offsets, compact indices, compact values, residual amax rows, destination row
+ranges, and source F32 K activation aggregates after each extract operation
+when stream capture allows host copies. The source aggregates include
+commutative sums/xors so multiple microbatch logs can be combined and compared
+with a larger-ubatch extract. This is for comparing ubatch-dependent sidecar
+contents and upstream K activation values, and is not suitable for performance
+measurements.
 
 ## NVFP4 V-Cache
 

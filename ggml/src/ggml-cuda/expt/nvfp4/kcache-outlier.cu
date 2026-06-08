@@ -5,8 +5,14 @@
 #include "ggml-impl.h"
 
 #include <cmath>
+#include <cstdlib>
 
 namespace {
+
+static bool env_flag_enabled(const char * name) {
+    const char * value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
 
 static __global__ void k_reset_outlier_rows(
         const int64_t * __restrict__ dst_rows,
@@ -115,8 +121,12 @@ static __global__ void k_assign_compact_offsets(
         return;
     }
 
-    const int32_t offset = atomicAdd(cursor, count);
-    offsets[dst_row] = ((int64_t) offset + count <= compact_capacity) ? offset : -1;
+    atomicAdd(cursor, count);
+    const int64_t row_capacity = compact_capacity / sidecar_rows;
+    const int64_t offset = dst_row * row_capacity;
+    offsets[dst_row] = row_capacity > 0 && count <= row_capacity && offset + count <= compact_capacity
+            ? (int32_t) offset
+            : -1;
 }
 
 static __global__ void k_fill_compact_outliers(
@@ -160,6 +170,53 @@ static __global__ void k_fill_compact_outliers(
         indices[entry] = (int32_t) col;
         values[entry] = v;
     }
+}
+
+static __global__ void k_fill_compact_outliers_deterministic(
+        const float * __restrict__ src,
+        const int64_t * __restrict__ dst_rows,
+        int32_t * __restrict__ counts,
+        const int32_t * __restrict__ offsets,
+        int32_t * __restrict__ indices,
+        float * __restrict__ values,
+        const int64_t ne00,
+        const int64_t ne01,
+        const int64_t src_stride,
+        const int64_t dst_rows_stride,
+        const int64_t sidecar_rows,
+        const int64_t compact_capacity,
+        const float threshold) {
+    const int64_t row = blockIdx.x;
+    if (row >= ne01) {
+        return;
+    }
+
+    const int64_t dst_row = dst_rows[row * dst_rows_stride];
+    if (dst_row < 0 || dst_row >= sidecar_rows) {
+        return;
+    }
+
+    const int32_t offset = offsets[dst_row];
+    if (offset < 0) {
+        return;
+    }
+
+    int32_t slot = 0;
+    const int64_t src_off = row * src_stride;
+    for (int64_t col = 0; col < ne00; ++col) {
+        const float v = src[src_off + col];
+        if (fabsf(v) <= threshold) {
+            continue;
+        }
+
+        const int64_t entry = (int64_t) offset + slot;
+        if (entry >= 0 && entry < compact_capacity) {
+            indices[entry] = (int32_t) col;
+            values[entry] = v;
+        }
+        ++slot;
+    }
+    counts[dst_row] = slot;
 }
 
 static __global__ void k_apply_outlier_correction(
@@ -231,6 +288,18 @@ static __global__ void k_apply_outlier_correction(
 
 } // namespace
 
+bool ggml_cuda_nvfp4_kcache_outlier_deterministic_fill_enabled() {
+    return env_flag_enabled("LLAMA_NVFP4_KCACHE_OUTLIER_DETERMINISTIC_FILL");
+}
+
+bool ggml_cuda_nvfp4_kcache_outlier_no_correction_enabled() {
+    return env_flag_enabled("LLAMA_NVFP4_KCACHE_OUTLIER_NO_CORRECTION");
+}
+
+bool ggml_cuda_nvfp4_kcache_outlier_fingerprint_enabled() {
+    return env_flag_enabled("LLAMA_NVFP4_KCACHE_OUTLIER_FINGERPRINT");
+}
+
 void ggml_cuda_nvfp4_kcache_outlier_extract(
         const char * target,
         const float * src,
@@ -277,12 +346,24 @@ void ggml_cuda_nvfp4_kcache_outlier_extract(
             dst_rows, counts, nullptr, ne01, sidecar_rows, dst_rows_stride);
     CUDA_CHECK(cudaGetLastError());
 
-    const dim3 block(block_size);
-    const dim3 grid((uint32_t) ((ne00 + block_size - 1) / block_size), (uint32_t) ne01, 1);
-    k_fill_compact_outliers<<<grid, block, 0, stream>>>(
-            src, dst_rows, counts, offsets, indices, values,
-            ne00, ne01, src_stride, dst_rows_stride, sidecar_rows, compact_capacity, threshold);
+    if (ggml_cuda_nvfp4_kcache_outlier_deterministic_fill_enabled()) {
+        k_fill_compact_outliers_deterministic<<<(int) ne01, 1, 0, stream>>>(
+                src, dst_rows, counts, offsets, indices, values,
+                ne00, ne01, src_stride, dst_rows_stride, sidecar_rows, compact_capacity, threshold);
+    } else {
+        const dim3 block(block_size);
+        const dim3 grid((uint32_t) ((ne00 + block_size - 1) / block_size), (uint32_t) ne01, 1);
+        k_fill_compact_outliers<<<grid, block, 0, stream>>>(
+                src, dst_rows, counts, offsets, indices, values,
+                ne00, ne01, src_stride, dst_rows_stride, sidecar_rows, compact_capacity, threshold);
+    }
     CUDA_CHECK(cudaGetLastError());
+
+    if (ggml_cuda_nvfp4_kcache_outlier_fingerprint_enabled()) {
+        ggml_cuda_nvfp4_log_kcache_outlier_fingerprint(
+                __func__, target, src, dst_rows, counts, offsets, cursor, indices, values, residual_amax,
+                ne00, ne01, src_stride, dst_rows_stride, sidecar_rows, compact_capacity, threshold, stream);
+    }
 
     if (ggml_cuda_nvfp4_log_can_copy_from_stream(stream)) {
 #ifndef NDEBUG
@@ -318,7 +399,7 @@ void ggml_cuda_nvfp4_kcache_outlier_apply_correction(
         int64_t kq_nb1_f32,
         cudaStream_t stream) {
     const int64_t total = kv_len * q_len;
-    if (total <= 0 || compact_capacity <= 0) {
+    if (total <= 0 || compact_capacity <= 0 || ggml_cuda_nvfp4_kcache_outlier_no_correction_enabled()) {
         return;
     }
     GGML_ASSERT(offsets != nullptr);

@@ -40,6 +40,10 @@ static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_
     return (global_scale != 0.0f && isfinite(global_scale)) ? (out_scale / global_scale) : 0.0f;
 }
 
+bool ggml_cuda_nvfp4_kcache_outlier_deterministic_fill_enabled();
+bool ggml_cuda_nvfp4_kcache_outlier_no_correction_enabled();
+bool ggml_cuda_nvfp4_kcache_outlier_fingerprint_enabled();
+
 void ggml_cuda_nvfp4_kcache_outlier_extract(
         const char * target,
         const float * src,

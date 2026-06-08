@@ -35,6 +35,26 @@ void ggml_cuda_nvfp4_log_kcache_outlier_overflow_if_any(
         float threshold,
         cudaStream_t stream);
 
+void ggml_cuda_nvfp4_log_kcache_outlier_fingerprint(
+        const char * caller,
+        const char * target,
+        const float * src,
+        const int64_t * dst_rows,
+        const int32_t * counts,
+        const int32_t * offsets,
+        const int32_t * cursor,
+        const int32_t * indices,
+        const float * values,
+        const float * residual_amax,
+        int64_t ne00,
+        int64_t ne01,
+        int64_t src_stride,
+        int64_t dst_rows_stride,
+        int64_t sidecar_rows,
+        int64_t compact_capacity,
+        float threshold,
+        cudaStream_t stream);
+
 void ggml_cuda_nvfp4_log_vcache_fast_update_once(bool enabled);
 void ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
 void ggml_cuda_nvfp4_log_vcache_matmul_path_once(const char * path);

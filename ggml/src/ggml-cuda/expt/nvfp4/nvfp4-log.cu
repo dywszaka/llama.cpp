@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <vector>
 
 bool ggml_cuda_nvfp4_log_can_copy_from_stream(cudaStream_t stream) {
@@ -75,7 +76,7 @@ void ggml_cuda_nvfp4_log_kcache_outlier_counts(
         }
     }
 
-    const bool compact_overflow = offsets != nullptr && (int64_t) cursor_h > compact_capacity;
+    const bool compact_overflow = overflow_rows > 0;
 
     GGML_LOG_INFO(
             "%s: target=%s rows=%lld threshold=%g stored_max=%lld compact_capacity=%lld compact_used=%lld compact_overflow=%d total_outliers=%lld max_row_outliers=%d overflow_rows=%lld\n",
@@ -109,16 +110,192 @@ void ggml_cuda_nvfp4_log_kcache_outlier_overflow_if_any(
         return;
     }
 
-    int32_t cursor_h = 0;
-    CUDA_CHECK(cudaMemcpyAsync(&cursor_h, cursor, sizeof(cursor_h), cudaMemcpyDeviceToHost, stream));
+    std::vector<int64_t> dst_rows_packed_h((size_t) ne01 * (size_t) dst_rows_stride);
+    std::vector<int64_t> dst_rows_h((size_t) ne01);
+    std::vector<int32_t> counts_h((size_t) sidecar_rows);
+    std::vector<int32_t> offsets_h((size_t) sidecar_rows);
+    CUDA_CHECK(cudaMemcpyAsync(dst_rows_packed_h.data(), dst_rows, dst_rows_packed_h.size() * sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(counts_h.data(), counts, (size_t) sidecar_rows * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(offsets_h.data(), offsets, (size_t) sidecar_rows * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    if ((int64_t) cursor_h <= compact_capacity) {
+    for (int64_t i = 0; i < ne01; ++i) {
+        dst_rows_h[(size_t) i] = dst_rows_packed_h[(size_t) (i * dst_rows_stride)];
+    }
+
+    bool has_overflow = false;
+    for (int64_t i = 0; i < ne01; ++i) {
+        const int64_t dst_row = dst_rows_h[(size_t) i];
+        if (dst_row < 0 || dst_row >= sidecar_rows) {
+            continue;
+        }
+        const int32_t count = counts_h[(size_t) dst_row];
+        const int32_t offset = offsets_h[(size_t) dst_row];
+        if (count > 0 && (offset < 0 || (int64_t) offset + count > compact_capacity)) {
+            has_overflow = true;
+            break;
+        }
+    }
+    if (!has_overflow) {
         return;
     }
 
     ggml_cuda_nvfp4_log_kcache_outlier_counts(
             caller, target, dst_rows, counts, offsets, cursor,
             ne01, dst_rows_stride, sidecar_rows, compact_capacity, compact_capacity, threshold, stream);
+}
+
+static uint64_t fnv1a_mix_u64(uint64_t hash, uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+    return hash;
+}
+
+static uint64_t fnv1a_hash_i32(const std::vector<int32_t> & values) {
+    uint64_t hash = 1469598103934665603ull;
+    for (const int32_t value : values) {
+        hash = fnv1a_mix_u64(hash, (uint32_t) value);
+    }
+    return hash;
+}
+
+static uint64_t fnv1a_hash_i64(const std::vector<int64_t> & values) {
+    uint64_t hash = 1469598103934665603ull;
+    for (const int64_t value : values) {
+        hash = fnv1a_mix_u64(hash, (uint64_t) value);
+    }
+    return hash;
+}
+
+static uint64_t fnv1a_hash_f32_bits(const std::vector<float> & values) {
+    uint64_t hash = 1469598103934665603ull;
+    for (const float value : values) {
+        uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(value), "unexpected float size");
+        std::memcpy(&bits, &value, sizeof(bits));
+        hash = fnv1a_mix_u64(hash, bits);
+    }
+    return hash;
+}
+
+void ggml_cuda_nvfp4_log_kcache_outlier_fingerprint(
+        const char * caller,
+        const char * target,
+        const float * src,
+        const int64_t * dst_rows,
+        const int32_t * counts,
+        const int32_t * offsets,
+        const int32_t * cursor,
+        const int32_t * indices,
+        const float * values,
+        const float * residual_amax,
+        int64_t ne00,
+        int64_t ne01,
+        int64_t src_stride,
+        int64_t dst_rows_stride,
+        int64_t sidecar_rows,
+        int64_t compact_capacity,
+        float threshold,
+        cudaStream_t stream) {
+    if (!ggml_cuda_nvfp4_log_can_copy_from_stream(stream)) {
+        return;
+    }
+
+    std::vector<int64_t> dst_rows_packed_h((size_t) ne01 * (size_t) dst_rows_stride);
+    std::vector<int64_t> dst_rows_h((size_t) ne01);
+    std::vector<int32_t> counts_h((size_t) sidecar_rows);
+    std::vector<int32_t> offsets_h((size_t) sidecar_rows);
+    std::vector<int32_t> indices_h((size_t) compact_capacity);
+    std::vector<float> values_h((size_t) compact_capacity);
+    std::vector<float> residual_amax_h((size_t) ne01);
+    std::vector<float> src_h((size_t) ne01 * (size_t) src_stride);
+    int32_t cursor_h = 0;
+
+    CUDA_CHECK(cudaMemcpyAsync(src_h.data(), src, src_h.size() * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(dst_rows_packed_h.data(), dst_rows, dst_rows_packed_h.size() * sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(counts_h.data(), counts, (size_t) sidecar_rows * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(offsets_h.data(), offsets, (size_t) sidecar_rows * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(&cursor_h, cursor, sizeof(cursor_h), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(indices_h.data(), indices, (size_t) compact_capacity * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(values_h.data(), values, (size_t) compact_capacity * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    if (residual_amax != nullptr) {
+        CUDA_CHECK(cudaMemcpyAsync(residual_amax_h.data(), residual_amax, (size_t) ne01 * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    }
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    for (int64_t i = 0; i < ne01; ++i) {
+        dst_rows_h[(size_t) i] = dst_rows_packed_h[(size_t) (i * dst_rows_stride)];
+    }
+
+    int64_t touched_rows = 0;
+    int64_t total_outliers = 0;
+    double src_sum = 0.0;
+    double src_abs_sum = 0.0;
+    double src_outlier_sum = 0.0;
+    double src_outlier_abs_sum = 0.0;
+    int64_t src_outliers = 0;
+    uint64_t src_xor = 0;
+    uint64_t src_outlier_xor = 0;
+    int64_t dst_first = ne01 > 0 ? dst_rows_h[0] : -1;
+    int64_t dst_last  = ne01 > 0 ? dst_rows_h[(size_t) ne01 - 1] : -1;
+    int64_t dst_min = sidecar_rows;
+    int64_t dst_max = -1;
+    for (int64_t i = 0; i < ne01; ++i) {
+        const int64_t dst_row = dst_rows_h[(size_t) i];
+        if (dst_row < 0 || dst_row >= sidecar_rows) {
+            continue;
+        }
+        ++touched_rows;
+        dst_min = std::min(dst_min, dst_row);
+        dst_max = std::max(dst_max, dst_row);
+        total_outliers += counts_h[(size_t) dst_row];
+
+        const size_t row_off = (size_t) i * (size_t) src_stride;
+        for (int64_t col = 0; col < ne00; ++col) {
+            const float v = src_h[row_off + (size_t) col];
+            uint32_t bits = 0;
+            std::memcpy(&bits, &v, sizeof(bits));
+            const uint64_t mixed = fnv1a_mix_u64((uint64_t) dst_row, ((uint64_t) col << 32) ^ bits);
+            src_sum += (double) v;
+            src_abs_sum += (double) std::fabs(v);
+            src_xor ^= mixed;
+            if (std::fabs(v) > threshold) {
+                ++src_outliers;
+                src_outlier_sum += (double) v;
+                src_outlier_abs_sum += (double) std::fabs(v);
+                src_outlier_xor ^= mixed;
+            }
+        }
+    }
+    if (dst_min == sidecar_rows) {
+        dst_min = -1;
+    }
+
+    GGML_LOG_INFO(
+            "%s: target=%s fingerprint rows=%lld touched=%lld dst_first=%lld dst_last=%lld dst_min=%lld dst_max=%lld threshold=%g compact_capacity=%lld compact_used=%d total_outliers=%lld src_sum=%.17g src_abs_sum=%.17g src_xor=%016llx src_outliers=%lld src_outlier_sum=%.17g src_outlier_abs_sum=%.17g src_outlier_xor=%016llx dst_rows=%016llx counts=%016llx offsets=%016llx indices=%016llx values=%016llx residual_amax=%016llx\n",
+            caller,
+            target != nullptr ? target : "(unknown)",
+            (long long) ne01,
+            (long long) touched_rows,
+            (long long) dst_first,
+            (long long) dst_last,
+            (long long) dst_min,
+            (long long) dst_max,
+            (double) threshold,
+            (long long) compact_capacity,
+            (int) cursor_h,
+            (long long) total_outliers,
+            src_sum,
+            src_abs_sum,
+            (unsigned long long) src_xor,
+            (long long) src_outliers,
+            src_outlier_sum,
+            src_outlier_abs_sum,
+            (unsigned long long) src_outlier_xor,
+            (unsigned long long) fnv1a_hash_i64(dst_rows_h),
+            (unsigned long long) fnv1a_hash_i32(counts_h),
+            (unsigned long long) fnv1a_hash_i32(offsets_h),
+            (unsigned long long) fnv1a_hash_i32(indices_h),
+            (unsigned long long) fnv1a_hash_f32_bits(values_h),
+            (unsigned long long) fnv1a_hash_f32_bits(residual_amax_h));
 }
 
 void ggml_cuda_nvfp4_log_vcache_fast_update_once(bool enabled) {

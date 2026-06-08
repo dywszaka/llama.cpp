@@ -347,7 +347,8 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                     (size_t) il < nvfp4_kcache_outlier_layer_capacity_count
                             ? nvfp4_kcache_outlier_layer_capacities[(size_t) il]
                             : 1u;
-            const uint32_t outlier_capacity = std::max<uint32_t>(configured_capacity, 1u);
+            const uint32_t outlier_row_capacity = std::max<uint32_t>(configured_capacity, 1u);
+            const int64_t outlier_capacity = (int64_t) outlier_row_capacity * kv_size;
             k_outlier_offset = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t) kv_size * n_stream);
             k_outlier_cursor = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_stream);
             k_outlier_index = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, outlier_capacity, n_stream);
