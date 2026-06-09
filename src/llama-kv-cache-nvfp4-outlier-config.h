@@ -21,6 +21,8 @@
 // hybrid mode is enabled.
 //
 // The ctx8192 table was re-derived for the balanced threshold profile from:
+//   docs/development/nvfp4-kcache-outlier-thresholds/profiles/ctx8192-capacity/
+// with raw evidence in:
 //   experiments/20260604T085500Z-balanced-threshold-ctx8192-capacity-derive/
 // using the full fourth-case PPL profile at n_ctx=8192. Values are
 // max(base_ctx512_capacity, ceil(observed_peak_row_outliers * 1.5)). For this
@@ -30,9 +32,9 @@
 static constexpr float llama_nvfp4_kcache_outlier_threshold = 16.0f;
 
 // Balanced full-NVFP4 profile derived from:
-//   experiments/20260603T032033Z-kcache-outlier-balanced-threshold-config/
+//   docs/development/nvfp4-kcache-outlier-thresholds/profiles/balanced/
 // using:
-//   scripts/derive-kcache-outlier-balanced-config.py
+//   docs/development/nvfp4-kcache-outlier-thresholds/scripts/derive-kcache-outlier-balanced-config.py
 //
 // This profile targets closer per-layer outlier counts than the earlier
 // density-only profile while avoiding global thresholds that showed large PPL
@@ -56,9 +58,9 @@ static constexpr uint32_t llama_nvfp4_kcache_outlier_layer_capacities_balanced[]
 //   LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE=new
 //
 // It was derived from the real-data max-batch outlier-ratio sweep in:
-//   experiments/20260605T072559Z-kcache-outlier-threshold-ratio-sweep/
+//   docs/development/nvfp4-kcache-outlier-thresholds/profiles/ratio-1e4/
 // Capacity peaks were calibrated with the full PPL run in:
-//   experiments/20260605T081206Z-kcache-outlier-ratio1e4-default-ppl/
+//   docs/development/nvfp4-kcache-outlier-thresholds/profiles/ratio-1e4/full-ppl-capacity-observed.csv
 //
 // This profile targets per-layer max 512-row batch outlier_ratio ~= 1e-4 using
 // the Wikitext PPL baseline input. Capacities are ceil(observed full-PPL

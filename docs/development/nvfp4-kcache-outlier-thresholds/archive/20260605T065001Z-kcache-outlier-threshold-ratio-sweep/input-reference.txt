@@ -1,0 +1,9 @@
+baseline=/home/allen/host_workspace/develop/llama.cpp/expt-baseline.md
+model=/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf
+data=/home/allen/host_workspace/develop/llama.cpp/data/wikitext/wikitext-2-raw/wiki.test.raw
+binary=/home/allen/host_workspace/develop/llama.cpp/build_cuda/bin/llama-perplexity
+chunks=50
+target_ratio=0.0001
+thresholds=10 12 14 16 18 20 22 24 28 32 40 48 64 96 128 192 256 384
+changed_from_baseline=--cache-type-k nvfp4, LLAMA_NVFP4_KCACHE_OUTLIER=1, LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD
+diagnostic_runtime=NO_WARMUP=1; skips startup warmup when enabled so ratio logs only cover real PPL input chunks

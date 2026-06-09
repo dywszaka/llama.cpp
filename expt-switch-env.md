@@ -92,9 +92,10 @@ unset, which uses the original `balanced` profile.
 
 Supported values:
 
-- `new`: use the ratio-1e-4 profile derived from
-  `experiments/20260605T072559Z-kcache-outlier-threshold-ratio-sweep/`, with
-  capacities calibrated by
+- `new`: use the ratio-1e-4 profile snapshot in
+  `docs/development/nvfp4-kcache-outlier-thresholds/profiles/ratio-1e4/`.
+  Raw evidence remains in
+  `experiments/20260605T072559Z-kcache-outlier-threshold-ratio-sweep/` and
   `experiments/20260605T081206Z-kcache-outlier-ratio1e4-default-ppl/`.
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD`
@@ -117,13 +118,14 @@ Default: off. This switch only affects `--cache-type-k nvfp4`. On its own, it
 does not enable NVFP4 K-cache outlier sidecar; combine it with switch A
 `LLAMA_NVFP4_KCACHE_OUTLIER=1` to run the current hybrid outlier configuration.
 
-Scripts for deriving a new balanced profile from threshold sweep artifacts live
-in:
+Scripts and reusable profile snapshots for deriving a new balanced profile from
+threshold sweep artifacts live in:
 
 ```text
-scripts/parse-kcache-outlier-threshold-sweep.py
-scripts/derive-kcache-outlier-balanced-config.py
-scripts/run-kcache-outlier-balanced-experiment.sh
+docs/development/nvfp4-kcache-outlier-thresholds/
+docs/development/nvfp4-kcache-outlier-thresholds/scripts/parse-kcache-outlier-threshold-sweep.py
+docs/development/nvfp4-kcache-outlier-thresholds/scripts/derive-kcache-outlier-balanced-config.py
+docs/development/nvfp4-kcache-outlier-thresholds/scripts/run-kcache-outlier-balanced-experiment.sh
 ```
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_DETERMINISTIC_FILL`

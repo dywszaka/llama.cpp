@@ -1,0 +1,33 @@
+{
+  "ppl": 10.7696,
+  "ppl_err": 0.08581,
+  "kv_buffer_mib": 46.35,
+  "k_cache_summary": "nvfp4",
+  "k_cache_mib": 10.12,
+  "v_cache_summary": "f16",
+  "v_cache_mib": 36.0,
+  "records_total": 21060,
+  "rows512_records": 21024,
+  "total_outliers_rows512": 11706,
+  "max_call_total_rows512": 24,
+  "max_row_outliers_rows512": 3,
+  "overflow_rows_rows512": 0,
+  "thresholds_rows512": [
+    24.0,
+    32.0,
+    48.0,
+    192.0,
+    256.0
+  ],
+  "compact_capacities_rows512": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    14,
+    24,
+    25,
+    29
+  ]
+}

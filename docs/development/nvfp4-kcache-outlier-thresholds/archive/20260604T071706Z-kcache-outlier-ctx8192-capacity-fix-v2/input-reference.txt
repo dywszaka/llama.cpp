@@ -1,0 +1,6 @@
+experiment=20260604T071706Z-kcache-outlier-ctx8192-capacity-fix-v2
+source_profile=experiments/20260604T071706Z-kcache-outlier-ctx8192-capacity-fix
+change=second ctx8192 capacity adjustment for layers 15,20,28,29,31 after remaining compact overflow
+binary=/home/allen/host_workspace/develop/llama.cpp/build_cuda/bin/llama-perplexity
+model=/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf
+prompt_file=/home/allen/host_workspace/develop/llama.cpp/data/wikitext/wikitext-2-raw/wiki.test.raw

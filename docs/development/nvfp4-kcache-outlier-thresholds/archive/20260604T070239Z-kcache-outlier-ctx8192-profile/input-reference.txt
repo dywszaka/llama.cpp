@@ -1,0 +1,8 @@
+experiment=20260604T070239Z-kcache-outlier-ctx8192-profile
+git_head=c42f70afd0abc00dbe55b6c3662a04d40de0bd4a
+binary=/home/allen/host_workspace/develop/llama.cpp/build_cuda/bin/llama-perplexity
+model=/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf
+prompt_file=/home/allen/host_workspace/develop/llama.cpp/data/wikitext/wikitext-2-raw/wiki.test.raw
+profile_target=outlier distribution for fourth case at -c 8192
+source_case=20260604T055253Z case 04_nvfp4k_nvfp4v_outlier_hybrid_fp8
+fixed_config=K nvfp4 with high_medium FP8 hybrid, V nvfp4, outlier enabled, n_ctx 8192

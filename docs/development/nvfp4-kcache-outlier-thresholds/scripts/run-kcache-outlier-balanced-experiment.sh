@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 EXP_DIR="${ROOT_DIR}/experiments/${STAMP}-kcache-outlier-balanced-threshold-config"
 PREVIOUS_EXP="${ROOT_DIR}/experiments/20260529T080102Z-kcache-outlier-layer-threshold-capacity"
@@ -73,8 +74,8 @@ done
 
 mkdir -p "${EXP_DIR}/scripts" "${EXP_DIR}/runs" "${EXP_DIR}/results"
 
-cp "${ROOT_DIR}/scripts/derive-kcache-outlier-balanced-config.py" "${EXP_DIR}/scripts/"
-cp "${ROOT_DIR}/scripts/parse-kcache-outlier-threshold-sweep.py" "${EXP_DIR}/scripts/"
+cp "${SCRIPT_DIR}/derive-kcache-outlier-balanced-config.py" "${EXP_DIR}/scripts/"
+cp "${SCRIPT_DIR}/parse-kcache-outlier-threshold-sweep.py" "${EXP_DIR}/scripts/"
 
 cat > "${EXP_DIR}/input-reference.txt" <<EOF
 model=/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf
@@ -116,7 +117,7 @@ if [[ "${RUN_SWEEP}" -eq 1 ]]; then
   for threshold in "${THRESHOLDS[@]}"; do
     run_threshold_case "${threshold}"
   done
-  python3 "${ROOT_DIR}/scripts/parse-kcache-outlier-threshold-sweep.py" \
+  python3 "${SCRIPT_DIR}/parse-kcache-outlier-threshold-sweep.py" \
     --runs-dir "${EXP_DIR}/runs" \
     --output-dir "${EXP_DIR}/results"
   PREVIOUS_EXP="${EXP_DIR}"
@@ -129,7 +130,7 @@ if [[ ! -f "${LAYER_DENSITY}" || ! -f "${THRESHOLD_SUMMARY}" ]]; then
   exit 1
 fi
 
-python3 "${ROOT_DIR}/scripts/derive-kcache-outlier-balanced-config.py" \
+python3 "${SCRIPT_DIR}/derive-kcache-outlier-balanced-config.py" \
   --layer-density "${LAYER_DENSITY}" \
   --threshold-summary "${THRESHOLD_SUMMARY}" \
   --output-dir "${EXP_DIR}/results" \

@@ -47,13 +47,14 @@ experiments/YYYYMMDDThhmmssZ-kcache-outlier-balanced-profile-{model-or-run}/
   summary.md
 ```
 
-Store copied scripts under `scripts/`, raw threshold logs under `runs/`, and parsed or generated outputs under `results/`.
+Store copied scripts under `scripts/`, raw threshold logs under `runs/`, and parsed or generated outputs under `results/`. After review, copy reusable profile outputs into `docs/development/nvfp4-kcache-outlier-thresholds/profiles/`; keep raw logs in `experiments/`.
 
 Minimum copied scripts:
 
 ```bash
-cp scripts/parse-kcache-outlier-threshold-sweep.py "${EXP_DIR}/scripts/"
-cp scripts/derive-kcache-outlier-balanced-config.py "${EXP_DIR}/scripts/"
+THRESHOLD_DIR="${ROOT_DIR}/docs/development/nvfp4-kcache-outlier-thresholds"
+cp "${THRESHOLD_DIR}/scripts/parse-kcache-outlier-threshold-sweep.py" "${EXP_DIR}/scripts/"
+cp "${THRESHOLD_DIR}/scripts/derive-kcache-outlier-balanced-config.py" "${EXP_DIR}/scripts/"
 ```
 
 ## Step 1: Choose Threshold Sweep Grid
@@ -110,7 +111,7 @@ and document that selected layers are not NVFP4 sidecar layers.
 Run:
 
 ```bash
-python3 scripts/parse-kcache-outlier-threshold-sweep.py \
+python3 docs/development/nvfp4-kcache-outlier-thresholds/scripts/parse-kcache-outlier-threshold-sweep.py \
   --runs-dir "${EXP_DIR}/runs" \
   --output-dir "${EXP_DIR}/results" \
   --layers "${N_LAYERS}" \
@@ -152,7 +153,7 @@ Parser assumptions:
 Run:
 
 ```bash
-python3 scripts/derive-kcache-outlier-balanced-config.py \
+python3 docs/development/nvfp4-kcache-outlier-thresholds/scripts/derive-kcache-outlier-balanced-config.py \
   --layer-density "${EXP_DIR}/results/threshold-layer-density.csv" \
   --threshold-summary "${EXP_DIR}/results/threshold-summary.csv" \
   --output-dir "${EXP_DIR}/results" \
@@ -208,7 +209,8 @@ llama_nvfp4_kcache_outlier_layer_capacities_balanced
 
 Also update nearby comments to record:
 
-- Experiment directory.
+- Canonical profile snapshot directory.
+- Raw evidence experiment directory.
 - Model and data source.
 - Context size.
 - Derivation command or script.
@@ -323,4 +325,3 @@ Unexpected PPL regression:
 - Check startup logs for the intended profile.
 - Confirm no fallback path skipped sparse correction.
 - Compare against the global-threshold scan PPL used by the derivation script.
-

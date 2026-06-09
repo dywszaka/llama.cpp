@@ -1,0 +1,16 @@
+{
+  "layers": 36,
+  "total_outliers": 3898,
+  "min_layer_outliers": 0,
+  "max_layer_outliers": 671,
+  "mean_layer_outliers": 108.27777777777777,
+  "stddev_layer_outliers": 169.13269135194005,
+  "positive_layers": 17,
+  "positive_mean_layer_outliers": 229.2941176470588,
+  "positive_stddev_layer_outliers": 181.1871845571614,
+  "max_call_total": 23,
+  "max_capacity": 29,
+  "total_capacity": 156
+}
+thresholds=256,48,24,32,48,192,32,24,192,24,192,32,24,24,24,24,24,32,32,24,32,32,24,24,24,32,32,32,32,32,32,32,32,32,32,32
+capacities=1,2,2,1,14,1,2,5,1,2,1,5,24,5,5,3,3,1,1,4,1,1,4,29,3,1,1,1,1,1,1,1,1,1,1,25

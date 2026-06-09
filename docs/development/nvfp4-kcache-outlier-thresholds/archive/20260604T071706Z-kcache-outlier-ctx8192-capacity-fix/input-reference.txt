@@ -1,0 +1,7 @@
+experiment=20260604T071706Z-kcache-outlier-ctx8192-capacity-fix
+git_head=c42f70afd0abc00dbe55b6c3662a04d40de0bd4a
+source_profile=experiments/20260604T070239Z-kcache-outlier-ctx8192-profile
+change=updated llama_nvfp4_kcache_outlier_layer_capacities_ctx8192 from observed peak compact_used with 1.25x headroom
+binary=/home/allen/host_workspace/develop/llama.cpp/build_cuda/bin/llama-perplexity
+model=/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf
+prompt_file=/home/allen/host_workspace/develop/llama.cpp/data/wikitext/wikitext-2-raw/wiki.test.raw

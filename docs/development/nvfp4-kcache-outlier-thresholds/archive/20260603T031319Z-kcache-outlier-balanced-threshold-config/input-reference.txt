@@ -1,0 +1,7 @@
+model=/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf
+data=/home/allen/host_workspace/develop/llama.cpp/data/wikitext/wikitext-2-raw/wiki.test.raw
+baseline=/home/allen/host_workspace/develop/llama.cpp/expt-baseline.md
+previous_experiment=/home/allen/host_workspace/develop/llama.cpp/experiments/20260529T080102Z-kcache-outlier-layer-threshold-capacity
+target_count=200
+max_ppl_delta=0.35
+capacity_margin=1.25
