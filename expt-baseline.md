@@ -151,6 +151,34 @@ For each PPL experiment, save the baseline run script, experiment run script,
 prompt/input reference, raw logs, parsed PPL metrics, and comparison summary in
 the experiment folder.
 
+## KLD Baseline Data
+
+Reusable KLD baseline data is managed in `experiments/kld-baseline-data`.
+Future invariant KLD assets should be added there rather than to dated
+comparison experiment folders.
+
+Keep these assets in `experiments/kld-baseline-data`:
+
+- small fixed evaluation datasets and dataset manifests;
+- baseline f16/f16 log-prob files generated from those datasets;
+- baseline generation logs;
+- baseline input/config references.
+
+Do not store experiment-group comparison logs, parsed metrics, summaries, or
+diagnostic outputs in `experiments/kld-baseline-data`. For each comparison
+against this baseline data, create a dated experiment folder under
+`experiments/` using the standard `YYYYMMDDThhmmssZ-<identifier>` convention and
+store the experiment-group logs, parsed metrics, diagnostics, and summary there.
+
+Current KLD baseline data:
+
+- Directory: `experiments/kld-baseline-data`
+- Dataset: `experiments/kld-baseline-data/data/wikitext-small.raw`
+- Dataset manifest: `experiments/kld-baseline-data/data/wikitext-small.manifest.json`
+- Baseline log-prob file: `experiments/kld-baseline-data/baseline-logprobs/ubatch_512.kld`
+- Baseline command log: `experiments/kld-baseline-data/logs/baseline_ubatch_512.raw.log`
+- Tooling: `tools/kld`
+
 ## llama-bench Baseline
 
 Use this baseline for local `llama-bench` throughput measurements:

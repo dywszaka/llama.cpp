@@ -35,6 +35,21 @@ struct results_log_softmax {
     float  prob;
 };
 
+static constexpr float KLD_LOGPROB_THRESHOLD = -16.0f;
+static constexpr char KLD_DENSE_MAGIC[8] = { '_', 'l', 'o', 'g', 'i', 't', 's', '_' };
+static constexpr char KLD_SPARSE_MAGIC[8] = { '_', 'k', 'l', 'd', 's', 'p', '_', '1' };
+
+struct sparse_log_prob_entry {
+    uint32_t token_id;
+    uint16_t log_prob;
+};
+
+struct sparse_log_probs {
+    float scale = 0.0f;
+    float min_log_prob = 0.0f;
+    std::vector<sparse_log_prob_entry> entries;
+};
+
 static std::vector<float> softmax(const std::vector<float>& logits) {
     std::vector<float> probs(logits.size());
     float max_logit = logits[0];
@@ -81,7 +96,7 @@ static double log_softmax(int n_vocab, const float * logits, uint16_t * log_prob
         max_logit = std::max(max_logit, logits[i]);
         min_logit = std::min(min_logit, logits[i]);
     }
-    min_logit = std::max(min_logit, max_logit - 16);
+    min_logit = std::max(min_logit, max_logit + KLD_LOGPROB_THRESHOLD);
     double sum_exp = 0.0;
     for (int i = 0; i < n_vocab; ++i) {
         sum_exp += expf(logits[i] - max_logit);
@@ -100,6 +115,34 @@ static double log_softmax(int n_vocab, const float * logits, uint16_t * log_prob
         }
     } else {
         std::memset(log_prob, 0, n_vocab*sizeof(uint16_t));
+    }
+    return max_logit + log_sum_exp - logits[tok];
+}
+
+static double log_softmax_sparse(int n_vocab, const float * logits, sparse_log_probs & log_probs, int tok) {
+    float max_logit = logits[0];
+    float min_logit = logits[0];
+    for (int i = 1; i < n_vocab; ++i) {
+        max_logit = std::max(max_logit, logits[i]);
+        min_logit = std::min(min_logit, logits[i]);
+    }
+    min_logit = std::max(min_logit, max_logit + KLD_LOGPROB_THRESHOLD);
+    double sum_exp = 0.0;
+    for (int i = 0; i < n_vocab; ++i) {
+        sum_exp += expf(logits[i] - max_logit);
+    }
+    const float log_sum_exp = log(sum_exp);
+    log_probs.min_log_prob = min_logit - max_logit - log_sum_exp;
+    log_probs.scale = (max_logit - min_logit)/65535.f;
+    log_probs.entries.clear();
+    if (log_probs.scale) {
+        const float inv_scale = 1/log_probs.scale;
+        for (int i = 0; i < n_vocab; ++i) {
+            if (logits[i] > min_logit) {
+                const auto quantized = (uint16_t) nearest_int(inv_scale*(logits[i] - min_logit));
+                log_probs.entries.push_back({ (uint32_t) i, quantized });
+            }
+        }
     }
     return max_logit + log_sum_exp - logits[tok];
 }
@@ -170,6 +213,44 @@ static void process_logits(std::ostream& out, int n_vocab, const float * logits,
     out.write((const char *)log_probs.data(), n_token*nv*sizeof(uint16_t));
 }
 
+static void process_logits_sparse(std::ostream& out, int n_vocab, const float * logits, const int * tokens, int n_token,
+        std::vector<std::thread> & workers, std::vector<sparse_log_probs> & log_probs, double & nll, double & nll2) {
+    std::mutex mutex;
+    int counter = 0;
+    auto compute = [&mutex, &counter, &log_probs, &nll, &nll2, n_vocab, logits, tokens, n_token] () {
+        double local_nll  = 0;
+        double local_nll2 = 0;
+        while (true) {
+            std::unique_lock<std::mutex> lock(mutex);
+            int i = counter++;
+            if (i >= n_token) {
+                nll += local_nll; nll2 += local_nll2;
+                break;
+            }
+            lock.unlock();
+            const double v = log_softmax_sparse(n_vocab, logits + size_t(i)*n_vocab, log_probs[i], tokens[i+1]);
+            local_nll += v;
+            local_nll2 += v*v;
+        }
+    };
+    for (auto & w : workers) {
+        w = std::thread(compute);
+    }
+    compute();
+    for (auto & w : workers) {
+        w.join();
+    }
+    for (int i = 0; i < n_token; ++i) {
+        const uint32_t count = (uint32_t) log_probs[i].entries.size();
+        out.write((const char *) &log_probs[i].scale, sizeof(log_probs[i].scale));
+        out.write((const char *) &log_probs[i].min_log_prob, sizeof(log_probs[i].min_log_prob));
+        out.write((const char *) &count, sizeof(count));
+        if (count > 0) {
+            out.write((const char *) log_probs[i].entries.data(), count*sizeof(log_probs[i].entries[0]));
+        }
+    }
+}
+
 struct kl_divergence_result {
     double sum_nll          = 0.0;
     double sum_nll2         = 0.0;
@@ -225,11 +306,75 @@ static std::pair<double, float> log_softmax(int n_vocab, const float * logits, c
             p_log_base_max = p_log_base;
             imax_base = i;
         }
-        if (p_log_base > -16.f) {
+        if (p_log_base > KLD_LOGPROB_THRESHOLD) {
             const float p_base = expf(p_log_base);
             sum += p_base * (p_log_base - logits[i] + max_logit);
         }
     }
+    kld.sum_kld  += sum;
+    kld.sum_kld2 += sum*sum;
+    ++kld.count;
+    if (imax == imax_base) {
+        ++kld.n_same_top;
+    }
+
+    const float p_base = expf(-nll_base);
+    const float p = expf(-nll);
+    const float p_diff = p - p_base;
+    kld.sum_p_diff  += p_diff;
+    const double p_diff2 = p_diff*p_diff;
+    kld.sum_p_diff2 += p_diff2;
+    kld.sum_p_diff4 += p_diff2*p_diff2;
+    kld.max_p_diff = std::max(kld.max_p_diff, std::fabs(p_diff));
+
+    return std::make_pair(sum, p_diff);
+}
+
+static std::pair<double, float> log_softmax_sparse(int n_vocab, const float * logits, const sparse_log_probs & base_log_probs, int tok, kl_divergence_result & kld) {
+    float max_logit = logits[0];
+    int imax = 0;
+    for (int i = 1; i < n_vocab; ++i) {
+        if (logits[i] > max_logit) {
+            max_logit = logits[i];
+            imax = i;
+        }
+    }
+    double sum_exp = 0.0;
+    for (int i = 0; i < n_vocab; ++i) {
+        sum_exp += expf(logits[i] - max_logit);
+    }
+    const float log_sum_exp = log(sum_exp);
+
+    const float nll = max_logit + log_sum_exp - logits[tok];
+    kld.sum_nll  += nll;
+    kld.sum_nll2 += nll*nll;
+
+    float tok_base_log_prob = base_log_probs.min_log_prob;
+    double sum = 0.0;
+    int imax_base = -1;
+    float p_log_base_max = 0.0f;
+    for (const sparse_log_prob_entry & entry : base_log_probs.entries) {
+        if ((int) entry.token_id >= n_vocab) {
+            continue;
+        }
+        const float p_log_base = base_log_probs.scale*entry.log_prob + base_log_probs.min_log_prob;
+        if (imax_base < 0 || p_log_base > p_log_base_max) {
+            p_log_base_max = p_log_base;
+            imax_base = (int) entry.token_id;
+        }
+        if ((int) entry.token_id == tok) {
+            tok_base_log_prob = p_log_base;
+        }
+        if (p_log_base > KLD_LOGPROB_THRESHOLD) {
+            const float p_base = expf(p_log_base);
+            sum += p_base * (p_log_base - logits[entry.token_id] + max_logit + log_sum_exp);
+        }
+    }
+
+    const float nll_base = -tok_base_log_prob;
+    kld.sum_nll_base  += nll_base;
+    kld.sum_nll_base2 += nll_base*nll_base;
+    kld.sum_nll_nll_base += nll*nll_base;
     kld.sum_kld  += sum;
     kld.sum_kld2 += sum*sum;
     ++kld.count;
@@ -278,6 +423,47 @@ static void process_logits(int n_vocab, const float * logits, const int * tokens
             }
             lock.unlock();
             std::pair<double, float> v = log_softmax(n_vocab, logits + size_t(i)*n_vocab, base_log_probs.data() + i*nv, tokens[i+1], local_kld);
+            kld_values[i]    = (float)v.first;
+            p_diff_values[i] = v.second;
+        }
+    };
+    for (auto & w : workers) {
+        w = std::thread(compute);
+    }
+    compute();
+    for (auto & w : workers) {
+        w.join();
+    }
+}
+
+static void process_logits_sparse(int n_vocab, const float * logits, const int * tokens, int n_token,
+        std::vector<std::thread> & workers, const std::vector<sparse_log_probs> & base_log_probs, kl_divergence_result & kld,
+        float * kld_values, float * p_diff_values) {
+    std::mutex mutex;
+    int counter = 0;
+    auto compute = [&mutex, &counter, &base_log_probs, &kld, n_vocab, logits, tokens, n_token, kld_values, p_diff_values] () {
+        kl_divergence_result local_kld;
+        while (true) {
+            std::unique_lock<std::mutex> lock(mutex);
+            int i = counter++;
+            if (i >= n_token) {
+                kld.sum_nll          += local_kld.sum_nll;
+                kld.sum_nll2         += local_kld.sum_nll2;
+                kld.sum_nll_base     += local_kld.sum_nll_base;
+                kld.sum_nll_base2    += local_kld.sum_nll_base2;
+                kld.sum_nll_nll_base += local_kld.sum_nll_nll_base;
+                kld.sum_kld          += local_kld.sum_kld;
+                kld.sum_kld2         += local_kld.sum_kld2;
+                kld.sum_p_diff       += local_kld.sum_p_diff;
+                kld.sum_p_diff2      += local_kld.sum_p_diff2;
+                kld.sum_p_diff4      += local_kld.sum_p_diff4;
+                kld.n_same_top       += local_kld.n_same_top;
+                kld.max_p_diff        = std::max(kld.max_p_diff, local_kld.max_p_diff);
+                kld.count            += local_kld.count;
+                break;
+            }
+            lock.unlock();
+            std::pair<double, float> v = log_softmax_sparse(n_vocab, logits + size_t(i)*n_vocab, base_log_probs[i], tokens[i+1], local_kld);
             kld_values[i]    = (float)v.first;
             p_diff_values[i] = v.second;
         }
@@ -462,7 +648,7 @@ static results_perplexity perplexity(llama_context * ctx, const common_params & 
             return {};
         }
         LOG_INF("%s: saving all logits to %s\n", __func__, params.logits_file.c_str());
-        logits_stream.write("_logits_", 8);
+        logits_stream.write(params.logits_file_sparse ? KLD_SPARSE_MAGIC : KLD_DENSE_MAGIC, 8);
         logits_stream.write(reinterpret_cast<const char *>(&n_ctx), sizeof(n_ctx));
     }
 
@@ -516,12 +702,17 @@ static results_perplexity perplexity(llama_context * ctx, const common_params & 
     std::vector<std::thread> workers(std::thread::hardware_concurrency() - 1);
 
     std::vector<uint16_t> log_probs;
+    std::vector<sparse_log_probs> sparse_log_probs_buffer;
     if (!params.logits_file.empty()) {
         logits_stream.write((const char *)&n_vocab, sizeof(n_vocab));
         logits_stream.write((const char *)&n_chunk, sizeof(n_chunk));
         logits_stream.write((const char *)tokens.data(), n_chunk*n_ctx*sizeof(tokens[0]));
         const int nv = 2*((n_vocab + 1)/2) + 4;
-        log_probs.resize(n_ctx * nv);
+        if (params.logits_file_sparse) {
+            sparse_log_probs_buffer.resize(n_ctx);
+        } else {
+            log_probs.resize(n_ctx * nv);
+        }
     }
 
     // We get the logits for all the tokens in the context window (params.n_ctx)
@@ -613,9 +804,15 @@ static results_perplexity perplexity(llama_context * ctx, const common_params & 
 
             llama_token * tokens_data = tokens.data() + start + seq*n_ctx + first;
             if (!params.logits_file.empty()) {
-                process_logits(logits_stream, n_vocab, all_logits,
-                        tokens_data, n_ctx - 1 - first,
-                        workers, log_probs, nll, nll2);
+                if (params.logits_file_sparse) {
+                    process_logits_sparse(logits_stream, n_vocab, all_logits,
+                            tokens_data, n_ctx - 1 - first,
+                            workers, sparse_log_probs_buffer, nll, nll2);
+                } else {
+                    process_logits(logits_stream, n_vocab, all_logits,
+                            tokens_data, n_ctx - 1 - first,
+                            workers, log_probs, nll, nll2);
+                }
             } else {
                 process_logits(n_vocab, all_logits,
                         tokens_data, n_ctx - 1 - first,
@@ -1702,10 +1899,19 @@ static void kl_divergence(llama_context * ctx, const common_params & params) {
         LOG_ERR("%s: failed to open %s\n", __func__, params.logits_file.c_str());
         return;
     }
+    bool sparse_base = false;
     {
         char check[9]; check[8] = 0;
         in.read(check, 8);
-        if (in.fail() || strncmp("_logits_", check, 8) != 0) {
+        if (in.fail()) {
+            LOG_ERR("%s: failed reading header from %s\n", __func__, params.logits_file.c_str());
+            return;
+        }
+        if (std::memcmp(check, KLD_DENSE_MAGIC, 8) == 0) {
+            sparse_base = false;
+        } else if (std::memcmp(check, KLD_SPARSE_MAGIC, 8) == 0) {
+            sparse_base = true;
+        } else {
             LOG_ERR("%s: %s does not look like a file containing log-probabilities\n", __func__, params.logits_file.c_str());
             return;
         }
@@ -1743,6 +1949,7 @@ static void kl_divergence(llama_context * ctx, const common_params & params) {
     GGML_ASSERT(!llama_vocab_get_add_eos(vocab));
 
     std::vector<uint16_t> log_probs_uint16(size_t(n_ctx - 1 - n_ctx/2) * nv);
+    std::vector<sparse_log_probs> sparse_base_log_probs(size_t(n_ctx - 1 - n_ctx/2));
     std::vector<float>    kld_values(size_t(n_ctx - 1 - n_ctx/2)*n_chunk);
     std::vector<float> p_diff_values(size_t(n_ctx - 1 - n_ctx/2)*n_chunk);
     std::vector<float> logits;
@@ -1780,9 +1987,30 @@ static void kl_divergence(llama_context * ctx, const common_params & params) {
 
         const auto t_start = std::chrono::high_resolution_clock::now();
 
-        if (in.read((char *)log_probs_uint16.data(), log_probs_uint16.size()*sizeof(uint16_t)).fail()) {
-            LOG_ERR("%s: failed reading log-probs for chunk %d\n", __func__, i);
-            return;
+        if (sparse_base) {
+            for (sparse_log_probs & probs : sparse_base_log_probs) {
+                uint32_t count = 0;
+                if (in.read((char *) &probs.scale, sizeof(probs.scale)).fail() ||
+                    in.read((char *) &probs.min_log_prob, sizeof(probs.min_log_prob)).fail() ||
+                    in.read((char *) &count, sizeof(count)).fail()) {
+                    LOG_ERR("%s: failed reading sparse log-probs header for chunk %d\n", __func__, i);
+                    return;
+                }
+                if (count > (uint32_t) n_vocab) {
+                    LOG_ERR("%s: invalid sparse log-probs count %u for chunk %d\n", __func__, count, i);
+                    return;
+                }
+                probs.entries.resize(count);
+                if (count > 0 && in.read((char *) probs.entries.data(), count*sizeof(probs.entries[0])).fail()) {
+                    LOG_ERR("%s: failed reading sparse log-probs entries for chunk %d\n", __func__, i);
+                    return;
+                }
+            }
+        } else {
+            if (in.read((char *)log_probs_uint16.data(), log_probs_uint16.size()*sizeof(uint16_t)).fail()) {
+                LOG_ERR("%s: failed reading log-probs for chunk %d\n", __func__, i);
+                return;
+            }
         }
 
         // clear the KV cache
@@ -1841,8 +2069,13 @@ static void kl_divergence(llama_context * ctx, const common_params & params) {
 
         const int first = n_ctx/2;
         const float * all_logits = num_batches > 1 ? logits.data() : llama_get_logits(ctx);
-        process_logits(n_vocab, all_logits + size_t(first)*n_vocab, tokens.data() + start + first, n_ctx - 1 - first,
-                workers, log_probs_uint16, kld, kld_ptr, p_diff_ptr);
+        if (sparse_base) {
+            process_logits_sparse(n_vocab, all_logits + size_t(first)*n_vocab, tokens.data() + start + first, n_ctx - 1 - first,
+                    workers, sparse_base_log_probs, kld, kld_ptr, p_diff_ptr);
+        } else {
+            process_logits(n_vocab, all_logits + size_t(first)*n_vocab, tokens.data() + start + first, n_ctx - 1 - first,
+                    workers, log_probs_uint16, kld, kld_ptr, p_diff_ptr);
+        }
         p_diff_ptr += n_ctx - 1 - first;
         kld_ptr    += n_ctx - 1 - first;
 
