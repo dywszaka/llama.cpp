@@ -127,13 +127,35 @@ static bool test_bf16_block_scale_enabled() {
             env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
-static bool run_case_ocp_e2m1_e4m3_tables() {
-    static const float expected_e4m3_low[16] = {
-        0.0f, 1.0f/512.0f, 2.0f/512.0f, 3.0f/512.0f,
-        4.0f/512.0f, 5.0f/512.0f, 6.0f/512.0f, 7.0f/512.0f,
-        8.0f/512.0f, 9.0f/512.0f, 10.0f/512.0f, 11.0f/512.0f,
-        12.0f/512.0f, 13.0f/512.0f, 14.0f/512.0f, 15.0f/512.0f,
-    };
+static float legacy_e4m3_to_fp32(uint8_t x) {
+    const uint32_t sign     = (uint32_t)(x & 0x80) << 24;
+    uint32_t exponent = (x >> 3) & 0x0F;
+    uint32_t mantissa = x & 0x07;
+
+    uint32_t bits;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            const int shift = __builtin_clz(mantissa) - 29;
+            mantissa <<= shift;
+            const uint32_t exp = 127 - 6 - shift;
+            bits = sign | (exp << 23) | ((mantissa & 0x7) << 20);
+        }
+    } else if (exponent == 0x0F && mantissa == 0x7) {
+        bits = sign | 0x7F800000 | (1u << 22);
+    } else {
+        const uint32_t exp = (exponent - 7 + 127) << 23;
+        const uint32_t man = mantissa << (23 - 3);
+        bits = sign | exp | man;
+    }
+
+    float result;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+static bool run_case_default_e2m1_e4m3_tables() {
     static const float expected_e4m3_high[8] = {
         256.0f, 288.0f, 320.0f, 352.0f, 384.0f, 416.0f, 448.0f, NAN,
     };
@@ -143,7 +165,7 @@ static bool run_case_ocp_e2m1_e4m3_tables() {
 
     bool ok = true;
     for (int i = 0; i < 16; ++i) {
-        ok = ok && std::fabs(GGML_E4M3_TO_FP32((uint8_t) i) - expected_e4m3_low[i]) == 0.0f;
+        ok = ok && std::fabs(GGML_E4M3_TO_FP32((uint8_t) i) - legacy_e4m3_to_fp32((uint8_t) i)) == 0.0f;
     }
     for (int i = 0; i < 7; ++i) {
         ok = ok && std::fabs(GGML_E4M3_TO_FP32((uint8_t) (0x78 + i)) - expected_e4m3_high[i]) == 0.0f;
@@ -161,7 +183,7 @@ static bool run_case_ocp_e2m1_e4m3_tables() {
         ok = ok && std::fabs(e2m1_deq[i] - (float) expected_e2m1_doubled[i]) == 0.0f;
     }
 
-    std::printf("ocp e2m1/e4m3 tables | %s\n", ok ? "PASS" : "FAIL");
+    std::printf("default e2m1/e4m3 tables | %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }
 
@@ -2206,7 +2228,7 @@ int main() {
     CUDA_CHECK(cudaSetDevice(0));
 
     bool ok = true;
-    ok = run_case_ocp_e2m1_e4m3_tables() && ok;
+    ok = run_case_default_e2m1_e4m3_tables() && ok;
     ok = run_case_bf16_trunc_nn_quantizer_bytes() && ok;
     ok = run_case_bf16_dynamic_amax_rows() && ok;
     ok = run_case_bf16_dynamic_quantizer_bytes() && ok;
