@@ -38,6 +38,14 @@ static inline int64_t pad_i64(int64_t x, int64_t a) {
     return ((x + a - 1) / a) * a;
 }
 
+static float bf16_trunc_f32(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    bits &= 0xFFFF0000u;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 static inline int64_t scale_tiled_index(int64_t outer, int64_t inner, int64_t n_inner_padded) {
     const int64_t outer_tile = outer / 128;
     const int64_t outer_in_tile = outer % 128;
@@ -1558,6 +1566,7 @@ static bool run_case_backend_batched_dynamic_rhs(
     std::uniform_real_distribution<float> dist_q(-q_amplitude, q_amplitude);
 
     const int q_per_k = batch_q / batch_k;
+    const float a_scale = global_scale_a != 0.0f ? (1.0f / global_scale_a) : 0.0f;
     const size_t a_slice_elems = (size_t) m * (size_t) k;
     const size_t b_slice_elems = (size_t) n * (size_t) k;
     const size_t c_slice_elems = (size_t) m * (size_t) n;
@@ -1606,6 +1615,14 @@ static bool run_case_backend_batched_dynamic_rhs(
         std::vector<float> b_deq_slice;
         quantize_matrix_nvfp4_dynamic_ref(b_fp32_slice, b_q_slice, n, k, global_scales_b);
         dequantize_matrix_nvfp4_per_row_scale(b_q_slice, b_deq_slice, n, k, global_scales_b);
+        for (int row = 0; row < n; ++row) {
+            const float b_scale = global_scales_b[(size_t) row] != 0.0f ? (1.0f / global_scales_b[(size_t) row]) : 0.0f;
+            const float scale = a_scale * b_scale;
+            const float scale_ratio = scale != 0.0f ? (bf16_trunc_f32(scale) / scale) : 0.0f;
+            for (int kk = 0; kk < k; ++kk) {
+                b_deq_slice[(size_t) row * (size_t) k + (size_t) kk] *= scale_ratio;
+            }
+        }
 
         std::vector<float> c_slice;
         fp32_reference_matmul(
@@ -1665,9 +1682,11 @@ static bool run_case_backend_batched_dynamic_rhs(
 
 #if defined(_WIN32)
     _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
+    _putenv_s("GGML_CUDA_NVFP4_FP4MULMAT", "1");
     _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
 #else
     setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
+    setenv("GGML_CUDA_NVFP4_FP4MULMAT", "1", 1);
     setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
 #endif
 
@@ -2040,6 +2059,7 @@ static bool run_case_backend_batched_dynamic_rhs_permuted_lhs(
     std::uniform_real_distribution<float> dist_q(-q_amplitude, q_amplitude);
 
     const int q_per_k = batch_q / batch_k;
+    const float a_scale = global_scale_a != 0.0f ? (1.0f / global_scale_a) : 0.0f;
     const size_t a_slice_elems = (size_t) m * (size_t) k;
     const size_t b_slice_elems = (size_t) n * (size_t) k;
     const size_t c_slice_elems = (size_t) m * (size_t) n;
@@ -2088,6 +2108,14 @@ static bool run_case_backend_batched_dynamic_rhs_permuted_lhs(
         std::vector<float> b_deq_slice;
         quantize_matrix_nvfp4_dynamic_ref(b_fp32_slice, b_q_slice, n, k, global_scales_b);
         dequantize_matrix_nvfp4_per_row_scale(b_q_slice, b_deq_slice, n, k, global_scales_b);
+        for (int row = 0; row < n; ++row) {
+            const float b_scale = global_scales_b[(size_t) row] != 0.0f ? (1.0f / global_scales_b[(size_t) row]) : 0.0f;
+            const float scale = a_scale * b_scale;
+            const float scale_ratio = scale != 0.0f ? (bf16_trunc_f32(scale) / scale) : 0.0f;
+            for (int kk = 0; kk < k; ++kk) {
+                b_deq_slice[(size_t) row * (size_t) k + (size_t) kk] *= scale_ratio;
+            }
+        }
 
         std::vector<float> c_slice;
         fp32_reference_matmul(
@@ -2164,9 +2192,11 @@ static bool run_case_backend_batched_dynamic_rhs_permuted_lhs(
 
 #if defined(_WIN32)
     _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
+    _putenv_s("GGML_CUDA_NVFP4_FP4MULMAT", "1");
     _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
 #else
     setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
+    setenv("GGML_CUDA_NVFP4_FP4MULMAT", "1", 1);
     setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
 #endif
 

@@ -66,6 +66,30 @@ for isolating whether ubatch-dependent GEMM shape changes affect upstream F32
 activations before K-cache outlier extraction. It should not be used for
 performance measurements.
 
+### `GGML_CUDA_NVFP4_FP4MULMAT`
+
+Enables the experimental fp4_mulmat-derived CUDA NVFP4 matmul model path.
+Default: unset/off.
+
+When enabled, the native CUDA NVFP4 matmul path still quantizes F32 RHS
+activations through the current NVFP4 activation quantizer, then evaluates the
+NVFP4 block dot product with the experimental FP4 accumulator model instead of
+cuBLASLt. This is intended for hardware-model comparison and correctness
+experiments, not performance measurement.
+
+The path logs once when selected. Combine with
+`GGML_CUDA_NVFP4_FP4MULMAT_LOG=1` to log the first several selections during a
+run.
+
+### `GGML_CUDA_NVFP4_FP4MULMAT_LOG`
+
+Diagnostic logging switch for `GGML_CUDA_NVFP4_FP4MULMAT`. Default:
+unset/off.
+
+When enabled, prints selection logs for the first several fp4_mulmat-derived
+NVFP4 matmul calls instead of only the first call. It does not enable the
+fp4_mulmat path by itself.
+
 ### `GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN`
 
 Enables an experimental hardware-friendly BF16-input NVFP4 RHS activation
