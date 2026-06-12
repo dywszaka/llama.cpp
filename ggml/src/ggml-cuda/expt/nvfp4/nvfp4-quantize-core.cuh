@@ -180,7 +180,7 @@ static __device__ __forceinline__ void ggml_cuda_nvfp4_core_quantize_block_f32(
 
     float block_scale_half = 0.0f;
     if (lane == 0) {
-        const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
+        const float scale = global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX);
         const uint8_t scale_q = ggml_cuda_nvfp4_core_best_index_e4m3(scale);
         out->e = scale_q;
         block_scale_half = ggml_cuda_e4m3_to_fp32_half(scale_q);
