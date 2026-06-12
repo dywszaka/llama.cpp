@@ -1,6 +1,8 @@
 #include "vcache-nvfp4-set-rows.cuh"
 
 #include "nvfp4-log.cuh"
+#include "nvfp4-quantize.cuh"
+#include "nvfp4-quantize-core.cuh"
 
 #include <cstdlib>
 
@@ -50,42 +52,6 @@ bool ggml_cuda_is_nvfp4_vcache_transposed_set_rows(
     return true;
 }
 
-static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_vcache_set_rows(float x) {
-    uint8_t best_index = 0;
-    float best_err = fabsf((float) kvalues_nvfp4[0] - x);
-
-#pragma unroll
-    for (int i = 1; i < 16; ++i) {
-        const float err = fabsf((float) kvalues_nvfp4[i] - x);
-        if (err < best_err) {
-            best_err = err;
-            best_index = (uint8_t) i;
-        }
-    }
-
-    return best_index;
-}
-
-static __device__ __forceinline__ uint8_t ggml_cuda_best_index_e4m3_vcache_set_rows(float x) {
-    uint8_t best_index = 0;
-    float best_err = INFINITY;
-
-    for (int i = 0; i < 256; ++i) {
-        const float v = ggml_cuda_e4m3_to_fp32((uint8_t) i);
-        if (!isfinite(v)) {
-            continue;
-        }
-
-        const float err = fabsf(v - x);
-        if (err < best_err) {
-            best_err = err;
-            best_index = (uint8_t) i;
-        }
-    }
-
-    return best_index;
-}
-
 static __device__ __forceinline__ float ggml_cuda_dequantize_nvfp4_value_set_rows(
         const block_nvfp4 & block,
         float input_scale,
@@ -118,7 +84,10 @@ static __global__ void k_set_rows_nvfp4_vcache(
         int64_t n_row_groups,
         int64_t rows_per_scale,
         bool scale_is_global,
-        bool fast_update) {
+        bool fast_update,
+        bool use_bf16_trunc_nn,
+        bool bf16_internal_arith,
+        bool bf16_block_scale) {
     const int row_local = blockIdx.x;
     const int lane = threadIdx.x;
 
@@ -131,7 +100,6 @@ static __global__ void k_set_rows_nvfp4_vcache(
 
     __shared__ float tile[QK_NVFP4];
     __shared__ float reduction[QK_NVFP4];
-    __shared__ uint8_t qvals[QK_NVFP4];
     __shared__ int64_t current_row_global;
     __shared__ int64_t current_block;
     __shared__ int pending_flush;
@@ -140,7 +108,7 @@ static __global__ void k_set_rows_nvfp4_vcache(
     __shared__ int pending_lane;
     __shared__ float pending_value;
 
-    if (fast_update && n_tokens == 1) {
+    if (fast_update && !use_bf16_trunc_nn && n_tokens == 1) {
         const int64_t flat_group = row_group;
         const int64_t dst_index = src1[flat_group] + row_in_group * kv_size_padded;
         const int64_t row_global = dst_index / kv_size_padded;
@@ -169,8 +137,7 @@ static __global__ void k_set_rows_nvfp4_vcache(
             if ((scale_is_global ? global_scale > 0.0f : input_scale > 0.0f) && block_scale_f > 0.0f &&
                     isfinite(scale_is_global ? global_scale : input_scale) && isfinite(block_scale_f) && isfinite(value) &&
                     fabsf(value) <= current_amax) {
-                const float inv_scale = global_scale / block_scale_f;
-                const uint8_t q = ggml_cuda_best_index_nvfp4_vcache_set_rows(value * inv_scale);
+                const uint8_t q = ggml_cuda_nvfp4_core_quantize_value_f32(value, global_scale, block_scale_f);
                 const int byte = in_block / 2;
                 const uint8_t old = block.qs[byte];
                 const uint8_t patched = (in_block & 1) == 0
@@ -216,34 +183,29 @@ static __global__ void k_set_rows_nvfp4_vcache(
         const float amax = reduction[0];
         const float global_scale = scale_is_global ? scale[row_global / rows_per_scale] :
             ((amax > 0.0f && isfinite(amax)) ? (GGML_CUDA_NVFP4_GLOBAL_SCALE_MAX / amax) : 0.0f);
-        float block_scale_f = 0.0f;
-
         if (lane == 0) {
             if (!scale_is_global) {
                 const float input_scale = (global_scale != 0.0f && isfinite(global_scale)) ? (1.0f / global_scale) : 0.0f;
                 scale[row_global * n_blocks + block_idx] = input_scale;
             }
-
-            const float scale_f = (global_scale != 0.0f) ? (global_scale * (amax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
-            const uint8_t scale_q = ggml_cuda_best_index_e4m3_vcache_set_rows(scale_f);
-            dst[row_global * n_blocks + block_idx].e = scale_q;
-            block_scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
         }
         __syncthreads();
 
-        if (lane == 0) {
-            reduction[0] = block_scale_f;
-        }
-        __syncthreads();
-
-        const float inv_scale = (global_scale != 0.0f && reduction[0] != 0.0f) ? (global_scale / reduction[0]) : 0.0f;
-        if (lane < QK_NVFP4) {
-            qvals[lane] = ggml_cuda_best_index_nvfp4_vcache_set_rows(tile[lane] * inv_scale);
-        }
-        __syncthreads();
-
-        if (lane < QK_NVFP4 && (lane & 1) == 0) {
-            dst[row_global * n_blocks + block_idx].qs[lane / 2] = qvals[lane] | (qvals[lane + 1] << 4);
+        block_nvfp4 * out = dst + row_global * n_blocks + block_idx;
+        if (use_bf16_trunc_nn) {
+            ggml_cuda_nvfp4_core_quantize_block_bf16_trunc_nn(
+                    lane < QK_NVFP4 ? tile[lane] : 0.0f,
+                    lane < QK_NVFP4,
+                    global_scale,
+                    bf16_internal_arith,
+                    bf16_block_scale,
+                    out);
+        } else {
+            ggml_cuda_nvfp4_core_quantize_block_f32(
+                    lane < QK_NVFP4 ? tile[lane] : 0.0f,
+                    lane < QK_NVFP4,
+                    global_scale,
+                    out);
         }
         __syncthreads();
     };
@@ -323,6 +285,13 @@ void ggml_cuda_op_set_rows_nvfp4_vcache(
     const int64_t rows_per_scale = scale_is_global ?
         (v_cache->ne[2] == n_scales ? n_rows_local : n_rows_local / n_scales) : 0;
     const bool fast_update = ggml_cuda_nvfp4_vcache_fast_update_enabled();
+    const bool use_bf16_trunc_nn =
+            ggml_cuda_nvfp4_bf16_quant_enabled() &&
+            ggml_cuda_nvfp4_bf16_quant_trunc_nn_enabled();
+    const bool bf16_internal_arith = use_bf16_trunc_nn &&
+            ggml_cuda_nvfp4_bf16_quant_bf16_internal_enabled();
+    const bool bf16_block_scale = bf16_internal_arith &&
+            ggml_cuda_nvfp4_bf16_quant_bf16_block_scale_enabled();
 
     GGML_ASSERT(kv_size_padded % QK_NVFP4 == 0);
     GGML_ASSERT(n_rows_local % QK_NVFP4 == 0);
@@ -347,7 +316,10 @@ void ggml_cuda_op_set_rows_nvfp4_vcache(
                 n_row_groups,
                 rows_per_scale,
                 scale_is_global,
-                fast_update);
+                fast_update,
+                use_bf16_trunc_nn,
+                bf16_internal_arith,
+                bf16_block_scale);
     }
     CUDA_CHECK(cudaGetLastError());
 }

@@ -1,6 +1,7 @@
 #include "vcache-nvfp4-matmul.cuh"
 
 #include "nvfp4-log.cuh"
+#include "nvfp4-quantize-core.cuh"
 
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_P_AMAX_PREPASS_MIN_KV = 2048;
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K = 512;
@@ -12,42 +13,6 @@ static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K = 512;
 #else
 #define GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS 0
 #endif
-
-static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_vcache(float x) {
-    uint8_t best_index = 0;
-    float best_err = fabsf((float) kvalues_nvfp4[0] - x);
-
-#pragma unroll
-    for (int i = 1; i < 16; ++i) {
-        const float err = fabsf((float) kvalues_nvfp4[i] - x);
-        if (err < best_err) {
-            best_err = err;
-            best_index = (uint8_t) i;
-        }
-    }
-
-    return best_index;
-}
-
-static __device__ __forceinline__ uint8_t ggml_cuda_best_index_e4m3_vcache(float x) {
-    uint8_t best_index = 0;
-    float best_err = INFINITY;
-
-    for (int i = 0; i < 256; ++i) {
-        const float v = ggml_cuda_e4m3_to_fp32((uint8_t) i);
-        if (!isfinite(v)) {
-            continue;
-        }
-
-        const float err = fabsf(v - x);
-        if (err < best_err) {
-            best_err = err;
-            best_index = (uint8_t) i;
-        }
-    }
-
-    return best_index;
-}
 
 static bool ggml_cuda_is_vcache_nvfp4_tensor(const ggml_tensor * src0) {
     if (src0 == nullptr || src0->type != GGML_TYPE_NVFP4) {
@@ -189,13 +154,6 @@ static __global__ void k_quantize_p_rows_nvfp4_dynamic(
     const char * p_ptr = (const char *) p_data + k * (int64_t) sizeof(float) + col * p_nb1 + head * p_nb2 + stream * p_nb3;
     const float x = active ? *(const float *) p_ptr : 0.0f;
 
-    float vmax = fabsf(x);
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 8, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 4, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 2, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 1, WARP_SIZE));
-    vmax = __shfl_sync(0xFFFFFFFF, vmax, 0, WARP_SIZE);
-
     float row_amax = 0.0f;
     if (p_amax != nullptr) {
         row_amax = p_amax[p_row];
@@ -217,23 +175,8 @@ static __global__ void k_quantize_p_rows_nvfp4_dynamic(
         p_scale[p_row] = global_scale != 0.0f ? (1.0f / global_scale) : 0.0f;
     }
 
-    float scale_f = 0.0f;
-    if (lane == 0) {
-        const float block_scale = (global_scale != 0.0f) ?
-            (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
-        const uint8_t scale_q = ggml_cuda_best_index_e4m3_vcache(block_scale);
-        p_q[p_row * (kv_size / QK_NVFP4) + block].e = scale_q;
-        scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
-    }
-    scale_f = __shfl_sync(0xFFFFFFFF, scale_f, 0, WARP_SIZE);
-
-    const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
-    const uint8_t q = ggml_cuda_best_index_nvfp4_vcache(x * inv_scale);
-    const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
-
-    if (active && (lane & 1) == 0) {
-        p_q[p_row * (kv_size / QK_NVFP4) + block].qs[lane / 2] = q | (q_peer << 4);
-    }
+    ggml_cuda_nvfp4_core_quantize_block_f32(
+            x, active, global_scale, p_q + p_row * (kv_size / QK_NVFP4) + block);
 }
 
 static __global__ void k_vcache_nvfp4_matmul_fp4_p_4d(

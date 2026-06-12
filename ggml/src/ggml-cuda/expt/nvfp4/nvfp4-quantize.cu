@@ -3,6 +3,7 @@
 #include "../../common.cuh"
 #include "kcache-outlier.cuh"
 #include "nvfp4-common.cuh"
+#include "nvfp4-quantize-core.cuh"
 
 namespace {
 
@@ -146,42 +147,6 @@ static __global__ void ggml_cuda_nvfp4_prepare_dynamic_input_scales_kernel(
     input_scales[row] = (global_scale != 0.0f) ? (out_scale / global_scale) : 0.0f;
 }
 
-static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4(float x) {
-    uint8_t best_index = 0;
-    float best_err = fabsf((float) kvalues_nvfp4[0] - x);
-
-#pragma unroll
-    for (int i = 1; i < 16; ++i) {
-        const float err = fabsf((float) kvalues_nvfp4[i] - x);
-        if (err < best_err) {
-            best_err = err;
-            best_index = (uint8_t) i;
-        }
-    }
-
-    return best_index;
-}
-
-static __device__ __forceinline__ uint8_t ggml_cuda_best_index_e4m3(float x) {
-    uint8_t best_index = 0;
-    float best_err = INFINITY;
-
-    for (int i = 0; i < 256; ++i) {
-        const float v = ggml_cuda_e4m3_to_fp32((uint8_t) i);
-        if (!isfinite(v)) {
-            continue;
-        }
-
-        const float err = fabsf(v - x);
-        if (err < best_err) {
-            best_err = err;
-            best_index = (uint8_t) i;
-        }
-    }
-
-    return best_index;
-}
-
 static __global__ void quantize_row_nvfp4_kernel(
         const float * __restrict__ x,
         block_nvfp4 * __restrict__ y,
@@ -199,29 +164,8 @@ static __global__ void quantize_row_nvfp4_kernel(
     const float xi_src = (lane_active && k0 < ne00) ? x[(int64_t) i1 * s01 + k0] : 0.0f;
     const float xi = truncate_bf16_input ? ggml_cuda_trunc_f32_to_bf16_value(xi_src) : xi_src;
 
-    float vmax = fabsf(xi);
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 8, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 4, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 2, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 1, WARP_SIZE));
-    vmax = __shfl_sync(0xFFFFFFFF, vmax, 0, WARP_SIZE);
-
-    float scale_f = 0.0f;
-    if (lane == 0) {
-        const float scale = global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX);
-        const uint8_t scale_q = ggml_cuda_best_index_e4m3(scale);
-        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].e = scale_q;
-        scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
-    }
-    scale_f = __shfl_sync(0xFFFFFFFF, scale_f, 0, WARP_SIZE);
-
-    const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
-    const uint8_t q = ggml_cuda_best_index_nvfp4(xi * inv_scale);
-    const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
-
-    if (lane_active && (lane & 1) == 0) {
-        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].qs[lane/2] = q | (q_peer << 4);
-    }
+    ggml_cuda_nvfp4_core_quantize_block_f32(
+            xi, lane_active, global_scale, y + (int64_t) i1 * (ne00 / QK_NVFP4) + ib);
 }
 
 static __global__ void quantize_row_nvfp4_dynamic_kernel(
@@ -241,31 +185,10 @@ static __global__ void quantize_row_nvfp4_dynamic_kernel(
     const float xi_src = (lane_active && k0 < ne00) ? x[(int64_t) i1 * s01 + k0] : 0.0f;
     const float xi = truncate_bf16_input ? ggml_cuda_trunc_f32_to_bf16_value(xi_src) : xi_src;
 
-    float vmax = fabsf(xi);
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 8, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 4, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 2, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 1, WARP_SIZE));
-    vmax = __shfl_sync(0xFFFFFFFF, vmax, 0, WARP_SIZE);
-
-    float scale_f = 0.0f;
     const float amax_f = per_tensor_scale ? amax_rows[0] : amax_rows[i1];
     const float global_scale = ggml_cuda_nvfp4_kcache_outlier_q_global_scale(amax_f);
-    if (lane == 0) {
-        const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
-        const uint8_t scale_q = ggml_cuda_best_index_e4m3(scale);
-        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].e = scale_q;
-        scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
-    }
-    scale_f = __shfl_sync(0xFFFFFFFF, scale_f, 0, WARP_SIZE);
-
-    const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
-    const uint8_t q = ggml_cuda_best_index_nvfp4(xi * inv_scale);
-    const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
-
-    if (lane_active && (lane & 1) == 0) {
-        y[(int64_t) i1 * (ne00 / QK_NVFP4) + ib].qs[lane/2] = q | (q_peer << 4);
-    }
+    ggml_cuda_nvfp4_core_quantize_block_f32(
+            xi, lane_active, global_scale, y + (int64_t) i1 * (ne00 / QK_NVFP4) + ib);
 }
 
 } // namespace

@@ -1,41 +1,7 @@
 #include "nvfp4-set-rows.cuh"
 #include "kcache-outlier.cuh"
-
-static __device__ __forceinline__ uint8_t ggml_cuda_best_index_nvfp4_set_rows(float x) {
-    uint8_t best_index = 0;
-    float best_err = fabsf((float) kvalues_nvfp4[0] - x);
-
-#pragma unroll
-    for (int i = 1; i < 16; ++i) {
-        const float err = fabsf((float) kvalues_nvfp4[i] - x);
-        if (err < best_err) {
-            best_err = err;
-            best_index = (uint8_t) i;
-        }
-    }
-
-    return best_index;
-}
-
-static __device__ __forceinline__ uint8_t ggml_cuda_best_index_e4m3_set_rows(float x) {
-    uint8_t best_index = 0;
-    float best_err = INFINITY;
-
-    for (int i = 0; i < 256; ++i) {
-        const float v = ggml_cuda_e4m3_to_fp32((uint8_t) i);
-        if (!isfinite(v)) {
-            continue;
-        }
-
-        const float err = fabsf(v - x);
-        if (err < best_err) {
-            best_err = err;
-            best_index = (uint8_t) i;
-        }
-    }
-
-    return best_index;
-}
+#include "nvfp4-quantize.cuh"
+#include "nvfp4-quantize-core.cuh"
 
 static __global__ void k_abs_max_f32_rows(
         const float * __restrict__ src0,
@@ -79,7 +45,10 @@ static __global__ void k_set_rows_nvfp4(
         const float * __restrict__ amax_rows,
         const float threshold,
         const bool use_threshold_global_scale,
-        const bool zero_outliers) {
+        const bool zero_outliers,
+        const bool use_bf16_trunc_nn,
+        const bool bf16_internal_arith,
+        const bool bf16_block_scale) {
     const int lane = threadIdx.x;
     const bool lane_active = lane < QK_NVFP4;
 
@@ -91,33 +60,17 @@ static __global__ void k_set_rows_nvfp4(
     const float raw_xi = (lane_active && k0 < ne00) ? src0[row_off + k0] : 0.0f;
     const float xi = (zero_outliers && fabsf(raw_xi) > threshold) ? 0.0f : raw_xi;
 
-    float vmax = fabsf(xi);
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 8, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 4, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 2, WARP_SIZE));
-    vmax = fmaxf(vmax, __shfl_xor_sync(0xFFFFFFFF, vmax, 1, WARP_SIZE));
-    vmax = __shfl_sync(0xFFFFFFFF, vmax, 0, WARP_SIZE);
-
     const int64_t dst_row = *(src1 + i1*s10);
     block_nvfp4 * dst_row_ptr = dst + dst_row*s1 / sizeof(block_nvfp4);
 
-    float scale_f = 0.0f;
     const float global_scale = ggml_cuda_nvfp4_kcache_outlier_k_global_scale(amax_rows[i1], threshold, use_threshold_global_scale);
-    if (lane == 0) {
-        const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
-        const uint8_t scale_q = ggml_cuda_best_index_e4m3_set_rows(scale);
-        dst_row_ptr[ib].e = scale_q;
-        scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
+    if (use_bf16_trunc_nn) {
+        ggml_cuda_nvfp4_core_quantize_block_bf16_trunc_nn(
+                xi, lane_active, global_scale, bf16_internal_arith, bf16_block_scale, dst_row_ptr + ib);
+        return;
     }
-    scale_f = __shfl_sync(0xFFFFFFFF, scale_f, 0, WARP_SIZE);
 
-    const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
-    const uint8_t q = ggml_cuda_best_index_nvfp4_set_rows(xi * inv_scale);
-    const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
-
-    if (lane_active && (lane & 1) == 0) {
-        dst_row_ptr[ib].qs[lane/2] = q | (q_peer << 4);
-    }
+    ggml_cuda_nvfp4_core_quantize_block_f32(xi, lane_active, global_scale, dst_row_ptr + ib);
 }
 
 static __global__ void k_set_rows_nvfp4_8(
@@ -154,14 +107,14 @@ static __global__ void k_set_rows_nvfp4_8(
     const float global_scale = ggml_cuda_nvfp4_kcache_outlier_k_global_scale(amax_rows[i1], threshold, use_threshold_global_scale);
     if (lane == 0) {
         const float scale = (global_scale != 0.0f) ? (global_scale * (vmax / GGML_CUDA_NVFP4_FP4_MAX)) : 0.0f;
-        const uint8_t scale_q = ggml_cuda_best_index_e4m3_set_rows(scale);
+        const uint8_t scale_q = ggml_cuda_nvfp4_core_best_index_e4m3(scale);
         dst_row_ptr[ib].e = scale_q;
         scale_f = ggml_cuda_e4m3_to_fp32_half(scale_q);
     }
     scale_f = __shfl_sync(0xFFFFFFFF, scale_f, 0, WARP_SIZE);
 
     const float inv_scale = (global_scale != 0.0f && scale_f != 0.0f) ? (global_scale / scale_f) : 0.0f;
-    const uint8_t q = ggml_cuda_best_index_nvfp4_set_rows(xi * inv_scale);
+    const uint8_t q = ggml_cuda_nvfp4_core_best_index_e2m1(xi * inv_scale);
     const uint8_t q_peer = __shfl_xor_sync(0xFFFFFFFF, q, 1, WARP_SIZE);
 
     if (lane_active && (lane & 1) == 0) {
@@ -213,6 +166,13 @@ static void ggml_cuda_set_rows_nvfp4_common(
             outlier_indices != nullptr &&
             outlier_values != nullptr;
     const bool use_tensor_scale = use_outliers;
+    const bool use_bf16_trunc_nn = !qk8 &&
+            ggml_cuda_nvfp4_bf16_quant_enabled() &&
+            ggml_cuda_nvfp4_bf16_quant_trunc_nn_enabled();
+    const bool bf16_internal_arith = use_bf16_trunc_nn &&
+            ggml_cuda_nvfp4_bf16_quant_bf16_internal_enabled();
+    const bool bf16_block_scale = bf16_internal_arith &&
+            ggml_cuda_nvfp4_bf16_quant_bf16_block_scale_enabled();
     const float outlier_threshold = p.kcache_outlier_threshold > 0.0f
             ? p.kcache_outlier_threshold
             : GGML_CUDA_NVFP4_KCACHE_OUTLIER_THRESHOLD;
@@ -285,7 +245,10 @@ static void ggml_cuda_set_rows_nvfp4_common(
                     amax_d.get(),
                     outlier_threshold,
                     use_tensor_scale,
-                    use_outliers);
+                    use_outliers,
+                    use_bf16_trunc_nn,
+                    bf16_internal_arith,
+                    bf16_block_scale);
         }
         CUDA_CHECK(cudaGetLastError());
 
