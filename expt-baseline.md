@@ -123,7 +123,7 @@ CUDA_VISIBLE_DEVICES=0 \
     --batch-size 512 \
     --ubatch-size 512 \
     -t 32 \
-    -c 512 \
+    -c 8192 \
     --kv-unified
 ```
 
@@ -138,7 +138,7 @@ Fixed `llama-perplexity` arguments:
 - Batch size: `--batch-size 512`
 - UBatch size: `--ubatch-size 512`
 - Threads: `-t 32`
-- Context size: `-c 512`
+- Context size: `-c 8192`
 - Flash attention: disabled by default; do not pass `--flash-attn`
 - KQV offload: enabled by default; do not pass `--no-kv-offload`
 - KV mode: `--kv-unified`
