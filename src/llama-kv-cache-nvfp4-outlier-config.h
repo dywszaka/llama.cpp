@@ -79,6 +79,34 @@ static constexpr uint32_t llama_nvfp4_kcache_outlier_layer_capacities_new[] = {
       112, 100,  74, 100,  96,  32, 238,  96, 164,
 };
 
+// BF16/new-FP4-quantizer full-NVFP4 profile selected by:
+//   LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE=bf16
+//
+// This is the opt-in target profile for sweeps that run with:
+//   GGML_CUDA_NVFP4_BF16_QUANT=1
+//   GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=1
+//   GGML_CUDA_TRUNC_ENABLE=1
+//
+// First-pass profile derived from:
+//   experiments/20260615T073600Z-kcache-outlier-bf16-profile/
+// using an 8-chunk Wikitext PPL threshold sweep with full NVFP4 K/V cache and
+// the BF16/new-FP4 quantizer switches above. Derivation knobs:
+// target_count=200, max_ppl_delta=1.0, capacity_margin=1.25,
+// max_threshold=64, ppl_weight=0.5.
+static constexpr float llama_nvfp4_kcache_outlier_layer_thresholds_bf16[] = {
+       64.0f, 40.0f, 64.0f, 24.0f, 40.0f, 40.0f, 24.0f, 24.0f, 40.0f,
+       24.0f, 28.0f, 28.0f, 24.0f, 24.0f, 24.0f, 64.0f, 24.0f, 64.0f,
+       64.0f, 24.0f, 64.0f, 64.0f, 24.0f, 24.0f, 24.0f, 64.0f, 64.0f,
+       64.0f, 64.0f, 64.0f, 64.0f, 64.0f, 64.0f, 64.0f, 64.0f, 28.0f,
+};
+
+static constexpr uint32_t llama_nvfp4_kcache_outlier_layer_capacities_bf16[] = {
+        1, 79,  1,  5, 134, 35, 147,  3, 55,
+        2, 39, 23,  8,   5,  3,  1,   3,  1,
+        1,  3,  1,  1,   3, 10,  3,  1,   1,
+        1,  1,  1,  1,   1,  1,  1,  1, 134,
+};
+
 static constexpr uint32_t llama_nvfp4_kcache_outlier_layer_capacities[] = {
         0,   0, 418,  72,   0,   0,   0,  68,   0,
        14,   0,   0,   0,  29,   0,  46, 174,  31,
@@ -125,6 +153,14 @@ static constexpr size_t llama_nvfp4_kcache_outlier_layer_capacities_new_count =
         sizeof(llama_nvfp4_kcache_outlier_layer_capacities_new) /
         sizeof(llama_nvfp4_kcache_outlier_layer_capacities_new[0]);
 
+static constexpr size_t llama_nvfp4_kcache_outlier_layer_thresholds_bf16_count =
+        sizeof(llama_nvfp4_kcache_outlier_layer_thresholds_bf16) /
+        sizeof(llama_nvfp4_kcache_outlier_layer_thresholds_bf16[0]);
+
+static constexpr size_t llama_nvfp4_kcache_outlier_layer_capacities_bf16_count =
+        sizeof(llama_nvfp4_kcache_outlier_layer_capacities_bf16) /
+        sizeof(llama_nvfp4_kcache_outlier_layer_capacities_bf16[0]);
+
 static inline bool llama_nvfp4_kcache_outlier_enabled() {
     const char * value = std::getenv("LLAMA_NVFP4_KCACHE_OUTLIER");
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
@@ -138,6 +174,11 @@ static inline const char * llama_nvfp4_kcache_outlier_threshold_override_env() {
 static inline bool llama_nvfp4_kcache_outlier_new_profile_enabled() {
     const char * value = std::getenv("LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE");
     return value != nullptr && std::strcmp(value, "new") == 0;
+}
+
+static inline bool llama_nvfp4_kcache_outlier_bf16_profile_enabled() {
+    const char * value = std::getenv("LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE");
+    return value != nullptr && std::strcmp(value, "bf16") == 0;
 }
 
 static inline const char * llama_nvfp4_kcache_hybrid_fp8_layers_env() {
@@ -169,6 +210,9 @@ static inline const uint32_t * llama_nvfp4_kcache_outlier_layer_capacities_for_m
     if (hybrid_fp8) {
         return llama_nvfp4_kcache_outlier_layer_capacities_for_ctx(kv_size);
     }
+    if (llama_nvfp4_kcache_outlier_bf16_profile_enabled()) {
+        return llama_nvfp4_kcache_outlier_layer_capacities_bf16;
+    }
     return llama_nvfp4_kcache_outlier_new_profile_enabled()
                    ? llama_nvfp4_kcache_outlier_layer_capacities_new
                    : llama_nvfp4_kcache_outlier_layer_capacities_balanced;
@@ -180,6 +224,9 @@ static inline size_t llama_nvfp4_kcache_outlier_layer_capacity_count_for_mode(
     if (hybrid_fp8) {
         return llama_nvfp4_kcache_outlier_layer_capacity_count_for_ctx(kv_size);
     }
+    if (llama_nvfp4_kcache_outlier_bf16_profile_enabled()) {
+        return llama_nvfp4_kcache_outlier_layer_capacities_bf16_count;
+    }
     return llama_nvfp4_kcache_outlier_new_profile_enabled()
                    ? llama_nvfp4_kcache_outlier_layer_capacities_new_count
                    : llama_nvfp4_kcache_outlier_layer_capacities_balanced_count;
@@ -190,6 +237,9 @@ static inline const char * llama_nvfp4_kcache_outlier_layer_capacity_profile_for
         bool hybrid_fp8) {
     if (hybrid_fp8) {
         return llama_nvfp4_kcache_outlier_layer_capacity_profile_for_ctx(kv_size);
+    }
+    if (llama_nvfp4_kcache_outlier_bf16_profile_enabled()) {
+        return "bf16";
     }
     return llama_nvfp4_kcache_outlier_new_profile_enabled() ? "new" : "balanced";
 }
@@ -205,6 +255,11 @@ static inline float llama_nvfp4_kcache_outlier_layer_threshold(uint32_t layer, b
         }
     }
 
+    if (!hybrid_fp8 && llama_nvfp4_kcache_outlier_bf16_profile_enabled()) {
+        return (size_t) layer < llama_nvfp4_kcache_outlier_layer_thresholds_bf16_count
+                       ? llama_nvfp4_kcache_outlier_layer_thresholds_bf16[layer]
+                       : llama_nvfp4_kcache_outlier_threshold;
+    }
     if (!hybrid_fp8 && llama_nvfp4_kcache_outlier_new_profile_enabled()) {
         return (size_t) layer < llama_nvfp4_kcache_outlier_layer_thresholds_new_count
                        ? llama_nvfp4_kcache_outlier_layer_thresholds_new[layer]
@@ -219,6 +274,9 @@ static inline float llama_nvfp4_kcache_outlier_layer_threshold(uint32_t layer, b
 static inline const char * llama_nvfp4_kcache_outlier_layer_threshold_profile(bool hybrid_fp8) {
     if (llama_nvfp4_kcache_outlier_threshold_override_env() != nullptr) {
         return "env-override";
+    }
+    if (!hybrid_fp8 && llama_nvfp4_kcache_outlier_bf16_profile_enabled()) {
+        return "bf16";
     }
     if (!hybrid_fp8 && llama_nvfp4_kcache_outlier_new_profile_enabled()) {
         return "new";

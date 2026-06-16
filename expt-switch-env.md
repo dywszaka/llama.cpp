@@ -187,6 +187,12 @@ Supported values:
   Raw evidence remains in
   `experiments/20260605T072559Z-kcache-outlier-threshold-ratio-sweep/` and
   `experiments/20260605T081206Z-kcache-outlier-ratio1e4-default-ppl/`.
+- `bf16`: use the opt-in BF16/new-FP4-quantizer profile for full NVFP4 K/V-cache
+  experiments. This profile is intended for runs with
+  `GGML_CUDA_NVFP4_BF16_QUANT=1`,
+  `GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=1`, and
+  `GGML_CUDA_TRUNC_ENABLE=1`. It currently starts from the ratio-1e-4 `new`
+  profile values until a fresh BF16/new-FP4 sweep is applied.
 
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD`
 

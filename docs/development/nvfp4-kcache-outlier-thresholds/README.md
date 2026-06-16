@@ -22,6 +22,9 @@ derivation scripts, and workflow documentation live here.
   summary.
 - `profiles/ratio-1e4/`: current `LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE=new`
   threshold snapshot and capacity calibration inputs.
+- `profiles/bf16/`: target location for the opt-in
+  `LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE=bf16` profile derived with the BF16/new
+  FP4 quantizer switches enabled.
 - `profiles/ctx8192-capacity/`: context-8192 capacity snapshot for the balanced
   threshold profile.
 - `archive/`: older intermediate threshold/profile derivation scripts,

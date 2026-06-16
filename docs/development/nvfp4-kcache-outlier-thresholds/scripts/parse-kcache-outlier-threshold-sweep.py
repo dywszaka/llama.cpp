@@ -16,10 +16,11 @@ from pathlib import Path
 
 OUTLIER_RE = re.compile(
     r"ggml_cuda_nvfp4_kcache_outlier_extract: "
-    r"(?:target=(?P<target>[^ ]+) )?"
+    r"(?:target=(?P<target>.+?) )?"
     r"rows=(?P<rows>\d+) threshold=(?P<threshold>[0-9.]+) "
     r"stored_max=(?P<stored_max>\d+) compact_capacity=(?P<compact_capacity>\d+) "
     r"(?:compact_used=(?P<compact_used>\d+) )?"
+    r"(?:compact_overflow=(?P<compact_overflow>\d+) )?"
     r"total_outliers=(?P<total_outliers>\d+) "
     r"max_row_outliers=(?P<max_row_outliers>\d+) "
     r"overflow_rows=(?P<overflow_rows>\d+)"
