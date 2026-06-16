@@ -207,6 +207,80 @@ static void test_extract_compact_requires_full_row_capacity() {
     CUDA_CHECK(cudaFree(amax_d));
 }
 
+static void test_extract_compact_resets_counts_after_assigning_offsets() {
+    constexpr int64_t k = 16;
+    constexpr int64_t rows = 2;
+    constexpr int64_t sidecar_rows = 4;
+    constexpr int64_t row_capacity = 2;
+    constexpr int64_t compact_capacity = sidecar_rows * row_capacity;
+    constexpr float threshold = 16.0f;
+
+    std::vector<float> src((size_t) rows * (size_t) k, 0.0f);
+    src[1] = 17.0f;
+    src[4] = -18.0f;
+    src[(size_t) k + 2] = 19.0f;
+    src[(size_t) k + 5] = -20.0f;
+    const int64_t idx_h[2] = { 0, 1 };
+
+    float * src_d = nullptr;
+    int64_t * idx_d = nullptr;
+    int32_t * counts_d = nullptr;
+    int32_t * offsets_d = nullptr;
+    int32_t * cursor_d = nullptr;
+    int32_t * indices_d = nullptr;
+    float * values_d = nullptr;
+    float * amax_d = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&src_d, src.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&idx_d, sizeof(idx_h)));
+    CUDA_CHECK(cudaMalloc(&counts_d, (size_t) sidecar_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&offsets_d, (size_t) sidecar_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&cursor_d, sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&indices_d, (size_t) compact_capacity * sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc(&values_d, (size_t) compact_capacity * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&amax_d, (size_t) rows * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(src_d, src.data(), src.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(idx_d, idx_h, sizeof(idx_h), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(counts_d, 0, (size_t) sidecar_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(offsets_d, 0xff, (size_t) sidecar_rows * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(cursor_d, 0, sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(indices_d, 0, (size_t) compact_capacity * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(values_d, 0, (size_t) compact_capacity * sizeof(float)));
+
+    ggml_cuda_nvfp4_kcache_outlier_extract(
+            "test_compact_reset_after_offsets", src_d, idx_d, counts_d, offsets_d, cursor_d, indices_d, values_d, amax_d,
+            k, rows, k, 1, sidecar_rows, compact_capacity, threshold, nullptr);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<int32_t> counts((size_t) sidecar_rows);
+    std::vector<int32_t> offsets((size_t) sidecar_rows);
+    std::vector<int32_t> indices((size_t) compact_capacity);
+    std::vector<float> values((size_t) compact_capacity);
+    int32_t cursor = 0;
+    CUDA_CHECK(cudaMemcpy(counts.data(), counts_d, counts.size() * sizeof(int32_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(offsets.data(), offsets_d, offsets.size() * sizeof(int32_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(indices.data(), indices_d, indices.size() * sizeof(int32_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(values.data(), values_d, values.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&cursor, cursor_d, sizeof(cursor), cudaMemcpyDeviceToHost));
+
+    require(cursor == 4, "fused offset assignment should preserve compact cursor accounting");
+    require(counts[0] == 2 && counts[1] == 2, "fused offset assignment should leave final fill counts");
+    require(offsets[0] == 0 && offsets[1] == row_capacity, "fused offset assignment should preserve fixed row offsets");
+    require(indices[0] == 1 && nearly_equal(values[0], 17.0f), "row 0 first outlier after fused reset");
+    require(indices[1] == 4 && nearly_equal(values[1], -18.0f), "row 0 second outlier after fused reset");
+    require(indices[2] == 2 && nearly_equal(values[2], 19.0f), "row 1 first outlier after fused reset");
+    require(indices[3] == 5 && nearly_equal(values[3], -20.0f), "row 1 second outlier after fused reset");
+
+    CUDA_CHECK(cudaFree(src_d));
+    CUDA_CHECK(cudaFree(idx_d));
+    CUDA_CHECK(cudaFree(counts_d));
+    CUDA_CHECK(cudaFree(offsets_d));
+    CUDA_CHECK(cudaFree(cursor_d));
+    CUDA_CHECK(cudaFree(indices_d));
+    CUDA_CHECK(cudaFree(values_d));
+    CUDA_CHECK(cudaFree(amax_d));
+}
+
 static void test_extract_preserves_rows_across_multiple_set_rows_calls() {
     constexpr int64_t k = 16;
     constexpr int64_t rows = 2;
@@ -457,6 +531,7 @@ static void test_kcache_outlier_diagnostic_switches_default_off() {
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_DETERMINISTIC_FILL", nullptr);
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_NO_CORRECTION", nullptr);
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_FINGERPRINT", nullptr);
+    set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_OVERFLOW_LOG", nullptr);
 
     require(!ggml_cuda_nvfp4_kcache_outlier_deterministic_fill_enabled(),
             "deterministic fill diagnostic switch should default off");
@@ -464,12 +539,15 @@ static void test_kcache_outlier_diagnostic_switches_default_off() {
             "no-correction diagnostic switch should default off");
     require(!ggml_cuda_nvfp4_kcache_outlier_fingerprint_enabled(),
             "fingerprint diagnostic switch should default off");
+    require(!ggml_cuda_nvfp4_kcache_outlier_overflow_log_enabled(),
+            "overflow-log diagnostic switch should default off");
 }
 
 static void test_kcache_outlier_diagnostic_switches_parse_env() {
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_DETERMINISTIC_FILL", "1");
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_NO_CORRECTION", "1");
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_FINGERPRINT", "1");
+    set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_OVERFLOW_LOG", "1");
 
     require(ggml_cuda_nvfp4_kcache_outlier_deterministic_fill_enabled(),
             "deterministic fill diagnostic switch should enable on 1");
@@ -477,10 +555,13 @@ static void test_kcache_outlier_diagnostic_switches_parse_env() {
             "no-correction diagnostic switch should enable on 1");
     require(ggml_cuda_nvfp4_kcache_outlier_fingerprint_enabled(),
             "fingerprint diagnostic switch should enable on 1");
+    require(ggml_cuda_nvfp4_kcache_outlier_overflow_log_enabled(),
+            "overflow-log diagnostic switch should enable on 1");
 
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_DETERMINISTIC_FILL", "0");
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_NO_CORRECTION", "0");
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_FINGERPRINT", "0");
+    set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_OVERFLOW_LOG", "0");
 
     require(!ggml_cuda_nvfp4_kcache_outlier_deterministic_fill_enabled(),
             "deterministic fill diagnostic switch should disable on 0");
@@ -488,6 +569,8 @@ static void test_kcache_outlier_diagnostic_switches_parse_env() {
             "no-correction diagnostic switch should disable on 0");
     require(!ggml_cuda_nvfp4_kcache_outlier_fingerprint_enabled(),
             "fingerprint diagnostic switch should disable on 0");
+    require(!ggml_cuda_nvfp4_kcache_outlier_overflow_log_enabled(),
+            "overflow-log diagnostic switch should disable on 0");
 }
 
 static void test_apply_correction_filters_head() {
@@ -755,6 +838,7 @@ int main() {
 
     test_extract_compact_offsets_and_pool();
     test_extract_compact_requires_full_row_capacity();
+    test_extract_compact_resets_counts_after_assigning_offsets();
     test_extract_preserves_rows_across_multiple_set_rows_calls();
     test_extract_split_matches_full_for_same_rows();
     test_nvfp4_outlier_k_scale_mode_selects_row_or_threshold_amax();

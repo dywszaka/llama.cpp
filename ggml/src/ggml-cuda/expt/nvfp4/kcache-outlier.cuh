@@ -50,6 +50,7 @@ static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_kcache_outlier_
 bool ggml_cuda_nvfp4_kcache_outlier_deterministic_fill_enabled();
 bool ggml_cuda_nvfp4_kcache_outlier_no_correction_enabled();
 bool ggml_cuda_nvfp4_kcache_outlier_fingerprint_enabled();
+bool ggml_cuda_nvfp4_kcache_outlier_overflow_log_enabled();
 
 void ggml_cuda_nvfp4_kcache_outlier_extract(
         const char * target,

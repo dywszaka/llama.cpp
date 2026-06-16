@@ -12,7 +12,7 @@ bool ggml_cuda_nvfp4_vcache_fast_update_enabled() {
     static int cached = -1;
     if (cached < 0) {
         const char * env = getenv(GGML_CUDA_NVFP4_VCACHE_FAST_UPDATE_ENV);
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+        cached = (env == nullptr || env[0] == '\0' || env[0] != '0') ? 1 : 0;
     }
     return cached != 0;
 }

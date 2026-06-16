@@ -202,6 +202,17 @@ absolute-value threshold. Default: unset/off.
 This is intended for threshold sweep diagnostics. When unset,
 `LLAMA_NVFP4_KCACHE_OUTLIER=1` uses the selected per-layer profile.
 
+### `LLAMA_NVFP4_KCACHE_OUTLIER_OVERFLOW_LOG`
+
+Enables the Release-mode compact sidecar overflow diagnostic for NVFP4 K-cache
+outlier extraction. Default: unset/off.
+
+When enabled, each extraction may copy compact sidecar metadata to the host and
+synchronize the stream to print overflow diagnostics if any touched row exceeds
+its compact row capacity. When disabled, Release execution skips this diagnostic
+host-copy path. Debug builds still print the existing detailed outlier counts
+under `#ifndef NDEBUG`.
+
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_HYBRID_FP8`
 
 Switch B. Enables the fixed high/medium hybrid FP8 K-cache layer set:
@@ -295,7 +306,8 @@ global_scale = 6 * 224 / layer_absmax
 
 ### `LLAMA_NVFP4_VCACHE_FAST_UPDATE`
 
-Enables CUDA NVFP4 V-cache single-token fast update. Default: off.
+Controls CUDA NVFP4 V-cache single-token fast update. Default: on.
 
-When enabled, CUDA set_rows may patch single-token updates without
-requantizing the whole 16-token V-cache block.
+When enabled, CUDA set_rows may patch single-token updates without requantizing
+the whole 16-token V-cache block when the existing block scale remains valid.
+Set to `0` to force the full block requantization path.
