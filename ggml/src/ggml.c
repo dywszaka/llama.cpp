@@ -1705,6 +1705,9 @@ static struct ggml_tensor * ggml_new_tensor_impl(
         /*.view_offs    =*/ view_offs,
         /*.data         =*/ obj_alloc_size > 0 ? (void *)(result + 1) : data,
         /*.name         =*/ { 0 },
+        /*.nvfp4_kcache_recent_f16        =*/ NULL,
+        /*.nvfp4_kcache_recent_f16_active =*/ NULL,
+        /*.nvfp4_kcache_recent_f16_pos    =*/ NULL,
         /*.extra        =*/ NULL,
         /*.padding      =*/ { 0 },
     };
@@ -7052,6 +7055,31 @@ const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_indices(
 const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_values(
         const struct ggml_tensor * tensor) {
     return tensor->src[GGML_MAX_SRC - 2];
+}
+
+void ggml_tensor_set_nvfp4_kcache_recent_f16(
+        struct ggml_tensor       * tensor,
+        const struct ggml_tensor * shadow,
+        const struct ggml_tensor * active,
+        const struct ggml_tensor * pos) {
+    tensor->nvfp4_kcache_recent_f16 = (struct ggml_tensor *) shadow;
+    tensor->nvfp4_kcache_recent_f16_active = (struct ggml_tensor *) active;
+    tensor->nvfp4_kcache_recent_f16_pos = (struct ggml_tensor *) pos;
+}
+
+const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_recent_f16(
+        const struct ggml_tensor * tensor) {
+    return tensor->nvfp4_kcache_recent_f16;
+}
+
+const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_recent_f16_active(
+        const struct ggml_tensor * tensor) {
+    return tensor->nvfp4_kcache_recent_f16_active;
+}
+
+const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_recent_f16_pos(
+        const struct ggml_tensor * tensor) {
+    return tensor->nvfp4_kcache_recent_f16_pos;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

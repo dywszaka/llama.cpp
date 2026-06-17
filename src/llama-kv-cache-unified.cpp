@@ -232,7 +232,10 @@ llama_kv_cache_unified::llama_kv_cache_unified(
             const uint32_t outlier_tensors_per_layer = nvfp4_kcache_outlier
                     ? 5u*(1 + n_stream)
                     : 0u;
-            const uint32_t tensors_per_layer = 4u*(1 + n_stream) + outlier_tensors_per_layer;
+            const uint32_t recent_f16_tensors_per_layer = nvfp4_kcache_outlier && llama_nvfp4_kcache_recent_f16_enabled()
+                    ? 3u*(1 + n_stream)
+                    : 0u;
+            const uint32_t tensors_per_layer = 4u*(1 + n_stream) + outlier_tensors_per_layer + recent_f16_tensors_per_layer;
             ggml_init_params params = {
                 /*.mem_size   =*/ size_t(tensors_per_layer*n_layer_cache*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
@@ -282,6 +285,7 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     }
 
     size_t nvfp4_kcache_outlier_sidecar_bytes = 0;
+    size_t nvfp4_kcache_recent_f16_sidecar_bytes = 0;
 
     for (uint32_t il = 0; il < n_layer_cache; il++) {
         if (filter && !filter(il)) {
@@ -297,6 +301,11 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                 : type_k;
         const bool layer_has_k_scale = layer_type_k == GGML_TYPE_NVFP4 || layer_type_k == GGML_TYPE_NVFP4_8;
         const bool layer_nvfp4_kcache_outlier = nvfp4_kcache_outlier && layer_type_k == GGML_TYPE_NVFP4;
+        const bool layer_nvfp4_kcache_recent_f16 =
+                layer_nvfp4_kcache_outlier && llama_nvfp4_kcache_recent_f16_enabled();
+        const uint32_t kcache_recent_f16_window = layer_nvfp4_kcache_recent_f16
+                ? llama_nvfp4_kcache_recent_f16_window()
+                : 0u;
         const uint32_t kv_size_v = use_nvfp4_vcache_layout() ? GGML_PAD(kv_size, 16u) : kv_size;
         const uint32_t n_v_scale = use_nvfp4_vcache_layout()
                 ? (use_nvfp4_vcache_single_global_scale() ? 1u : n_embd_v_gqa * (kv_size_v / 16u))
@@ -329,6 +338,9 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         ggml_tensor * k_outlier_cursor = nullptr;
         ggml_tensor * k_outlier_index = nullptr;
         ggml_tensor * k_outlier_value = nullptr;
+        ggml_tensor * k_recent_f16 = nullptr;
+        ggml_tensor * k_recent_f16_active = nullptr;
+        ggml_tensor * k_recent_f16_pos = nullptr;
 
         k = ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa, kv_size, n_stream);
         if (use_nvfp4_vcache_layout()) {
@@ -364,6 +376,17 @@ llama_kv_cache_unified::llama_kv_cache_unified(
             nvfp4_kcache_outlier_sidecar_bytes += ggml_nbytes(k_outlier_index);
             nvfp4_kcache_outlier_sidecar_bytes += ggml_nbytes(k_outlier_value);
         }
+        if (layer_nvfp4_kcache_recent_f16) {
+            k_recent_f16 = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, n_embd_k_gqa, kcache_recent_f16_window, n_stream);
+            k_recent_f16_active = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t) kv_size * n_stream);
+            k_recent_f16_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t) kv_size * n_stream);
+            ggml_format_name(k_recent_f16, "cache_k_recent_f16_l%d", il);
+            ggml_format_name(k_recent_f16_active, "cache_k_recent_f16_active_l%d", il);
+            ggml_format_name(k_recent_f16_pos, "cache_k_recent_f16_pos_l%d", il);
+            nvfp4_kcache_recent_f16_sidecar_bytes += ggml_nbytes(k_recent_f16);
+            nvfp4_kcache_recent_f16_sidecar_bytes += ggml_nbytes(k_recent_f16_active);
+            nvfp4_kcache_recent_f16_sidecar_bytes += ggml_nbytes(k_recent_f16_pos);
+        }
         if (use_nvfp4_vcache_layout()) {
             v_scale = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_v_scale, n_stream);
             ggml_format_name(v_scale, use_nvfp4_vcache_single_global_scale() ? "cache_v_lgscale_l%d" : "cache_v_gscale_l%d", il);
@@ -381,6 +404,9 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         std::vector<ggml_tensor *> k_outlier_cursor_stream;
         std::vector<ggml_tensor *> k_outlier_index_stream;
         std::vector<ggml_tensor *> k_outlier_value_stream;
+        std::vector<ggml_tensor *> k_recent_f16_stream;
+        std::vector<ggml_tensor *> k_recent_f16_active_stream;
+        std::vector<ggml_tensor *> k_recent_f16_pos_stream;
 
         for (uint32_t s = 0; s < n_stream; ++s) {
             k_stream.push_back(ggml_view_2d(ctx, k, n_embd_k_gqa, kv_size, k->nb[1], s*k->nb[2]));
@@ -402,6 +428,12 @@ llama_kv_cache_unified::llama_kv_cache_unified(
                 k_outlier_index_stream.push_back(ggml_view_1d(ctx, k_outlier_index, k_outlier_index->ne[0], (int64_t) s * k_outlier_index->nb[1]));
                 k_outlier_value_stream.push_back(ggml_view_1d(ctx, k_outlier_value, k_outlier_index->ne[0], (int64_t) s * k_outlier_value->nb[1]));
             }
+            if (k_recent_f16) {
+                const int64_t stream_off = (int64_t) s * kv_size;
+                k_recent_f16_stream.push_back(ggml_view_2d(ctx, k_recent_f16, n_embd_k_gqa, kcache_recent_f16_window, k_recent_f16->nb[1], (int64_t) s*k_recent_f16->nb[2]));
+                k_recent_f16_active_stream.push_back(ggml_view_1d(ctx, k_recent_f16_active, kv_size, stream_off * sizeof(int32_t)));
+                k_recent_f16_pos_stream.push_back(ggml_view_1d(ctx, k_recent_f16_pos, kv_size, stream_off * sizeof(int32_t)));
+            }
             if (v_scale) {
                 v_scale_stream.push_back(ggml_view_1d(ctx, v_scale, n_v_scale, (int64_t) s * n_v_scale * sizeof(float)));
             }
@@ -412,8 +444,10 @@ llama_kv_cache_unified::llama_kv_cache_unified(
         layers.push_back({
                 il, k, v, k_scale, v_scale,
                 k_outlier_count, k_outlier_offset, k_outlier_cursor, k_outlier_index, k_outlier_value,
+                k_recent_f16, k_recent_f16_active, k_recent_f16_pos,
                 k_stream, v_stream, k_scale_stream, v_scale_stream,
                 k_outlier_count_stream, k_outlier_offset_stream, k_outlier_cursor_stream, k_outlier_index_stream, k_outlier_value_stream,
+                k_recent_f16_stream, k_recent_f16_active_stream, k_recent_f16_pos_stream,
         });
     }
 
@@ -440,6 +474,13 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     if (nvfp4_kcache_outlier) {
         LLAMA_LOG_INFO("%s: NVFP4 K-cache compact outlier sidecar size = %8.2f MiB (%zu bytes)\n",
                 __func__, nvfp4_kcache_outlier_sidecar_bytes/1024.0/1024.0, nvfp4_kcache_outlier_sidecar_bytes);
+    }
+    if (nvfp4_kcache_recent_f16_sidecar_bytes > 0) {
+        LLAMA_LOG_INFO("%s: NVFP4 K-cache recent-F16 sidecar enabled: window=%u size = %8.2f MiB (%zu bytes)\n",
+                __func__,
+                llama_nvfp4_kcache_recent_f16_window(),
+                nvfp4_kcache_recent_f16_sidecar_bytes/1024.0/1024.0,
+                nvfp4_kcache_recent_f16_sidecar_bytes);
     }
 
     // allocate tensors and initialize the buffers to avoid NaNs in the padding
@@ -972,6 +1013,11 @@ bool llama_kv_cache_unified::update(llama_context * lctx, bool do_shift, const d
                         ggml_backend_tensor_copy(layer.k_outlier_value_stream[ssrc], layer.k_outlier_value_stream[sdst]);
                     }
                 }
+                if (layer.k_recent_f16) {
+                    ggml_backend_tensor_copy(layer.k_recent_f16_stream[ssrc], layer.k_recent_f16_stream[sdst]);
+                    ggml_backend_tensor_copy(layer.k_recent_f16_active_stream[ssrc], layer.k_recent_f16_active_stream[sdst]);
+                    ggml_backend_tensor_copy(layer.k_recent_f16_pos_stream[ssrc], layer.k_recent_f16_pos_stream[sdst]);
+                }
                 if (layer.v_scale) {
                     ggml_backend_tensor_copy(layer.v_scale_stream[ssrc], layer.v_scale_stream[sdst]);
                 }
@@ -1441,6 +1487,9 @@ ggml_tensor * llama_kv_cache_unified::get_k(ggml_context * ctx, int32_t il, uint
     auto * k_outlier_cursor = layers[ikv].k_outlier_cursor;
     auto * k_outlier_index = layers[ikv].k_outlier_index;
     auto * k_outlier_value = layers[ikv].k_outlier_value;
+    auto * k_recent_f16 = layers[ikv].k_recent_f16;
+    auto * k_recent_f16_active = layers[ikv].k_recent_f16_active;
+    auto * k_recent_f16_pos = layers[ikv].k_recent_f16_pos;
 
     const uint64_t kv_size      = get_size();
     const uint64_t n_embd_k_gqa = k->ne[0];
@@ -1492,6 +1541,29 @@ ggml_tensor * llama_kv_cache_unified::get_k(ggml_context * ctx, int32_t il, uint
                 (int64_t) sinfo.s0 * k_outlier_value->nb[1]);
         ggml_tensor_set_nvfp4_kcache_outliers_compact(res, outlier_count, outlier_offset, outlier_index, outlier_value);
         ggml_tensor_set_nvfp4_kcache_outlier_cursor(res, outlier_cursor);
+    }
+    if (k_recent_f16) {
+        GGML_ASSERT(k_recent_f16_active != nullptr);
+        GGML_ASSERT(k_recent_f16_pos != nullptr);
+        ggml_tensor * recent_f16 = ggml_view_4d(ctx, k_recent_f16,
+                hparams.n_embd_head_k, hparams.n_head_kv(il), k_recent_f16->ne[1], ns,
+                ggml_row_size(k_recent_f16->type, hparams.n_embd_head_k),
+                ggml_row_size(k_recent_f16->type, n_embd_k_gqa),
+                ggml_row_size(k_recent_f16->type, n_embd_k_gqa*k_recent_f16->ne[1]),
+                ggml_row_size(k_recent_f16->type, n_embd_k_gqa*k_recent_f16->ne[1])*sinfo.s0);
+        ggml_tensor * recent_active = ggml_view_4d(ctx, k_recent_f16_active,
+                n_kv, 1, 1, ns,
+                0,
+                0,
+                (int64_t) kv_size * sizeof(int32_t),
+                (int64_t) sinfo.s0 * kv_size * sizeof(int32_t));
+        ggml_tensor * recent_pos = ggml_view_4d(ctx, k_recent_f16_pos,
+                n_kv, 1, 1, ns,
+                0,
+                0,
+                (int64_t) kv_size * sizeof(int32_t),
+                (int64_t) sinfo.s0 * kv_size * sizeof(int32_t));
+        ggml_tensor_set_nvfp4_kcache_recent_f16(res, recent_f16, recent_active, recent_pos);
     }
 
     return res;
@@ -1580,7 +1652,7 @@ ggml_tensor * llama_kv_cache_unified::get_v(ggml_context * ctx, int32_t il, uint
     return res;
 }
 
-ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
+ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo, const llama_ubatch * ubatch) const {
     const int32_t ikv = map_layer_ids.at(il);
 
     auto * k = layers[ikv].k;
@@ -1613,6 +1685,24 @@ ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_
                     layers[ikv].k_outlier_index,
                     layers[ikv].k_outlier_value);
             ggml_tensor_set_nvfp4_kcache_outlier_cursor(res, layers[ikv].k_outlier_cursor);
+        }
+        if (layers[ikv].k_recent_f16) {
+            GGML_ASSERT(layers[ikv].k_recent_f16_active != nullptr);
+            GGML_ASSERT(layers[ikv].k_recent_f16_pos != nullptr);
+            int32_t query_pos = n_tokens > 0 ? (int32_t) n_tokens - 1 : 0;
+            if (ubatch != nullptr && ubatch->pos != nullptr) {
+                for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+                    query_pos = std::max<int32_t>(query_pos, ubatch->pos[i]);
+                }
+            }
+            const int32_t recent_window = (int32_t) llama_nvfp4_kcache_recent_f16_window();
+            std::memcpy(&res->op_params[1], &recent_window, sizeof(recent_window));
+            std::memcpy(&res->op_params[2], &query_pos, sizeof(query_pos));
+            ggml_tensor_set_nvfp4_kcache_recent_f16(
+                    res,
+                    layers[ikv].k_recent_f16,
+                    layers[ikv].k_recent_f16_active,
+                    layers[ikv].k_recent_f16_pos);
         }
         return res;
     }
@@ -2192,6 +2282,10 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_defrag(
             ggml_tensor * view_k_outlier_count_dst = nullptr;
             ggml_tensor * view_k_outlier_offset_src = nullptr;
             ggml_tensor * view_k_outlier_offset_dst = nullptr;
+            ggml_tensor * view_k_recent_f16_active_src = nullptr;
+            ggml_tensor * view_k_recent_f16_active_dst = nullptr;
+            ggml_tensor * view_k_recent_f16_pos_src = nullptr;
+            ggml_tensor * view_k_recent_f16_pos_dst = nullptr;
 
             if (cparams.flash_attn) {
                 // NOTE: the V cache is not transposed when using flash attention
@@ -2246,6 +2340,17 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_defrag(
                 view_k_outlier_offset_src = ggml_view_1d(ctx, layer.k_outlier_offset, nm, i * sizeof(int32_t));
                 view_k_outlier_offset_dst = ggml_view_1d(ctx, layer.k_outlier_offset, nm, id * sizeof(int32_t));
                 ggml_build_forward_expand(gf, ggml_cpy(ctx, view_k_outlier_offset_src, view_k_outlier_offset_dst));
+            }
+            if (layer.k_recent_f16) {
+                GGML_ASSERT(layer.k_recent_f16_active != nullptr);
+                GGML_ASSERT(layer.k_recent_f16_pos != nullptr);
+                view_k_recent_f16_active_src = ggml_view_1d(ctx, layer.k_recent_f16_active, nm, i * sizeof(int32_t));
+                view_k_recent_f16_active_dst = ggml_view_1d(ctx, layer.k_recent_f16_active, nm, id * sizeof(int32_t));
+                ggml_build_forward_expand(gf, ggml_cpy(ctx, view_k_recent_f16_active_src, view_k_recent_f16_active_dst));
+
+                view_k_recent_f16_pos_src = ggml_view_1d(ctx, layer.k_recent_f16_pos, nm, i * sizeof(int32_t));
+                view_k_recent_f16_pos_dst = ggml_view_1d(ctx, layer.k_recent_f16_pos, nm, id * sizeof(int32_t));
+                ggml_build_forward_expand(gf, ggml_cpy(ctx, view_k_recent_f16_pos_src, view_k_recent_f16_pos_dst));
             }
             if (layer.v_scale) {
                 if (use_nvfp4_vcache_single_global_scale()) {
@@ -3065,7 +3170,8 @@ ggml_tensor * llama_kv_cache_unified_context::get_v(ggml_context * ctx, int32_t 
 }
 
 ggml_tensor * llama_kv_cache_unified_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
-    return kv->cpy_k(ctx, k_cur, k_idxs, il, sinfos[i_cur]);
+    const llama_ubatch * ubatch = i_cur < ubatches.size() ? &ubatches[i_cur] : nullptr;
+    return kv->cpy_k(ctx, k_cur, k_idxs, il, sinfos[i_cur], ubatch);
 }
 
 ggml_tensor * llama_kv_cache_unified_context::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const {

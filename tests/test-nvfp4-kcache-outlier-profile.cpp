@@ -60,6 +60,36 @@ int main() {
 
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD", nullptr);
     set_env_var("LLAMA_NVFP4_KCACHE_OUTLIER_PROFILE", nullptr);
+    set_env_var("LLAMA_NVFP4_KCACHE_RECENT_F16", nullptr);
+    set_env_var("LLAMA_NVFP4_KCACHE_RECENT_F16_WINDOW", nullptr);
+
+    require(!llama_nvfp4_kcache_recent_f16_enabled(),
+            "recent F16 K-cache window should default off");
+    require(llama_nvfp4_kcache_recent_f16_window() == 100,
+            "recent F16 K-cache window should default to 100 tokens");
+    require(llama_nvfp4_kcache_recent_f16_is_active(199, 200, 100),
+            "cell one token behind the query should be inside the default window");
+    require(llama_nvfp4_kcache_recent_f16_is_active(101, 200, 100),
+            "cell 99 tokens behind the query should be inside the default window");
+    require(!llama_nvfp4_kcache_recent_f16_is_active(100, 200, 100),
+            "cell 100 tokens behind the query should be outside the default window");
+    require(!llama_nvfp4_kcache_recent_f16_is_active(201, 200, 100),
+            "future cell positions should not be inside the recent F16 window");
+
+    set_env_var("LLAMA_NVFP4_KCACHE_RECENT_F16", "1");
+    set_env_var("LLAMA_NVFP4_KCACHE_RECENT_F16_WINDOW", "7");
+    require(llama_nvfp4_kcache_recent_f16_enabled(),
+            "recent F16 K-cache window should be enabled by non-zero env");
+    require(llama_nvfp4_kcache_recent_f16_window() == 7,
+            "recent F16 K-cache window should parse a positive env override");
+    require(llama_nvfp4_kcache_recent_f16_is_active(194, 200, 7),
+            "cell six positions behind should be inside the parsed window");
+    require(!llama_nvfp4_kcache_recent_f16_is_active(193, 200, 7),
+            "cell seven positions behind should be outside because latest token is index 0");
+
+    set_env_var("LLAMA_NVFP4_KCACHE_RECENT_F16_WINDOW", "0");
+    require(llama_nvfp4_kcache_recent_f16_window() == 100,
+            "non-positive recent F16 window override should fall back to 100");
 
     std::puts("test-nvfp4-kcache-outlier-profile: ok");
     return 0;

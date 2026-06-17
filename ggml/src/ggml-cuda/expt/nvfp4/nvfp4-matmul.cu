@@ -7,6 +7,8 @@
 #include "ggml-backend.h"
 #include "../../../ggml-quants.h"
 
+#include <cuda_fp16.h>
+
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -887,6 +889,179 @@ static void ggml_cuda_nvfp4_apply_kcache_outlier_correction(
             stream);
 }
 
+static __global__ void k_apply_recent_f16_kcache_override(
+        const half * __restrict__ k_recent_f16,
+        const int32_t * __restrict__ active,
+        const int32_t * __restrict__ pos,
+        const float * __restrict__ q,
+        float * __restrict__ kq,
+        const float * __restrict__ k_scale,
+        const int64_t head_dim,
+        const int64_t kv_len,
+        const int64_t recent_rows,
+        const int64_t q_len,
+        const int64_t q_heads,
+        const int64_t kv_heads,
+        const int64_t q_head,
+        const int64_t k_nb0_f16,
+        const int64_t k_nb1_f16,
+        const int64_t k_nb2_f16,
+        const int64_t active_nb0_i32,
+        const int64_t q_nb0_f32,
+        const int64_t q_nb1_f32,
+        const int64_t kq_nb0_f32,
+        const int64_t kq_nb1_f32) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t total = kv_len * q_len;
+    if (idx >= total || q_heads <= 0 || kv_heads <= 0) {
+        return;
+    }
+
+    const int64_t kv_pos = idx % kv_len;
+    const int64_t q_pos  = idx / kv_len;
+    if (active[kv_pos * active_nb0_i32] == 0) {
+        return;
+    }
+    const int32_t kv_row_pos = pos[kv_pos * active_nb0_i32];
+    if (kv_row_pos < 0 || recent_rows <= 0) {
+        return;
+    }
+    const int64_t recent_slot = ((int64_t) kv_row_pos) % recent_rows;
+
+    const int64_t gqa = q_heads / kv_heads;
+    const int64_t kv_head = gqa > 0 ? (q_head / gqa) : q_head;
+    float sum = 0.0f;
+    for (int64_t i = 0; i < head_dim; ++i) {
+        const float kv = __half2float(k_recent_f16[i * k_nb0_f16 + kv_head * k_nb1_f16 + recent_slot * k_nb2_f16]);
+        const float qv = q[q_pos * q_nb1_f32 + i * q_nb0_f32];
+        sum += kv * qv;
+    }
+    if (k_scale != nullptr) {
+        const float scale = k_scale[kv_pos];
+        if (scale > 0.0f && isfinite(scale)) {
+            sum /= scale;
+        }
+    }
+
+    kq[kv_pos * kq_nb0_f32 + q_pos * kq_nb1_f32] = sum;
+}
+
+static void ggml_cuda_nvfp4_apply_recent_f16_kcache_override(
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst,
+        cudaStream_t stream) {
+    const ggml_tensor * recent_f16 = ggml_tensor_get_nvfp4_kcache_recent_f16(src0);
+    const ggml_tensor * recent_active = ggml_tensor_get_nvfp4_kcache_recent_f16_active(src0);
+    const ggml_tensor * recent_pos = ggml_tensor_get_nvfp4_kcache_recent_f16_pos(src0);
+    const ggml_tensor * k_scale = ggml_tensor_get_nvfp4_scale(src0);
+    if (recent_f16 == nullptr || recent_active == nullptr || recent_pos == nullptr) {
+        return;
+    }
+
+    const int64_t total = src0->ne[1] * src1->ne[1];
+    if (total <= 0) {
+        return;
+    }
+    GGML_ASSERT(recent_f16->type == GGML_TYPE_F16);
+    GGML_ASSERT(recent_active->type == GGML_TYPE_I32);
+    GGML_ASSERT(recent_pos->type == GGML_TYPE_I32);
+    GGML_ASSERT(recent_f16->data != nullptr);
+    GGML_ASSERT(recent_active->data != nullptr);
+    GGML_ASSERT(recent_pos->data != nullptr);
+    GGML_ASSERT(recent_f16->ne[0] == src0->ne[0]);
+    GGML_ASSERT(recent_f16->ne[1] == src0->ne[2]);
+
+    const int block_size = 256;
+    const int grid_size = (int) ((total + block_size - 1) / block_size);
+    k_apply_recent_f16_kcache_override<<<grid_size, block_size, 0, stream>>>(
+            (const half *) recent_f16->data,
+            (const int32_t *) recent_active->data,
+            (const int32_t *) recent_pos->data,
+            (const float *) src1->data,
+            (float *) dst->data,
+            k_scale != nullptr ? (const float *) k_scale->data : nullptr,
+            src0->ne[0],
+            src0->ne[1],
+            recent_f16->ne[2],
+            src1->ne[1],
+            src1->ne[2],
+            src0->ne[2],
+            0,
+            recent_f16->nb[0] / (int64_t) sizeof(half),
+            recent_f16->nb[1] / (int64_t) sizeof(half),
+            recent_f16->nb[2] / (int64_t) sizeof(half),
+            recent_active->nb[0] / (int64_t) sizeof(int32_t),
+            src1->nb[0] / (int64_t) sizeof(float),
+            src1->nb[1] / (int64_t) sizeof(float),
+            dst->nb[0] / (int64_t) sizeof(float),
+            dst->nb[1] / (int64_t) sizeof(float));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+static void ggml_cuda_nvfp4_apply_recent_f16_kcache_override_batched_slice(
+        const ggml_tensor * src0,
+        const ggml_tensor * src1_slice,
+        ggml_tensor * dst_slice,
+        int64_t q_heads,
+        int64_t kv_heads,
+        int64_t q_head,
+        int64_t stream_id,
+        cudaStream_t stream) {
+    const ggml_tensor * recent_f16 = ggml_tensor_get_nvfp4_kcache_recent_f16(src0);
+    const ggml_tensor * recent_active = ggml_tensor_get_nvfp4_kcache_recent_f16_active(src0);
+    const ggml_tensor * recent_pos = ggml_tensor_get_nvfp4_kcache_recent_f16_pos(src0);
+    const ggml_tensor * k_scale = ggml_tensor_get_nvfp4_scale(src0);
+    if (recent_f16 == nullptr || recent_active == nullptr || recent_pos == nullptr) {
+        return;
+    }
+
+    const int64_t kv_len = src0->ne[1];
+    const int64_t q_len = src1_slice->ne[1];
+    const int64_t total = kv_len * q_len;
+    if (total <= 0) {
+        return;
+    }
+    GGML_ASSERT(recent_f16->type == GGML_TYPE_F16);
+    GGML_ASSERT(recent_active->type == GGML_TYPE_I32);
+    GGML_ASSERT(recent_pos->type == GGML_TYPE_I32);
+    GGML_ASSERT(recent_f16->data != nullptr);
+    GGML_ASSERT(recent_active->data != nullptr);
+    GGML_ASSERT(recent_pos->data != nullptr);
+    GGML_ASSERT(recent_f16->ne[0] == src0->ne[0]);
+    GGML_ASSERT(recent_f16->ne[1] == kv_heads);
+
+    const char * recent_base = (const char *) recent_f16->data + stream_id * recent_f16->nb[3];
+    const char * active_base = (const char *) recent_active->data + stream_id * recent_active->nb[3];
+    const char * pos_base = (const char *) recent_pos->data + stream_id * recent_pos->nb[3];
+    const char * scale_base = k_scale != nullptr ? (const char *) k_scale->data + stream_id * k_scale->nb[3] : nullptr;
+    const int block_size = 256;
+    const int grid_size = (int) ((total + block_size - 1) / block_size);
+    k_apply_recent_f16_kcache_override<<<grid_size, block_size, 0, stream>>>(
+            (const half *) recent_base,
+            (const int32_t *) active_base,
+            (const int32_t *) pos_base,
+            (const float *) src1_slice->data,
+            (float *) dst_slice->data,
+            scale_base != nullptr ? (const float *) scale_base : nullptr,
+            src0->ne[0],
+            kv_len,
+            recent_f16->ne[2],
+            q_len,
+            q_heads,
+            kv_heads,
+            q_head,
+            recent_f16->nb[0] / (int64_t) sizeof(half),
+            recent_f16->nb[1] / (int64_t) sizeof(half),
+            recent_f16->nb[2] / (int64_t) sizeof(half),
+            recent_active->nb[0] / (int64_t) sizeof(int32_t),
+            src1_slice->nb[0] / (int64_t) sizeof(float),
+            src1_slice->nb[1] / (int64_t) sizeof(float),
+            dst_slice->nb[0] / (int64_t) sizeof(float),
+            dst_slice->nb[1] / (int64_t) sizeof(float));
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace
 
 static bool ggml_cuda_mul_mat_nvfp4_native_impl(
@@ -989,6 +1164,15 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                             dst_slice.nb[1] / (int64_t) sizeof(float),
                             stream);
                 }
+                ggml_cuda_nvfp4_apply_recent_f16_kcache_override_batched_slice(
+                        src0,
+                        &src1_slice,
+                        &dst_slice,
+                        src1->ne[2],
+                        src0->ne[2],
+                        i2,
+                        i3 / r3,
+                        stream);
             }
         }
 
@@ -1177,6 +1361,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                 stream);
         if (apply_outlier_correction) {
             ggml_cuda_nvfp4_apply_kcache_outlier_correction(src0, src1, dst, stream);
+            ggml_cuda_nvfp4_apply_recent_f16_kcache_override(src0, src1, dst, stream);
         }
         return true;
     }
@@ -1580,6 +1765,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
 
     if (st == CUBLAS_STATUS_SUCCESS && apply_outlier_correction) {
         ggml_cuda_nvfp4_apply_kcache_outlier_correction(src0, src1, dst, stream);
+        ggml_cuda_nvfp4_apply_recent_f16_kcache_override(src0, src1, dst, stream);
     }
 
 

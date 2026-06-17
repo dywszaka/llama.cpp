@@ -644,9 +644,13 @@ extern "C" {
 
         char name[GGML_MAX_NAME];
 
+        struct ggml_tensor * nvfp4_kcache_recent_f16;
+        struct ggml_tensor * nvfp4_kcache_recent_f16_active;
+        struct ggml_tensor * nvfp4_kcache_recent_f16_pos;
+
         void * extra; // extra things e.g. for ggml-cuda.cu
 
-        char padding[8];
+        char padding[16];
     };
 
     static const size_t GGML_TENSOR_SIZE = sizeof(struct ggml_tensor);
@@ -856,6 +860,22 @@ extern "C" {
             const struct ggml_tensor * tensor);
 
     GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_outlier_values(
+            const struct ggml_tensor * tensor);
+
+    // bind optional recent-F16 NVFP4 K-cache window metadata to a tensor or op result
+    GGML_API void ggml_tensor_set_nvfp4_kcache_recent_f16(
+            struct ggml_tensor       * tensor,
+            const struct ggml_tensor * shadow,
+            const struct ggml_tensor * active,
+            const struct ggml_tensor * pos);
+
+    GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_recent_f16(
+            const struct ggml_tensor * tensor);
+
+    GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_recent_f16_active(
+            const struct ggml_tensor * tensor);
+
+    GGML_API const struct ggml_tensor * ggml_tensor_get_nvfp4_kcache_recent_f16_pos(
             const struct ggml_tensor * tensor);
 
     //

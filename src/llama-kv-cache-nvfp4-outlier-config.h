@@ -166,6 +166,36 @@ static inline bool llama_nvfp4_kcache_outlier_enabled() {
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
 }
 
+static inline bool llama_nvfp4_kcache_recent_f16_enabled() {
+    const char * value = std::getenv("LLAMA_NVFP4_KCACHE_RECENT_F16");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+static inline uint32_t llama_nvfp4_kcache_recent_f16_window() {
+    const char * value = std::getenv("LLAMA_NVFP4_KCACHE_RECENT_F16_WINDOW");
+    if (value != nullptr && value[0] != '\0') {
+        char * end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (end != value && parsed > 0 && parsed <= INT32_MAX) {
+            return (uint32_t) parsed;
+        }
+    }
+
+    return 100u;
+}
+
+static inline bool llama_nvfp4_kcache_recent_f16_is_active(
+        int64_t cell_pos,
+        int64_t query_pos,
+        uint32_t window) {
+    if (window == 0 || cell_pos > query_pos) {
+        return false;
+    }
+
+    const int64_t distance = query_pos - cell_pos;
+    return distance >= 0 && distance < (int64_t) window;
+}
+
 static inline const char * llama_nvfp4_kcache_outlier_threshold_override_env() {
     const char * value = std::getenv("LLAMA_NVFP4_KCACHE_OUTLIER_THRESHOLD");
     return value != nullptr && value[0] != '\0' ? value : nullptr;

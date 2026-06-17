@@ -64,8 +64,59 @@ static bool run_case() {
     return true;
 }
 
+static bool run_recent_f16_metadata_case() {
+    ggml_init_params params = {
+        /* .mem_size   = */ 8 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        return false;
+    }
+
+    ggml_tensor * k = ggml_new_tensor_2d(ctx, GGML_TYPE_NVFP4, 128, 32);
+    ggml_tensor * recent_f16 = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, 128, 32);
+    ggml_tensor * recent_active = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 32);
+    ggml_tensor * recent_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 32);
+
+    ggml_tensor_set_nvfp4_kcache_recent_f16(k, recent_f16, recent_active, recent_pos);
+
+    if (ggml_tensor_get_nvfp4_kcache_recent_f16(k) != recent_f16) {
+        std::fprintf(stderr, "recent F16 shadow metadata did not round-trip\n");
+        ggml_free(ctx);
+        return false;
+    }
+    if (ggml_tensor_get_nvfp4_kcache_recent_f16_active(k) != recent_active) {
+        std::fprintf(stderr, "recent F16 active metadata did not round-trip\n");
+        ggml_free(ctx);
+        return false;
+    }
+    if (ggml_tensor_get_nvfp4_kcache_recent_f16_pos(k) != recent_pos) {
+        std::fprintf(stderr, "recent F16 position metadata did not round-trip\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_tensor * view = ggml_view_tensor(ctx, k);
+    ggml_tensor_set_nvfp4_kcache_recent_f16(view, recent_f16, recent_active, recent_pos);
+    if (ggml_tensor_get_nvfp4_kcache_recent_f16(view) != recent_f16 ||
+            ggml_tensor_get_nvfp4_kcache_recent_f16_active(view) != recent_active ||
+            ggml_tensor_get_nvfp4_kcache_recent_f16_pos(view) != recent_pos) {
+        std::fprintf(stderr, "recent F16 metadata did not round-trip on view tensor\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_free(ctx);
+    return true;
+}
+
 int main() {
     if (!run_case()) {
+        return 1;
+    }
+    if (!run_recent_f16_metadata_case()) {
         return 1;
     }
 

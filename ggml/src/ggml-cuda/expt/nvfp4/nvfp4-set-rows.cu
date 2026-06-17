@@ -3,6 +3,8 @@
 #include "nvfp4-quantize.cuh"
 #include "nvfp4-quantize-core.cuh"
 
+#include <cuda_fp16.h>
+
 static __global__ void k_abs_max_f32_rows(
         const float * __restrict__ src0,
         float * __restrict__ amax,
@@ -141,6 +143,66 @@ static __global__ void k_set_rows_scale(
     scale[dst_row] = input_scale;
 }
 
+static __global__ void k_set_rows_recent_f16(
+        const float * __restrict__ src0,
+        const int64_t * __restrict__ src1,
+        half * __restrict__ recent_f16,
+        int32_t * __restrict__ recent_active,
+        int32_t * __restrict__ recent_pos,
+        const int64_t ne00,
+        const int64_t ne01,
+        const int64_t s01,
+        const int64_t s10,
+        const int64_t recent_s1,
+        const int64_t recent_rows,
+        const int32_t window,
+        const int32_t query_pos) {
+    const int64_t src_row = blockIdx.y;
+    if (src_row >= ne01) {
+        return;
+    }
+
+    const int64_t dst_row = *(src1 + src_row*s10);
+    const int32_t pos = query_pos - (int32_t) (ne01 - 1 - src_row);
+    const int32_t distance = query_pos - pos;
+    const int32_t active = (window > 0 && distance >= 0 && distance < window) ? 1 : 0;
+
+    if (active && recent_rows > 0) {
+        const int64_t slot = ((int64_t) pos) % recent_rows;
+        half * dst_row_ptr = (half *) ((char *) recent_f16 + slot*recent_s1);
+        const int64_t row_off = src_row*s01;
+        for (int64_t i = threadIdx.x; i < ne00; i += blockDim.x) {
+            dst_row_ptr[i] = __float2half(src0[row_off + i]);
+        }
+    }
+
+    if (threadIdx.x == 0) {
+        recent_active[dst_row] = active;
+        recent_pos[dst_row] = pos;
+    }
+}
+
+static __global__ void k_refresh_recent_f16_active(
+        int32_t * __restrict__ recent_active,
+        const int32_t * __restrict__ recent_pos,
+        const int64_t n_rows,
+        const int32_t window,
+        const int32_t query_pos) {
+    const int64_t row = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n_rows) {
+        return;
+    }
+
+    const int32_t old_active = recent_active[row];
+    const int32_t pos = recent_pos[row];
+    if (old_active == 0 && pos == 0) {
+        return;
+    }
+
+    const int32_t distance = query_pos - pos;
+    recent_active[row] = (window > 0 && distance >= 0 && distance < window) ? 1 : 0;
+}
+
 static void ggml_cuda_set_rows_nvfp4_common(
         ggml_backend_cuda_context & ctx,
         const ggml_cuda_set_rows_params & p,
@@ -159,12 +221,20 @@ static void ggml_cuda_set_rows_nvfp4_common(
     const ggml_tensor * outlier_cursor = ggml_tensor_get_nvfp4_kcache_outlier_cursor(dst);
     const ggml_tensor * outlier_indices = ggml_tensor_get_nvfp4_kcache_outlier_indices(dst);
     const ggml_tensor * outlier_values = ggml_tensor_get_nvfp4_kcache_outlier_values(dst);
+    const ggml_tensor * recent_f16 = ggml_tensor_get_nvfp4_kcache_recent_f16(dst);
+    const ggml_tensor * recent_active = ggml_tensor_get_nvfp4_kcache_recent_f16_active(dst);
+    const ggml_tensor * recent_pos = ggml_tensor_get_nvfp4_kcache_recent_f16_pos(dst);
     const bool use_outliers =
             outlier_counts != nullptr &&
             outlier_offsets != nullptr &&
             outlier_cursor != nullptr &&
             outlier_indices != nullptr &&
             outlier_values != nullptr;
+    const bool use_recent_f16 =
+            recent_f16 != nullptr &&
+            recent_active != nullptr &&
+            recent_pos != nullptr &&
+            p.kcache_recent_f16_window > 0;
     const bool use_tensor_scale = use_outliers;
     const bool use_bf16_trunc_nn = !qk8 &&
             ggml_cuda_nvfp4_bf16_quant_enabled() &&
@@ -187,6 +257,16 @@ static void ggml_cuda_set_rows_nvfp4_common(
         GGML_ASSERT(outlier_offsets->data != nullptr);
         GGML_ASSERT(outlier_cursor->type == GGML_TYPE_I32);
         GGML_ASSERT(outlier_cursor->data != nullptr);
+    }
+    if (use_recent_f16) {
+        GGML_ASSERT(!qk8);
+        GGML_ASSERT(recent_f16->type == GGML_TYPE_F16);
+        GGML_ASSERT(recent_active->type == GGML_TYPE_I32);
+        GGML_ASSERT(recent_pos->type == GGML_TYPE_I32);
+        GGML_ASSERT(recent_f16->data != nullptr);
+        GGML_ASSERT(recent_active->data != nullptr);
+        GGML_ASSERT(recent_pos->data != nullptr);
+        GGML_ASSERT(recent_f16->ne[0] == p.ne00);
     }
 
     ggml_cuda_pool_alloc<float> amax_d(ctx.pool(), (size_t) p.ne01);
@@ -262,6 +342,36 @@ static void ggml_cuda_set_rows_nvfp4_common(
                 outlier_threshold,
                 use_tensor_scale);
         CUDA_CHECK(cudaGetLastError());
+
+        if (use_recent_f16) {
+            const dim3 block_size(CUDA_SET_ROWS_BLOCK_SIZE);
+            const dim3 grid_size(1, (uint32_t) p.ne01, 1);
+            k_set_rows_recent_f16<<<grid_size, block_size, 0, p.stream>>>(
+                    p.src0_d,
+                    p.src1_d,
+                    (half *) recent_f16->data,
+                    (int32_t *) recent_active->data,
+                    (int32_t *) recent_pos->data,
+                    p.ne00,
+                    p.ne01,
+                    p.nb01/sizeof(float),
+                    p.nb10/sizeof(int64_t),
+                    recent_f16->nb[1],
+                    recent_f16->ne[1],
+                    p.kcache_recent_f16_window,
+                    p.kcache_recent_f16_query_pos);
+            CUDA_CHECK(cudaGetLastError());
+
+            const int64_t n_recent_rows = recent_active->ne[0];
+            const int refresh_blocks = (int) ((n_recent_rows + CUDA_SET_ROWS_BLOCK_SIZE - 1) / CUDA_SET_ROWS_BLOCK_SIZE);
+            k_refresh_recent_f16_active<<<refresh_blocks, CUDA_SET_ROWS_BLOCK_SIZE, 0, p.stream>>>(
+                    (int32_t *) recent_active->data,
+                    (const int32_t *) recent_pos->data,
+                    n_recent_rows,
+                    p.kcache_recent_f16_window,
+                    p.kcache_recent_f16_query_pos);
+            CUDA_CHECK(cudaGetLastError());
+        }
     }
 }
 

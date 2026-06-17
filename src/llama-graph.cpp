@@ -1243,6 +1243,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     ggml_tensor * k_outlier_cursor = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_kcache_outlier_cursor(k));
     ggml_tensor * k_outlier_index = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_kcache_outlier_indices(k));
     ggml_tensor * k_outlier_value = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_kcache_outlier_values(k));
+    ggml_tensor * k_recent_f16 = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_kcache_recent_f16(k));
+    ggml_tensor * k_recent_f16_active = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_kcache_recent_f16_active(k));
+    ggml_tensor * k_recent_f16_pos = const_cast<ggml_tensor *>(ggml_tensor_get_nvfp4_kcache_recent_f16_pos(k));
     const bool v_is_nvfp4_cache =
             v->type == GGML_TYPE_NVFP4 &&
             v_scale != nullptr &&
@@ -1267,6 +1270,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         GGML_ASSERT(k_outlier_cursor != nullptr);
         ggml_tensor_set_nvfp4_kcache_outliers_compact(k, k_outlier_count, k_outlier_offset, k_outlier_index, k_outlier_value);
         ggml_tensor_set_nvfp4_kcache_outlier_cursor(k, k_outlier_cursor);
+    }
+    if (k_recent_f16) {
+        GGML_ASSERT(k_recent_f16_active != nullptr);
+        GGML_ASSERT(k_recent_f16_pos != nullptr);
+        ggml_tensor_set_nvfp4_kcache_recent_f16(k, k_recent_f16, k_recent_f16_active, k_recent_f16_pos);
     }
     if (v_scale) {
         ggml_tensor_set_nvfp4_scale(v, v_scale);

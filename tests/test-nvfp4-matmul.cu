@@ -2040,6 +2040,199 @@ static bool run_case_backend_outlier_compact_sidecar() {
     return ok;
 }
 
+static bool run_case_backend_recent_f16_kcache_override() {
+    const int head_dim = 32;
+    const int kv_heads = 2;
+    const int q_heads = 4;
+    const int m = 32;
+    const int n = 3;
+    const int k = head_dim;
+    const int recent_window = 4;
+
+    std::vector<float> a_fp32((size_t) kv_heads * (size_t) m * (size_t) k, 0.0f);
+    std::vector<float> b_fp32((size_t) q_heads * (size_t) n * (size_t) k, 0.0f);
+    std::vector<float> recent_shadow((size_t) recent_window * (size_t) kv_heads * (size_t) head_dim, 0.0f);
+    for (int qh = 0; qh < q_heads; ++qh) {
+        for (int row = 0; row < n; ++row) {
+            for (int col = 0; col < k; ++col) {
+                b_fp32[((size_t) qh * (size_t) n + (size_t) row) * (size_t) k + (size_t) col] =
+                        0.0078125f * (float) (((qh + 1) * (row + 2) + col) % 17 - 8);
+            }
+        }
+    }
+
+    const int active_row0 = 5;
+    const int active_row1 = 17;
+    const int inactive_row = 23;
+    for (int slot = 0; slot < recent_window; ++slot) {
+        for (int kh = 0; kh < kv_heads; ++kh) {
+            for (int col = 0; col < head_dim; ++col) {
+                recent_shadow[((size_t) slot * (size_t) kv_heads + (size_t) kh) * (size_t) head_dim + (size_t) col] =
+                        0.03125f * (float) ((slot + 3) * (kh + 1) + (col % 7) - 5);
+            }
+        }
+    }
+
+    std::vector<block_nvfp4> a_nvfp4((size_t) kv_heads * (size_t) m * ((size_t) k / QK_NVFP4));
+    for (int kh = 0; kh < kv_heads; ++kh) {
+        std::vector<block_nvfp4> a_slice;
+        quantize_matrix_nvfp4(
+                std::vector<float>(
+                        a_fp32.begin() + (ptrdiff_t) kh * (ptrdiff_t) m * (ptrdiff_t) k,
+                        a_fp32.begin() + (ptrdiff_t) (kh + 1) * (ptrdiff_t) m * (ptrdiff_t) k),
+                a_slice,
+                m,
+                k,
+                1.0f);
+        std::memcpy(
+                a_nvfp4.data() + (size_t) kh * (size_t) m * ((size_t) k / QK_NVFP4),
+                a_slice.data(),
+                a_slice.size() * sizeof(block_nvfp4));
+    }
+
+    std::vector<ggml_fp16_t> recent_f16((size_t) recent_window * (size_t) kv_heads * (size_t) head_dim);
+    for (int slot = 0; slot < recent_window; ++slot) {
+        for (int kh = 0; kh < kv_heads; ++kh) {
+            for (int col = 0; col < head_dim; ++col) {
+                const size_t packed_idx = ((size_t) slot * (size_t) kv_heads + (size_t) kh) * (size_t) head_dim + (size_t) col;
+                const size_t ggml_idx = ((size_t) slot * (size_t) kv_heads + (size_t) kh) * (size_t) head_dim + (size_t) col;
+                recent_f16[ggml_idx] = GGML_FP32_TO_FP16(recent_shadow[packed_idx]);
+            }
+        }
+    }
+
+    std::vector<int32_t> active((size_t) m, 0);
+    std::vector<int32_t> pos((size_t) m, -1);
+    std::vector<float> k_scale((size_t) m, 1.0f);
+    active[(size_t) active_row0] = 1;
+    active[(size_t) active_row1] = 1;
+    pos[(size_t) active_row0] = 101;
+    pos[(size_t) active_row1] = 102;
+    pos[(size_t) inactive_row] = 103;
+    k_scale[(size_t) active_row0] = 0.25f;
+    k_scale[(size_t) active_row1] = 0.5f;
+
+    std::vector<float> c_ref((size_t) q_heads * (size_t) m * (size_t) n, 0.0f);
+    const int active_rows[] = { active_row0, active_row1 };
+    for (int qh = 0; qh < q_heads; ++qh) {
+        const int kh = qh / (q_heads / kv_heads);
+        for (int q = 0; q < n; ++q) {
+            for (int row : active_rows) {
+                const int slot = pos[(size_t) row] % recent_window;
+                float sum = 0.0f;
+                for (int col = 0; col < k; ++col) {
+                    sum += recent_shadow[((size_t) slot * (size_t) kv_heads + (size_t) kh) * (size_t) head_dim + (size_t) col] *
+                            b_fp32[((size_t) qh * (size_t) n + (size_t) q) * (size_t) k + (size_t) col];
+                }
+                c_ref[((size_t) qh * (size_t) n + (size_t) q) * (size_t) m + (size_t) row] = sum;
+            }
+        }
+    }
+
+    ggml_init_params params = {
+        /* .mem_size   = */ 16u * 1024u * 1024u,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (ctx == nullptr) {
+        std::fprintf(stderr, "failed to init ggml context\n");
+        return false;
+    }
+
+    ggml_backend_t backend = ggml_backend_cuda_init(0);
+    if (backend == nullptr) {
+        std::fprintf(stderr, "failed to init CUDA backend\n");
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_NVFP4, k, m, kv_heads);
+    ggml_tensor * b = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, n, q_heads);
+    ggml_tensor * recent_base = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, head_dim * kv_heads, recent_window);
+    ggml_tensor * recent = ggml_view_3d(ctx, recent_base,
+            head_dim, kv_heads, recent_window,
+            head_dim * (int64_t) sizeof(ggml_fp16_t),
+            head_dim * kv_heads * (int64_t) sizeof(ggml_fp16_t),
+            0);
+    ggml_tensor * recent_active = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, m);
+    ggml_tensor * recent_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, m);
+    ggml_tensor * scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, m);
+    ggml_tensor_set_nvfp4_scale(a, scale);
+    ggml_tensor_set_nvfp4_kcache_recent_f16(a, recent, recent_active, recent_pos);
+
+    ggml_tensor * c_raw = ggml_mul_mat(ctx, a, b);
+    ggml_mul_mat_set_prec(c_raw, GGML_PREC_F32);
+    ggml_tensor * c = ggml_mul(ctx, c_raw, scale);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, c);
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buf == nullptr) {
+        std::fprintf(stderr, "failed to allocate backend tensors\n");
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    ggml_backend_tensor_set(a, a_nvfp4.data(), 0, ggml_nbytes(a));
+    ggml_backend_tensor_set(b, b_fp32.data(), 0, b_fp32.size() * sizeof(float));
+    ggml_backend_tensor_set(recent_base, recent_f16.data(), 0, recent_f16.size() * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_set(recent_active, active.data(), 0, active.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(recent_pos, pos.data(), 0, pos.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(scale, k_scale.data(), 0, k_scale.size() * sizeof(float));
+
+#if defined(_WIN32)
+    _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
+    _putenv_s("GGML_CUDA_TRUNC_ENABLE", "0");
+#else
+    setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
+    setenv("GGML_CUDA_TRUNC_ENABLE", "0", 1);
+#endif
+
+    ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        std::fprintf(stderr, "backend recent-F16 K-cache compute failed: %s\n", ggml_status_to_string(status));
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        return false;
+    }
+
+    std::vector<float> c_gpu(c_ref.size(), 0.0f);
+    ggml_backend_tensor_get(c, c_gpu.data(), 0, c_gpu.size() * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+
+    float max_abs_err = 0.0f;
+    size_t worst_idx = 0;
+    for (size_t i = 0; i < c_ref.size(); ++i) {
+        const float abs_err = std::fabs(c_gpu[i] - c_ref[i]);
+        if (abs_err > max_abs_err) {
+            max_abs_err = abs_err;
+            worst_idx = i;
+        }
+    }
+
+    bool inactive_ok = true;
+    for (int qh = 0; qh < q_heads; ++qh) {
+        inactive_ok = inactive_ok &&
+                std::fabs(c_gpu[((size_t) qh * (size_t) n + 0u) * (size_t) m + (size_t) inactive_row]) <= 1e-6f;
+    }
+    const bool ok = max_abs_err <= 1e-4f && inactive_ok;
+    std::printf("backend-recent-f16-kcache case | max_abs=%.6g inactive_ok=%d | %s\n",
+            max_abs_err, inactive_ok ? 1 : 0, ok ? "PASS" : "FAIL");
+    if (!ok) {
+        std::printf("  worst idx=%zu ref=%.8f gpu=%.8f inactive_gpu=%.8f\n",
+                worst_idx, c_ref[worst_idx], c_gpu[worst_idx], c_gpu[(size_t) 0 * m + inactive_row]);
+    }
+
+    return ok;
+}
+
 static bool run_case_backend_batched_dynamic_rhs_permuted_lhs(
         int m,
         int n,
@@ -2281,6 +2474,7 @@ int main() {
     ok = run_case_backend_outlier_dynamic_rhs_tensor_scale(32, 16, 128, 1.0f, 1.0f, 96.0f, false, 26u) && ok;
     ok = run_case_backend_outlier_dynamic_rhs_tensor_scale(32, 16, 128, 1.0f, 1.0f, 96.0f, true, 27u) && ok;
     ok = run_case_backend_outlier_compact_sidecar() && ok;
+    ok = run_case_backend_recent_f16_kcache_override() && ok;
     ok = run_case_backend_batched_dynamic_rhs_permuted_lhs(32, 16, 128, 8, 32, 1.0f, 96.0f, 24u) && ok;
 
     if (!ok) {

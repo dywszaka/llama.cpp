@@ -164,7 +164,7 @@ public:
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
-    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
+    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo, const llama_ubatch * ubatch) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
 
     //
@@ -218,6 +218,9 @@ private:
         ggml_tensor * k_outlier_cursor;
         ggml_tensor * k_outlier_index;
         ggml_tensor * k_outlier_value;
+        ggml_tensor * k_recent_f16;
+        ggml_tensor * k_recent_f16_active;
+        ggml_tensor * k_recent_f16_pos;
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
@@ -228,6 +231,9 @@ private:
         std::vector<ggml_tensor *> k_outlier_cursor_stream;
         std::vector<ggml_tensor *> k_outlier_index_stream;
         std::vector<ggml_tensor *> k_outlier_value_stream;
+        std::vector<ggml_tensor *> k_recent_f16_stream;
+        std::vector<ggml_tensor *> k_recent_f16_active_stream;
+        std::vector<ggml_tensor *> k_recent_f16_pos_stream;
     };
 
     bool v_trans = true;  // the value tensor is transposed

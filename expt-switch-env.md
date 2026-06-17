@@ -213,6 +213,38 @@ its compact row capacity. When disabled, Release execution skips this diagnostic
 host-copy path. Debug builds still print the existing detailed outlier counts
 under `#ifndef NDEBUG`.
 
+### `LLAMA_NVFP4_KCACHE_RECENT_F16`
+
+Enables an experimental mixed-precision NVFP4 K-cache path that keeps a recent
+K window in a compact F16 shadow sidecar and uses that shadow to overwrite KQ
+logits for active recent rows. Default: unset/off.
+
+Initial scope: CUDA non-flash-attention KQ only, with
+`LLAMA_NVFP4_KCACHE_OUTLIER=1` and `--cache-type-k nvfp4`. The normal NVFP4
+K-cache and compact outlier sidecar remain allocated and updated for all rows;
+the F16 sidecar stores only the configured recent window. Hybrid FP8 K-cache
+layers do not get the F16 sidecar because their K storage is not NVFP4.
+
+When enabled, CUDA `set_rows` writes incoming F32 K rows to both the normal
+NVFP4 cache and, while they are inside the recent window, to a compact F16 slot
+selected by token position modulo the window size. During non-flash KQ, active
+recent KV rows are recomputed from F16 K and F32 Q and overwrite the
+corresponding NVFP4/outlier KQ logits in original KV row order. Older rows are
+inactive for the F16 override and are represented by the normal NVFP4 plus
+outlier path.
+
+### `LLAMA_NVFP4_KCACHE_RECENT_F16_WINDOW`
+
+Sets the recent-F16 high-precision K-cache window size in tokens. Default:
+`100`.
+
+The window uses latest-token distance semantics: index 0 is the latest token,
+and rows with distance `0 <= distance < window` are active for the F16 KQ
+override. Tokens outside that range are quantized through the existing NVFP4 K
+Outlier path immediately; there is no temporary `window+16` F16 region. This
+switch has no effect unless `LLAMA_NVFP4_KCACHE_RECENT_F16=1` also enables the
+experiment.
+
 ### `LLAMA_NVFP4_KCACHE_OUTLIER_HYBRID_FP8`
 
 Switch B. Enables the fixed high/medium hybrid FP8 K-cache layer set:
