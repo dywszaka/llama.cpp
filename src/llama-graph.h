@@ -467,6 +467,7 @@ public:
 
     ggml_cgraph  * get_gf()  const { return gf; }
     ggml_context * get_ctx() const { return ctx_compute.get(); }
+    const llm_graph_params & get_params() const { return params; }
 
     int64_t get_max_nodes() const;
 

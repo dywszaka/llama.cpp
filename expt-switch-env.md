@@ -1,5 +1,23 @@
 # Experiment Switch Environment Variables
 
+## Decode Attention Tensor Dumps
+
+### `LLAMA_DUMP_FIRST_DECODE_ATTN_SOFTMAX`
+
+Enables a debug-only dump of the first matching attention softmax in the first
+single-token generation decode step. Default: unset/off.
+
+When enabled, llama.cpp skips graph reuse until the dump has completed, then
+captures only the first non-flash attention `GGML_OP_SOFT_MAX` whose decoder
+ubatch has `n_tokens == 1` and position `pos[0] > 0`. This avoids prompt/prefill
+and final logits softmax capture. The dump is written once to
+`experiments/first-decode-attn-softmax-dump/` as raw binary tensor files plus
+`metadata.json`. Parse it with:
+
+```bash
+python3 scripts/parse-first-decode-attn-softmax-dump.py experiments/first-decode-attn-softmax-dump
+```
+
 ## FP8 E4M3 E8M0 32 K-Cache
 
 ### `--cache-type-k fp8_e4m3_e8m0_32`

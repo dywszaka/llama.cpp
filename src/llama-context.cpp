@@ -3,6 +3,7 @@
 #include "llama-impl.h"
 
 #include "llama-batch.h"
+#include "llama-decode-attn-dump.h"
 #include "llama-io.h"
 #include "llama-log.h"
 #include "llama-memory.h"
@@ -125,6 +126,7 @@ llama_context::llama_context(
             LLAMA_LOG_WARN("%s: graph reuse disabled\n", __func__);
         }
     }
+    llama_decode_attn_dump_log_enabled_once();
 
     const uint32_t n_ctx_per_seq = cparams.n_ctx / cparams.n_seq_max;
 
@@ -736,7 +738,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
-    const bool can_reuse = !graph_reuse_disable && res->can_reuse(gparams);
+    const bool can_reuse = !graph_reuse_disable &&
+        !llama_decode_attn_dump_pending() &&
+        res->can_reuse(gparams);
 
     LLAMA_LOG_DEBUG("%s: start, gtype = %d, n_tokens = %u, can_reuse = %d\n",
             __func__, (int) gtype, ubatch.n_tokens, can_reuse ? 1 : 0);
@@ -783,9 +787,22 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
+    llama_decode_attn_dump_state * dump_state = llama_decode_attn_dump_prepare(
+            ubatch, gtype, cparams.cb_eval, cparams.cb_eval_user_data);
+    if (dump_state) {
+        ggml_backend_sched_set_eval_callback(
+                sched.get(),
+                llama_decode_attn_dump_eval_callback(),
+                llama_decode_attn_dump_eval_user_data(dump_state));
+    }
+
     // const int64_t t_compute_start_us = ggml_time_us();
     // LLAMA_LOG_DEBUG("%s: graph_compute begin\n", __func__);
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    if (dump_state) {
+        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+        llama_decode_attn_dump_finish(dump_state);
+    }
     // LLAMA_LOG_DEBUG("%s: graph_compute end, status = %d, dt = %.3f ms\n",
             // __func__, status, (ggml_time_us() - t_compute_start_us) / 1000.0);
     if (status != GGML_STATUS_SUCCESS) {

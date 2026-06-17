@@ -3,6 +3,7 @@
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-cparams.h"
+#include "llama-decode-attn-dump.h"
 
 #include "llama-kv-cache-unified.h"
 #include "llama-kv-cache-unified-iswa.h"
@@ -1375,6 +1376,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
         ggml_soft_max_add_sinks(kq, sinks);
+        llama_decode_attn_dump_mark_softmax(ubatch, res->get_params().gtype, kq, il);
 
         if (!v_trans) {
             // note: avoid this branch
