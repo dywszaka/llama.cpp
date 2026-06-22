@@ -43,11 +43,18 @@ experiments/first-decode-attn-softmax-dump/
 Files:
 
 - `attn_softmax_input.bin`: raw F32 bytes captured from the attention softmax
-  input node before softmax execution.
+  `src0` input node before softmax execution.
+- `attn_softmax_mask.bin`: raw F16 or F32 bytes captured from the attention
+  softmax `src1` mask node, when the softmax has a mask. Graph-input masks may
+  be copied at output dump time because they are not produced by a scheduler
+  eval callback.
+- `attn_softmax_sinks.bin`: raw F32 bytes captured from optional attention
+  sink values on softmax `src2`, when the model uses attention sinks.
 - `attn_softmax_output.bin`: raw F32 bytes captured from the attention softmax
   output node after execution.
 - `metadata.json`: schema version, tensor ids, dtype, shape, byte strides,
-  byte sizes, paths, and attention layer.
+  byte sizes, paths, attention layer, and softmax `scale` / `max_bias`
+  parameters.
 
 Only the first matching attention softmax is dumped. Prompt/prefill,
 position-zero single-token prompt decode, later generation tokens, and final
@@ -61,3 +68,18 @@ python3 scripts/parse-first-decode-attn-softmax-dump.py \
 ```
 
 Add `--plain` to include all tensor values in the JSON output.
+
+## Compare
+
+Recompute softmax from the exported `input` and optional `mask`, then compare it
+with the exported `output`:
+
+```bash
+python3 scripts/compare-first-decode-attn-softmax-dump.py \
+  experiments/first-decode-attn-softmax-dump --limit 16
+```
+
+The comparison script follows `ggml_compute_forward_soft_max_f32`: it uses
+metadata byte strides, applies softmax scale, mask broadcasting, ALiBi
+`max_bias` slope calculation, and optional attention sinks in the softmax
+denominator. It reports `max_abs_diff`, `mean_abs_diff`, and `rmse`.

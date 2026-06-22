@@ -11,11 +11,18 @@ When enabled, llama.cpp skips graph reuse until the dump has completed, then
 captures only the first non-flash attention `GGML_OP_SOFT_MAX` whose decoder
 ubatch has `n_tokens == 1` and position `pos[0] > 0`. This avoids prompt/prefill
 and final logits softmax capture. The dump is written once to
-`experiments/first-decode-attn-softmax-dump/` as raw binary tensor files plus
-`metadata.json`. Parse it with:
+`experiments/first-decode-attn-softmax-dump/` as raw binary tensor files for
+softmax `src0`, optional `src1` mask, and output plus `metadata.json`. Parse it
+with:
 
 ```bash
 python3 scripts/parse-first-decode-attn-softmax-dump.py experiments/first-decode-attn-softmax-dump
+```
+
+Recompute and compare the dumped softmax with:
+
+```bash
+python3 scripts/compare-first-decode-attn-softmax-dump.py experiments/first-decode-attn-softmax-dump
 ```
 
 ## FP8 E4M3 E8M0 32 K-Cache

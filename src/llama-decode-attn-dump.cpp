@@ -52,12 +52,27 @@ static ggml_tensor *& dump_input_tensor() {
     return value;
 }
 
+static ggml_tensor *& dump_mask_tensor() {
+    static ggml_tensor * value = nullptr;
+    return value;
+}
+
 static std::vector<unsigned char> & dump_input_data() {
     static std::vector<unsigned char> value;
     return value;
 }
 
+static std::vector<unsigned char> & dump_mask_data() {
+    static std::vector<unsigned char> value;
+    return value;
+}
+
 static bool & dump_input_captured() {
+    static bool value = false;
+    return value;
+}
+
+static bool & dump_mask_captured() {
     static bool value = false;
     return value;
 }
@@ -102,13 +117,39 @@ static bool copy_tensor_to_file(const ggml_tensor * t, const std::string & path)
     return write_file(path, data.data(), data.size());
 }
 
-static void write_metadata(const ggml_tensor * input, const ggml_tensor * output) {
+static void write_tensor_metadata(FILE * fp, const ggml_tensor * t, const char * id, const char * path, bool comma) {
+    std::fprintf(fp,
+            "    {\n"
+            "      \"id\": \"%s\",\n"
+            "      \"path\": \"%s\",\n"
+            "      \"tensor_name\": \"%s\",\n"
+            "      \"dtype\": \"%s\",\n"
+            "      \"shape\": [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "],\n"
+            "      \"strides_bytes\": [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "],\n"
+            "      \"nbytes\": %zu\n"
+            "    }%s\n",
+            id,
+            path,
+            ggml_get_name(t),
+            ggml_type_name(t->type),
+            t->ne[0], t->ne[1], t->ne[2], t->ne[3],
+            t->nb[0], t->nb[1], t->nb[2], t->nb[3],
+            ggml_nbytes(t),
+            comma ? "," : "");
+}
+
+static void write_metadata(const ggml_tensor * input, const ggml_tensor * mask, const ggml_tensor * sinks, const ggml_tensor * output) {
     const std::string path = std::string(LLAMA_DECODE_ATTN_DUMP_DIR) + "/metadata.json";
     FILE * fp = std::fopen(path.c_str(), "wb");
     if (!fp) {
         LLAMA_LOG_ERROR("%s: failed to open '%s': %s\n", __func__, path.c_str(), std::strerror(errno));
         return;
     }
+
+    float scale = 1.0f;
+    float max_bias = 0.0f;
+    std::memcpy(&scale,    (const float *) output->op_params + 0, sizeof(float));
+    std::memcpy(&max_bias, (const float *) output->op_params + 1, sizeof(float));
 
     std::fprintf(fp,
             "{\n"
@@ -117,35 +158,25 @@ static void write_metadata(const ggml_tensor * input, const ggml_tensor * output
             "  \"trigger_env\": \"%s\",\n"
             "  \"directory\": \"%s\",\n"
             "  \"attention_layer\": %d,\n"
+            "  \"softmax\": {\n"
+            "    \"scale\": %.9g,\n"
+            "    \"max_bias\": %.9g\n"
+            "  },\n"
             "  \"tensors\": [\n",
             LLAMA_DECODE_ATTN_DUMP_ENV,
             LLAMA_DECODE_ATTN_DUMP_DIR,
-            dump_layer());
+            dump_layer(),
+            scale,
+            max_bias);
 
-    const ggml_tensor * tensors[2] = { input, output };
-    const char * ids[2] = { "input", "output" };
-    const char * paths[2] = { "attn_softmax_input.bin", "attn_softmax_output.bin" };
-    for (int i = 0; i < 2; ++i) {
-        const ggml_tensor * t = tensors[i];
-        std::fprintf(fp,
-                "    {\n"
-                "      \"id\": \"%s\",\n"
-                "      \"path\": \"%s\",\n"
-                "      \"tensor_name\": \"%s\",\n"
-                "      \"dtype\": \"%s\",\n"
-                "      \"shape\": [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "],\n"
-                "      \"strides_bytes\": [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "],\n"
-                "      \"nbytes\": %zu\n"
-                "    }%s\n",
-                ids[i],
-                paths[i],
-                ggml_get_name(t),
-                ggml_type_name(t->type),
-                t->ne[0], t->ne[1], t->ne[2], t->ne[3],
-                t->nb[0], t->nb[1], t->nb[2], t->nb[3],
-                ggml_nbytes(t),
-                i == 0 ? "," : "");
+    write_tensor_metadata(fp, input, "input", "attn_softmax_input.bin", true);
+    if (mask) {
+        write_tensor_metadata(fp, mask, "mask", "attn_softmax_mask.bin", true);
     }
+    if (sinks) {
+        write_tensor_metadata(fp, sinks, "sinks", "attn_softmax_sinks.bin", true);
+    }
+    write_tensor_metadata(fp, output, "output", "attn_softmax_output.bin", false);
 
     std::fprintf(fp, "  ]\n}\n");
     if (std::fclose(fp) != 0) {
@@ -163,9 +194,19 @@ static bool is_marked_softmax_input(const ggml_tensor * t) {
     return t != nullptr && t == dump_input_tensor();
 }
 
+static bool is_marked_softmax_mask(const ggml_tensor * t) {
+    return t != nullptr && t == dump_mask_tensor();
+}
+
 static bool capture_input_tensor(const ggml_tensor * input) {
     dump_input_data() = copy_tensor_to_bytes(input);
     dump_input_captured() = true;
+    return true;
+}
+
+static bool capture_mask_tensor(const ggml_tensor * mask) {
+    dump_mask_data() = copy_tensor_to_bytes(mask);
+    dump_mask_captured() = true;
     return true;
 }
 
@@ -175,27 +216,43 @@ static bool dump_tensor_pair(const ggml_tensor * output) {
     }
 
     const ggml_tensor * input = output->src[0];
+    const ggml_tensor * mask  = output->src[1];
+    const ggml_tensor * sinks = output->src[2];
     if (input == nullptr) {
         LLAMA_LOG_ERROR("%s: softmax node has no input tensor\n", __func__);
         return false;
     }
 
     const std::string input_path = std::string(LLAMA_DECODE_ATTN_DUMP_DIR) + "/attn_softmax_input.bin";
+    const std::string mask_path = std::string(LLAMA_DECODE_ATTN_DUMP_DIR) + "/attn_softmax_mask.bin";
+    const std::string sinks_path = std::string(LLAMA_DECODE_ATTN_DUMP_DIR) + "/attn_softmax_sinks.bin";
     const std::string output_path = std::string(LLAMA_DECODE_ATTN_DUMP_DIR) + "/attn_softmax_output.bin";
 
     if (!dump_input_captured()) {
         LLAMA_LOG_ERROR("%s: softmax input tensor was not captured before softmax execution\n", __func__);
         return false;
     }
+    if (mask && !dump_mask_captured()) {
+        // The mask is commonly a graph input/leaf tensor, so the scheduler eval
+        // callback may never observe it. It is immutable for softmax, so copy it
+        // from src1 when dumping the computed output.
+        capture_mask_tensor(mask);
+    }
 
     if (!write_file(input_path, dump_input_data().data(), dump_input_data().size())) {
+        return false;
+    }
+    if (mask && !write_file(mask_path, dump_mask_data().data(), dump_mask_data().size())) {
+        return false;
+    }
+    if (sinks && !copy_tensor_to_file(sinks, sinks_path)) {
         return false;
     }
     if (!copy_tensor_to_file(output, output_path)) {
         return false;
     }
 
-    write_metadata(input, output);
+    write_metadata(input, mask, sinks, output);
 
     LLAMA_LOG_INFO("%s: dumped first decode attention softmax tensors to %s\n",
             __func__, LLAMA_DECODE_ATTN_DUMP_DIR);
@@ -248,6 +305,7 @@ void llama_decode_attn_dump_mark_softmax(
     ggml_set_name(tensor, LLAMA_DECODE_ATTN_SOFTMAX_NAME);
     dump_layer() = il;
     dump_input_tensor() = tensor->src[0];
+    dump_mask_tensor() = tensor->src[1];
 }
 
 llama_decode_attn_dump_state * llama_decode_attn_dump_prepare(
@@ -270,13 +328,14 @@ static bool llama_decode_attn_dump_cb(ggml_tensor * t, bool ask, void * user_dat
     llama_decode_attn_dump_state * state = (llama_decode_attn_dump_state *) user_data;
 
     const bool dump_need_input = llama_decode_attn_dump_pending() && !dump_input_captured() && is_marked_softmax_input(t);
+    const bool dump_need_mask = llama_decode_attn_dump_pending() && !dump_mask_captured() && is_marked_softmax_mask(t);
     const bool dump_need_output = llama_decode_attn_dump_pending() && is_marked_softmax(t);
 
     if (ask) {
         const bool user_need = state->user_cb ? state->user_cb(t, true, state->user_data) : false;
         state->last_ask_tensor = t;
         state->last_user_need = user_need;
-        return user_need || dump_need_input || dump_need_output;
+        return user_need || dump_need_input || dump_need_mask || dump_need_output;
     }
 
     bool keep_going = true;
@@ -289,6 +348,10 @@ static bool llama_decode_attn_dump_cb(ggml_tensor * t, bool ask, void * user_dat
 
     if (dump_need_input) {
         capture_input_tensor(t);
+    }
+
+    if (dump_need_mask) {
+        capture_mask_tensor(t);
     }
 
     if (dump_need_output) {

@@ -9,6 +9,8 @@ from pathlib import Path
 DTYPES = {
     "f32": ("<f", 4),
     "F32": ("<f", 4),
+    "f16": ("<e", 2),
+    "F16": ("<e", 2),
 }
 
 
