@@ -6,6 +6,11 @@ The run evaluates one synthetic K tensor against the current CPU NVFP4 reference
 quantize/dequantize baseline. This is a fixture validation artifact, not a model
 runtime export or performance measurement.
 
+This directory keeps the lightweight command, manifest, output, and metrics
+metadata. The original raw `k0.bin` sample is not retained here, so the command
+is a reproducibility reference rather than a runnable example unless the raw
+fixture is regenerated.
+
 Observed metrics from the current tool run:
 
 - kind: `k`
@@ -17,5 +22,5 @@ Observed metrics from the current tool run:
 Validation command:
 
 ```text
-build-llama-cpp-12/bin/llama-tensor-export-eval --manifest experiments/LLAMA_CPP-12-tensor-export-eval-sample/manifest.json --global-scale 1
+build-llama-cpp-12/bin/llama-tensor-export-eval --manifest mylab/tensor-export/examples/LLAMA_CPP-12-tensor-export-eval-sample/manifest.json --global-scale 1
 ```

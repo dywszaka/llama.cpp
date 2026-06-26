@@ -53,7 +53,7 @@
 
 导出器当前对不支持的张量采取跳过策略，而不是让推理失败。以下情况应跳过：kind 未识别或未被选择、张量不是 `GGML_TYPE_F32`、graph node 指针重复、张量非连续。对于不支持的 dtype 和非连续张量，应打印 warning，便于 run record 解释缺失的导出产物。
 
-`experiments/` 下的实验目录应保存 manifest、raw `.bin` 文件、生成和评估它们的命令或脚本、输入引用、原始工具输出、解析后的指标和简短总结。来自 `llama-server` 验证的运行时导出还应保存请求 payload/data、server response、server logs 和验证结果。
+`experiments/` 下的实验目录应保存 manifest、raw `.bin` 文件、生成和评估它们的命令或脚本、输入引用、原始工具输出、解析后的指标和简短总结。来自 `llama-server` 验证的运行时导出还应保存请求 payload/data、server response、server logs 和验证结果。长期保留的 tensor-export 说明、脚本和轻量示例元数据放在 `mylab/tensor-export/` 下；大型或临时 raw tensor 文件不应搬入该目录，除非它们是明确需要版本管理的 fixture。
 
 ## 模型与运行参数选择
 
@@ -142,7 +142,7 @@ kind_MSE  = sum(record_MSE * record_n) / sum(record_n)
 kind_RMSE = sqrt(kind_MSE)
 ```
 
-合成 fixture 验证应覆盖指标公式、开关检测、manifest 加载、按 kind 聚合，以及对不兼容 dtype、byte-size mismatch 和 NVFP4 不兼容 shape 的拒绝。当前实现的 focused test 是 `tests/test-expt-tensor-export-eval.cpp`。示例 artifact 目录 `experiments/LLAMA_CPP-12-tensor-export-eval-sample/` 是 fixture 验证记录，不是模型运行时导出，也不是性能测量。
+合成 fixture 验证应覆盖指标公式、开关检测、manifest 加载、按 kind 聚合，以及对不兼容 dtype、byte-size mismatch 和 NVFP4 不兼容 shape 的拒绝。当前实现的 focused test 是 `tests/test-expt-tensor-export-eval.cpp`。轻量示例记录目录 `mylab/tensor-export/examples/LLAMA_CPP-12-tensor-export-eval-sample/` 是 fixture 验证记录，不是模型运行时导出，也不是性能测量；其中保留命令、manifest、输出和总结，不保留 raw `.bin` 样本。
 
 实验总结应区分观察到的指标和解释。有效的 run record 应写明 code revision、导出开关、选定 kinds、评估命令、global scale、输入 workload 或 fixture 来源、原始输出路径、解析后指标路径和已知混杂因素。直接 A/B 对比必须按照 `expt-baseline.md` 和 `docs/development/experiment-records.md` 固定无关基线参数。
 

@@ -1,1 +1,0 @@
-build-llama-cpp-12/bin/llama-tensor-export-eval --manifest experiments/LLAMA_CPP-12-tensor-export-eval-sample/manifest.json --global-scale 1
