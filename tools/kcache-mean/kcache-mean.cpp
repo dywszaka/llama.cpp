@@ -27,6 +27,8 @@ static void print_usage(int, char ** argv) {
     LOG("    --layers L                   comma-separated cache_k layers to collect\n");
     LOG("    --raw-dump-dir DIR           write raw F32 K rows to DIR/layer_XX.f32.bin\n");
     LOG("    --histogram-json FILE         write aggregate per-layer distribution metrics as JSON\n");
+    LOG("    --tensor-dist-json FILE       write aggregate Qcur/kq/Vcur/kqv tensor distributions as JSON\n");
+    LOG("    --tensor-raw-dump-dir DIR     write raw F32 Qcur/kq/Vcur/kqv tensors to DIR/{q_raw_f32,kq_raw_f32,v_raw_f32,vp_raw_f32}/layer_XX.f32.bin\n");
     LOG("\n");
 }
 
@@ -40,6 +42,26 @@ static bool parse_cache_k_layer(const char * name, int & layer) {
     char * end = nullptr;
     const long value = std::strtol(name + prefix_len, &end, 10);
     if (end == name + prefix_len || value < 0) {
+        return false;
+    }
+
+    layer = (int) value;
+    return true;
+}
+
+static bool parse_named_tensor_layer(const char * name, const char * prefix, int & layer) {
+    if (!name || !prefix) {
+        return false;
+    }
+
+    const size_t prefix_len = std::strlen(prefix);
+    if (std::strncmp(name, prefix, prefix_len) != 0 || name[prefix_len] != '-') {
+        return false;
+    }
+
+    char * end = nullptr;
+    const long value = std::strtol(name + prefix_len + 1, &end, 10);
+    if (end == name + prefix_len + 1 || *end != '\0' || value < 0) {
         return false;
     }
 
@@ -63,6 +85,24 @@ struct layer_running_stats {
     double abs_max = 0.0;
 };
 
+struct tensor_distribution_stats {
+    std::vector<uint64_t> abs_bins;
+    uint64_t total_values = 0;
+    uint64_t finite_values = 0;
+    uint64_t nan_values = 0;
+    uint64_t inf_values = 0;
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    double abs_sum = 0.0;
+    double min = std::numeric_limits<double>::infinity();
+    double max = -std::numeric_limits<double>::infinity();
+    double abs_max = 0.0;
+};
+
+struct tensor_raw_dump {
+    std::ofstream raw;
+};
+
 struct kcache_mean_collector {
     static constexpr int N_BINS = 17;
 
@@ -71,6 +111,8 @@ struct kcache_mean_collector {
     std::vector<float> values;
     std::vector<double> running_means;
     std::map<int, layer_running_stats> layers;
+    std::map<std::string, std::map<int, tensor_distribution_stats>> tensor_dists;
+    std::map<std::string, std::map<int, tensor_raw_dump>> tensor_raw_dumps;
     std::set<int> layer_filter;
 
     bool recording = false;
@@ -83,6 +125,8 @@ struct kcache_mean_collector {
     bool include_prompt_batches = false;
     std::string raw_dump_dir;
     std::string histogram_json_path;
+    std::string tensor_dist_json_path;
+    std::string tensor_raw_dump_dir;
 
     bool open(const std::string & path) {
         out.open(path);
@@ -113,8 +157,13 @@ struct kcache_mean_collector {
     bool collect(struct ggml_tensor * t, bool ask) {
         int layer = -1;
         const bool wants = t->op == GGML_OP_SET_ROWS && parse_cache_k_layer(t->name, layer);
+        const bool wants_tensor_dist = wants_distribution_tensor(t, layer);
         if (ask) {
-            return recording && wants && wants_layer(layer);
+            return recording && ((wants && wants_layer(layer)) || wants_tensor_dist);
+        }
+
+        if (recording && wants_tensor_dist) {
+            return collect_distribution_tensor(t, layer);
         }
 
         if (!recording || !wants || !wants_layer(layer)) {
@@ -295,6 +344,93 @@ struct kcache_mean_collector {
         return layer_filter.empty() || layer_filter.count(layer) != 0;
     }
 
+    bool wants_distribution_tensor(const ggml_tensor * t, int & layer) const {
+        if ((tensor_dist_json_path.empty() && tensor_raw_dump_dir.empty()) || t == nullptr) {
+            return false;
+        }
+
+        const char * kind = tensor_export_kind(t->name, layer);
+        return kind != nullptr && wants_layer(layer);
+    }
+
+    bool collect_distribution_tensor(const ggml_tensor * t, int layer) {
+        if (t == nullptr) {
+            return true;
+        }
+
+        int parsed_layer = -1;
+        const char * kind = tensor_export_kind(t->name, parsed_layer);
+        if (kind == nullptr) {
+            return true;
+        }
+
+        if (parsed_layer != layer) {
+            layer = parsed_layer;
+        }
+
+        if (!read_tensor_as_f32(t, values)) {
+            LOG_WRN("%s: skipping %s type %s\n", __func__, t->name, ggml_type_name(t->type));
+            return true;
+        }
+
+        if (!tensor_raw_dump_dir.empty()) {
+            if (!ensure_tensor_raw_open(kind, layer)) {
+                return false;
+            }
+            auto & raw = tensor_raw_dumps[kind][layer].raw;
+            raw.write((const char *) values.data(), (std::streamsize) (values.size() * sizeof(float)));
+            if (!raw) {
+                LOG_ERR("%s: failed writing raw %s dump for layer %d\n", __func__, kind, layer);
+                return false;
+            }
+        }
+
+        auto & stats = tensor_dists[kind][layer];
+        if (stats.abs_bins.empty()) {
+            stats.abs_bins.assign(N_BINS, 0);
+        }
+        for (float v : values) {
+            stats.total_values++;
+            if (std::isnan(v)) {
+                stats.nan_values++;
+                continue;
+            }
+            if (std::isinf(v)) {
+                stats.inf_values++;
+                continue;
+            }
+
+            const double vd = (double) v;
+            const double av = std::fabs(vd);
+            stats.finite_values++;
+            stats.sum += vd;
+            stats.sum_sq += vd * vd;
+            stats.abs_sum += av;
+            stats.min = std::min(stats.min, vd);
+            stats.max = std::max(stats.max, vd);
+            stats.abs_max = std::max(stats.abs_max, av);
+            stats.abs_bins[(size_t) abs_bin(v)]++;
+        }
+
+        return true;
+    }
+
+    static const char * tensor_export_kind(const char * name, int & layer) {
+        if (parse_named_tensor_layer(name, "Qcur", layer)) {
+            return "Q";
+        }
+        if (parse_named_tensor_layer(name, "kq", layer)) {
+            return "KQ";
+        }
+        if (parse_named_tensor_layer(name, "Vcur", layer)) {
+            return "V";
+        }
+        if (parse_named_tensor_layer(name, "kqv", layer)) {
+            return "VP";
+        }
+        return nullptr;
+    }
+
     static int abs_bin(float value) {
         const double a = std::fabs((double) value);
         if (a == 0.0) {
@@ -430,6 +566,36 @@ struct kcache_mean_collector {
         return true;
     }
 
+    bool ensure_tensor_raw_open(const char * kind, int layer) {
+        auto & dump = tensor_raw_dumps[kind][layer];
+        if (dump.raw.is_open()) {
+            return true;
+        }
+
+        const char * subdir = tensor_raw_subdir(kind);
+        char path[1024];
+        std::snprintf(path, sizeof(path), "%s/%s/layer_%02d.f32.bin", tensor_raw_dump_dir.c_str(), subdir, layer);
+        dump.raw.open(path, std::ios::binary);
+        if (!dump.raw) {
+            LOG_ERR("%s: failed to open raw tensor dump '%s'\n", __func__, path);
+            return false;
+        }
+        return true;
+    }
+
+    static const char * tensor_raw_subdir(const char * kind) {
+        if (std::strcmp(kind, "Q") == 0) {
+            return "q_raw_f32";
+        }
+        if (std::strcmp(kind, "KQ") == 0) {
+            return "kq_raw_f32";
+        }
+        if (std::strcmp(kind, "V") == 0) {
+            return "v_raw_f32";
+        }
+        return "vp_raw_f32";
+    }
+
     bool write_histogram_json() {
         if (histogram_json_path.empty()) {
             return true;
@@ -515,6 +681,73 @@ struct kcache_mean_collector {
         json << "}\n";
         return (bool) json;
     }
+
+    bool write_tensor_distribution_json() {
+        if (tensor_dist_json_path.empty()) {
+            return true;
+        }
+
+        std::ofstream json(tensor_dist_json_path);
+        if (!json) {
+            LOG_ERR("%s: failed to open tensor distribution JSON '%s'\n", __func__, tensor_dist_json_path.c_str());
+            return false;
+        }
+
+        json << "{\n";
+        json << "  \"abs_bin_labels\": [";
+        for (int i = 0; i < N_BINS; ++i) {
+            if (i > 0) {
+                json << ", ";
+            }
+            json << "\"" << abs_bin_label(i) << "\"";
+        }
+        json << "],\n";
+        json << "  \"tensors\": [\n";
+
+        bool first_tensor = true;
+        for (auto & kind_it : tensor_dists) {
+            const std::string & kind = kind_it.first;
+            for (auto & layer_it : kind_it.second) {
+                const int layer = layer_it.first;
+                tensor_distribution_stats & stats = layer_it.second;
+                if (!first_tensor) {
+                    json << ",\n";
+                }
+                first_tensor = false;
+
+                const double n = (double) std::max<uint64_t>(stats.finite_values, 1);
+                const double mean = stats.sum / n;
+                const double variance = std::max(0.0, stats.sum_sq / n - mean * mean);
+
+                json << "    {";
+                json << "\"kind\": \"" << kind << "\"";
+                json << ", \"layer\": " << layer;
+                json << ", \"total_values\": " << stats.total_values;
+                json << ", \"finite_values\": " << stats.finite_values;
+                json << ", \"nan_values\": " << stats.nan_values;
+                json << ", \"inf_values\": " << stats.inf_values;
+                json << ", \"mean\": " << mean;
+                json << ", \"stddev\": " << std::sqrt(variance);
+                json << ", \"abs_mean\": " << (stats.abs_sum / n);
+                json << ", \"min\": " << (stats.finite_values == 0 ? 0.0 : stats.min);
+                json << ", \"max\": " << (stats.finite_values == 0 ? 0.0 : stats.max);
+                json << ", \"abs_max\": " << stats.abs_max;
+                json << ", \"abs_bins\": [";
+                for (size_t i = 0; i < stats.abs_bins.size(); ++i) {
+                    if (i > 0) {
+                        json << ", ";
+                    }
+                    json << stats.abs_bins[i];
+                }
+                json << "]";
+                json << "}";
+            }
+        }
+
+        json << "\n  ]\n";
+        json << "}\n";
+        return (bool) json;
+    }
 };
 
 static bool cb_eval_kcache_mean(struct ggml_tensor * t, bool ask, void * user_data) {
@@ -560,14 +793,16 @@ static bool decode_recorded_prompt_chunks(
         kcache_mean_collector & collector,
         const std::vector<llama_token> & tokens,
         int32_t n_ctx,
-        int32_t n_batch) {
+        int32_t n_batch,
+        int32_t max_chunks) {
     if (n_ctx <= 0 || n_batch <= 0) {
         return false;
     }
 
     const int32_t n_tokens = (int32_t) tokens.size();
     int64_t step = 0;
-    for (int32_t start = 0; start < n_tokens; start += n_ctx) {
+    int32_t n_chunks = 0;
+    for (int32_t start = 0; start < n_tokens && (max_chunks < 0 || n_chunks < max_chunks); start += n_ctx, ++n_chunks) {
         const int32_t end = std::min<int32_t>(start + n_ctx, n_tokens);
         llama_memory_clear(llama_get_memory(ctx), true);
 
@@ -608,7 +843,7 @@ static bool run(
     const int64_t final_append_step = (include_prompt ? (int64_t) prompt_tokens.size() : 0) + params.n_predict;
     if (include_prompt) {
         if (params.n_predict <= 0 && !dump_final_mean_vectors) {
-            if (!decode_recorded_prompt_chunks(ctx, collector, prompt_tokens, params.n_ctx, std::max<int32_t>(1, params.n_batch))) {
+            if (!decode_recorded_prompt_chunks(ctx, collector, prompt_tokens, params.n_ctx, std::max<int32_t>(1, params.n_batch), params.n_chunks)) {
                 return false;
             }
             LOG_INF("%s: prompt_tokens=%zu generated_tokens=0 output=%s\n",
@@ -677,6 +912,8 @@ static bool parse_kcache_mean_args(
         std::set<int> & layer_filter,
         std::string & raw_dump_dir,
         std::string & histogram_json_path,
+        std::string & tensor_dist_json_path,
+        std::string & tensor_raw_dump_dir,
         std::vector<char *> & filtered_argv) {
     include_prompt = false;
     dump_mean_vectors_every = 0;
@@ -684,6 +921,8 @@ static bool parse_kcache_mean_args(
     layer_filter.clear();
     raw_dump_dir.clear();
     histogram_json_path.clear();
+    tensor_dist_json_path.clear();
+    tensor_raw_dump_dir.clear();
     filtered_argv.clear();
     filtered_argv.reserve((size_t) argc);
     filtered_argv.push_back(argv[0]);
@@ -756,6 +995,22 @@ static bool parse_kcache_mean_args(
             histogram_json_path = argv[++i];
             continue;
         }
+        if (arg == "--tensor-dist-json") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: expected value for --tensor-dist-json\n");
+                return false;
+            }
+            tensor_dist_json_path = argv[++i];
+            continue;
+        }
+        if (arg == "--tensor-raw-dump-dir") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: expected value for --tensor-raw-dump-dir\n");
+                return false;
+            }
+            tensor_raw_dump_dir = argv[++i];
+            continue;
+        }
         filtered_argv.push_back(argv[i]);
     }
     return true;
@@ -773,9 +1028,11 @@ int main(int argc, char ** argv) {
     std::set<int> layer_filter;
     std::string raw_dump_dir;
     std::string histogram_json_path;
+    std::string tensor_dist_json_path;
+    std::string tensor_raw_dump_dir;
     std::vector<char *> filtered_argv;
     if (!parse_kcache_mean_args(argc, argv, include_prompt, dump_mean_vectors_every, dump_final_mean_vectors,
-                layer_filter, raw_dump_dir, histogram_json_path, filtered_argv)) {
+                layer_filter, raw_dump_dir, histogram_json_path, tensor_dist_json_path, tensor_raw_dump_dir, filtered_argv)) {
         return 1;
     }
 
@@ -803,6 +1060,8 @@ int main(int argc, char ** argv) {
     collector.layer_filter = layer_filter;
     collector.raw_dump_dir = raw_dump_dir;
     collector.histogram_json_path = histogram_json_path;
+    collector.tensor_dist_json_path = tensor_dist_json_path;
+    collector.tensor_raw_dump_dir = tensor_raw_dump_dir;
     if (!collector.open(params.out_file)) {
         LOG_ERR("%s: failed to open output file '%s'\n", __func__, params.out_file.c_str());
         return 1;
@@ -824,6 +1083,10 @@ int main(int argc, char ** argv) {
 
     const bool ok = run(ctx, params, collector, include_prompt, dump_final_mean_vectors);
     if (!collector.write_histogram_json()) {
+        llama_backend_free();
+        return 1;
+    }
+    if (!collector.write_tensor_distribution_json()) {
         llama_backend_free();
         return 1;
     }

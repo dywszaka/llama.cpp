@@ -10,6 +10,7 @@
 #include "llama-model.h"
 #include "llama-kv-cache-nvfp4-outlier-config.h"
 #include "llama-vcache-nvfp4.h"
+#include "expt/tensor-export-eval.h"
 
 #include <cinttypes>
 #include <cstring>
@@ -800,6 +801,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         llama_log::debug_nvfp4_graph_tensors(sched.get(), res->get_gf());
         llama_log::debug_nvfp4_norm_weights(model);
     }
+
+    llama_expt::tensor_export_graph(sched.get(), res->get_gf());
 
     return res;
 }

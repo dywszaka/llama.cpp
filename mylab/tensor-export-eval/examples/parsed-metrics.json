@@ -1,0 +1,39 @@
+{
+  "algorithm": "nvfp4_ref",
+  "global_scale": 1.0,
+  "records": [
+    {
+      "name": "k-synthetic",
+      "kind": "k",
+      "dtype": "f32",
+      "ne": [
+        16,
+        1,
+        1,
+        1
+      ],
+      "nb": [
+        4,
+        64,
+        64,
+        64
+      ],
+      "path": "k0.bin",
+      "byte_size": 64,
+      "metrics": {
+        "mae": 0.390625,
+        "mse": 0.2841796875,
+        "rmse": 0.5330850659134994,
+        "n": 16
+      }
+    }
+  ],
+  "aggregate_by_kind": {
+    "k": {
+      "mae": 0.390625,
+      "mse": 0.2841796875,
+      "rmse": 0.5330850659134994,
+      "n": 16
+    }
+  }
+}
