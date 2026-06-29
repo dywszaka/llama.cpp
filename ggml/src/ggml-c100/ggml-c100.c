@@ -78,6 +78,11 @@ static uint32_t c100_float_to_u32(float value) {
 ggml_backend_t ggml_backend_c100_init(void);
 ggml_backend_buffer_type_t ggml_backend_c100_buffer_type(void);
 
+static bool c100_is_view_op(enum ggml_op op) {
+    return op == GGML_OP_VIEW || op == GGML_OP_RESHAPE ||
+           op == GGML_OP_PERMUTE || op == GGML_OP_TRANSPOSE;
+}
+
 // ============================================================================
 // C100 Buffer Context
 // ============================================================================
@@ -144,14 +149,14 @@ static void c100_prepare_softmax_cmd(
         cmd->src1_size = ggml_nbytes(mask);
     }
 
-    bool requires_extended = mask || scale != 1.0f || max_bias != 0.0f;
+    bool is_f32 = src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
+                  (!mask || mask->type == GGML_TYPE_F32);
+    bool requires_extended = mask || scale != 1.0f || max_bias != 0.0f || is_f32;
     uint32_t flags = 0;
     if (mask) {
         flags |= CMD_SOFTMAX_FLAG_HAS_MASK;
     }
-    if (requires_extended &&
-        src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
-        (!mask || mask->type == GGML_TYPE_F32)) {
+    if (is_f32) {
         flags |= CMD_SOFTMAX_FLAG_F32;
     }
     if (requires_extended) {
@@ -682,6 +687,11 @@ static size_t c100_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, c
     return ggml_nbytes(tensor);
 }
 
+static bool c100_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
+    (void)buft;
+    return true;
+}
+
 // ============================================================================
 // GLOBAL Buffer Type Interface
 // ============================================================================
@@ -828,6 +838,7 @@ static enum ggml_status c100_backend_graph_compute(ggml_backend_t backend, struc
     for (int i = 0; i < cgraph->n_nodes; i++) {
         struct ggml_tensor* node = cgraph->nodes[i];
         if (!node) continue;
+        if (c100_is_view_op(node->op)) continue;
 
         switch (node->op) {
             case GGML_OP_SOFT_MAX: {
@@ -1174,8 +1185,6 @@ static bool c100_device_supports_op(ggml_backend_dev_t dev, const struct ggml_te
             return true;
         case GGML_OP_ADD:
         case GGML_OP_MUL:
-        case GGML_OP_PERMUTE:
-        case GGML_OP_TRANSPOSE:
             return true;
         default:
             return false;
@@ -1184,8 +1193,9 @@ static bool c100_device_supports_op(ggml_backend_dev_t dev, const struct ggml_te
 
 static bool c100_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     (void)dev;
-    (void)buft;
-    return true;
+    return buft == ggml_backend_c100_buffer_type() ||
+           buft == ggml_backend_c100_global_buffer_type() ||
+           buft == ggml_backend_c100_local_buffer_type();
 }
 
 // ============================================================================
@@ -1198,7 +1208,7 @@ static const struct ggml_backend_buffer_type_i c100_buffer_type_i = {
     /* .get_alignment = */ c100_buffer_type_get_alignment,
     /* .get_max_size  = */ c100_buffer_type_get_max_size,
     /* .get_alloc_size= */ c100_buffer_type_get_alloc_size,
-    /* .is_host       = */ NULL,
+    /* .is_host       = */ c100_buffer_type_is_host,
 };
 
 static const struct ggml_backend_buffer_type_i c100_global_buffer_type_i = {
@@ -1207,7 +1217,7 @@ static const struct ggml_backend_buffer_type_i c100_global_buffer_type_i = {
     /* .get_alignment = */ c100_global_buffer_type_get_alignment,
     /* .get_max_size  = */ c100_global_buffer_type_get_max_size,
     /* .get_alloc_size= */ c100_global_buffer_type_get_alloc_size,
-    /* .is_host       = */ NULL,
+    /* .is_host       = */ c100_buffer_type_is_host,
 };
 
 static const struct ggml_backend_buffer_type_i c100_local_buffer_type_i = {
@@ -1216,7 +1226,7 @@ static const struct ggml_backend_buffer_type_i c100_local_buffer_type_i = {
     /* .get_alignment = */ c100_local_buffer_type_get_alignment,
     /* .get_max_size  = */ c100_local_buffer_type_get_max_size,
     /* .get_alloc_size= */ c100_local_buffer_type_get_alloc_size,
-    /* .is_host       = */ NULL,
+    /* .is_host       = */ c100_buffer_type_is_host,
 };
 
 static const struct ggml_backend_i c100_backend_i = {
