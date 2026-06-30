@@ -121,6 +121,20 @@ public:
     const uint32_t n_pos_per_embd = 1;
 };
 
+class llm_graph_input_static_i32 : public llm_graph_input_i {
+public:
+    explicit llm_graph_input_static_i32(std::vector<int32_t> values) : values(std::move(values)) {}
+    virtual ~llm_graph_input_static_i32() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+    bool can_reuse(const llm_graph_params & params) override;
+
+    ggml_tensor * tensor = nullptr;
+
+private:
+    std::vector<int32_t> values;
+};
+
 // temperature tuning, used by llama4
 class llm_graph_input_attn_temp : public llm_graph_input_i {
 public:
@@ -275,7 +289,6 @@ public:
 
     ggml_tensor * get_k_idxs() const { return self_k_idxs; }
     ggml_tensor * get_v_idxs() const { return self_v_idxs; }
-
     ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
 
     ggml_tensor * self_k_idxs = nullptr; // I64 [n_batch]
@@ -665,6 +678,7 @@ struct llm_graph_context {
 
     ggml_tensor * build_inp_embd(ggml_tensor * tok_embd) const;
     ggml_tensor * build_inp_pos() const;
+    ggml_tensor * build_inp_static_i32(const std::vector<int32_t> & values) const;
     ggml_tensor * build_inp_attn_scale() const;
     ggml_tensor * build_inp_out_ids() const;
     ggml_tensor * build_inp_mean() const;

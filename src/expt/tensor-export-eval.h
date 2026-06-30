@@ -39,13 +39,49 @@ struct eval_report {
     float global_scale = 1.0f;
 };
 
+enum class k_channel_sort_basis {
+    FIRST_ROW_ABS,
+    ABS_MEAN,
+};
+
+struct k_channel_sort_eval_record_report {
+    tensor_record record;
+    tensor_error_metrics baseline_metrics;
+    tensor_error_metrics sorted_metrics;
+    tensor_error_metrics delta_metrics;
+    std::vector<size_t> channel_order;
+    std::string sort_basis;
+    size_t channel_count = 0;
+    size_t row_count = 0;
+};
+
+struct k_channel_sort_eval_aggregate_report {
+    tensor_error_metrics baseline_metrics;
+    tensor_error_metrics sorted_metrics;
+    tensor_error_metrics delta_metrics;
+};
+
+struct k_channel_sort_eval_report {
+    std::vector<k_channel_sort_eval_record_report> records;
+    std::map<std::string, k_channel_sort_eval_aggregate_report> by_kind;
+    k_channel_sort_basis sort_basis = k_channel_sort_basis::FIRST_ROW_ABS;
+    float global_scale = 1.0f;
+};
+
 bool tensor_export_enabled();
 bool tensor_export_maybe_log_config();
 bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf);
 
 tensor_error_metrics compute_error_metrics(const std::vector<float> & reference, const std::vector<float> & actual);
+std::vector<size_t> make_k_channel_order_from_first_row(const std::vector<float> & values, size_t row_size);
+std::vector<size_t> make_k_channel_order_from_abs_mean(const std::vector<float> & values, size_t row_size);
 std::vector<tensor_record> load_manifest_records(const std::string & manifest_path);
 eval_report evaluate_manifest(const std::string & manifest_path, float global_scale = 1.0f);
+k_channel_sort_eval_report evaluate_manifest_k_channel_sort(
+        const std::string & manifest_path,
+        k_channel_sort_basis sort_basis = k_channel_sort_basis::FIRST_ROW_ABS,
+        float global_scale = 1.0f);
 std::string format_eval_report_json(const eval_report & report);
+std::string format_k_channel_sort_eval_report_json(const k_channel_sort_eval_report & report);
 
 } // namespace llama_expt

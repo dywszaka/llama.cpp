@@ -1580,7 +1580,7 @@ ggml_tensor * llama_kv_cache_unified::get_v(ggml_context * ctx, int32_t il, uint
     return res;
 }
 
-ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const {
+ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, ggml_tensor * k_channel_order, int32_t il, const slot_info & sinfo) const {
     const int32_t ikv = map_layer_ids.at(il);
 
     auto * k = layers[ikv].k;
@@ -1589,6 +1589,15 @@ ggml_tensor * llama_kv_cache_unified::cpy_k(ggml_context * ctx, ggml_tensor * k_
     const int64_t n_tokens = k_cur->ne[2];
 
     k_cur = ggml_reshape_2d(ctx, k_cur, k->ne[0], n_tokens);
+    if (k_channel_order) {
+        GGML_ASSERT(k_channel_order->type == GGML_TYPE_I32);
+        GGML_ASSERT(k_channel_order->ne[0] == k->ne[0]);
+        GGML_ASSERT(k_channel_order->ne[1] == 1);
+        k_cur = ggml_cont(ctx, ggml_transpose(ctx, k_cur));
+        k_cur = ggml_get_rows(ctx, k_cur, k_channel_order);
+        k_cur = ggml_cont(ctx, ggml_transpose(ctx, k_cur));
+        k_cur = ggml_reshape_2d(ctx, k_cur, k->ne[0], n_tokens);
+    }
 
     if (k_idxs && supports_set_rows) {
         if (k->ne[2] > 1) {
@@ -3064,8 +3073,8 @@ ggml_tensor * llama_kv_cache_unified_context::get_v(ggml_context * ctx, int32_t 
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
 }
 
-ggml_tensor * llama_kv_cache_unified_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
-    return kv->cpy_k(ctx, k_cur, k_idxs, il, sinfos[i_cur]);
+ggml_tensor * llama_kv_cache_unified_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, ggml_tensor * k_channel_order, int32_t il) const {
+    return kv->cpy_k(ctx, k_cur, k_idxs, k_channel_order, il, sinfos[i_cur]);
 }
 
 ggml_tensor * llama_kv_cache_unified_context::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const {

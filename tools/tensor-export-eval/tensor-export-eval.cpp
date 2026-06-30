@@ -6,11 +6,16 @@
 #include <string>
 
 static void print_usage(const char * argv0) {
-    std::fprintf(stderr, "usage: %s --manifest path/to/manifest.json [--global-scale N]\n", argv0);
+    std::fprintf(stderr,
+            "usage: %s --manifest path/to/manifest.json [--global-scale N] "
+            "[--algorithm nvfp4_ref|nvfp4_k_channel_sort|nvfp4_k_channel_mean_sort] "
+            "[--k-channel-sort] [--k-channel-mean-sort]\n",
+            argv0);
 }
 
 int main(int argc, char ** argv) {
     std::string manifest_path;
+    std::string algorithm = "nvfp4_ref";
     float global_scale = 1.0f;
 
     for (int i = 1; i < argc; ++i) {
@@ -19,6 +24,12 @@ int main(int argc, char ** argv) {
             manifest_path = argv[++i];
         } else if (arg == "--global-scale" && i + 1 < argc) {
             global_scale = std::strtof(argv[++i], nullptr);
+        } else if (arg == "--algorithm" && i + 1 < argc) {
+            algorithm = argv[++i];
+        } else if (arg == "--k-channel-sort") {
+            algorithm = "nvfp4_k_channel_sort";
+        } else if (arg == "--k-channel-mean-sort") {
+            algorithm = "nvfp4_k_channel_mean_sort";
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -35,8 +46,28 @@ int main(int argc, char ** argv) {
     }
 
     try {
-        const llama_expt::eval_report report = llama_expt::evaluate_manifest(manifest_path, global_scale);
-        std::printf("%s\n", llama_expt::format_eval_report_json(report).c_str());
+        if (algorithm == "nvfp4_ref") {
+            const llama_expt::eval_report report = llama_expt::evaluate_manifest(manifest_path, global_scale);
+            std::printf("%s\n", llama_expt::format_eval_report_json(report).c_str());
+        } else if (algorithm == "nvfp4_k_channel_sort") {
+            const llama_expt::k_channel_sort_eval_report report =
+                llama_expt::evaluate_manifest_k_channel_sort(
+                        manifest_path,
+                        llama_expt::k_channel_sort_basis::FIRST_ROW_ABS,
+                        global_scale);
+            std::printf("%s\n", llama_expt::format_k_channel_sort_eval_report_json(report).c_str());
+        } else if (algorithm == "nvfp4_k_channel_mean_sort") {
+            const llama_expt::k_channel_sort_eval_report report =
+                llama_expt::evaluate_manifest_k_channel_sort(
+                        manifest_path,
+                        llama_expt::k_channel_sort_basis::ABS_MEAN,
+                        global_scale);
+            std::printf("%s\n", llama_expt::format_k_channel_sort_eval_report_json(report).c_str());
+        } else {
+            std::fprintf(stderr, "unknown algorithm: %s\n", algorithm.c_str());
+            print_usage(argv[0]);
+            return 2;
+        }
     } catch (const std::exception & e) {
         std::fprintf(stderr, "llama-tensor-export-eval: %s\n", e.what());
         return 1;

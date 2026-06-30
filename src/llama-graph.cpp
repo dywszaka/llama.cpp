@@ -8,6 +8,7 @@
 #include "llama-kv-cache-unified-iswa.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
+#include "expt/nvfp4-k-offline-channel-order.h"
 
 #include <cassert>
 #include <cmath>
@@ -74,6 +75,20 @@ bool llm_graph_input_pos::can_reuse(const llm_graph_params & params) {
     res &= pos->ne[0] == params.ubatch.n_tokens;
 
     return res;
+}
+
+void llm_graph_input_static_i32::set_input(const llama_ubatch * ubatch) {
+    GGML_UNUSED(ubatch);
+
+    GGML_ASSERT(tensor);
+    GGML_ASSERT(ggml_backend_buffer_is_host(tensor->buffer));
+    ggml_backend_tensor_set(tensor, values.data(), 0, values.size()*sizeof(int32_t));
+}
+
+bool llm_graph_input_static_i32::can_reuse(const llm_graph_params & params) {
+    GGML_UNUSED(params);
+
+    return tensor && tensor->ne[0] == (int64_t) values.size();
 }
 
 void llm_graph_input_attn_temp::set_input(const llama_ubatch * ubatch) {
@@ -1096,6 +1111,20 @@ ggml_tensor * llm_graph_context::build_inp_pos() const {
     return cur;
 }
 
+ggml_tensor * llm_graph_context::build_inp_static_i32(const std::vector<int32_t> & values) const {
+    auto inp = std::make_unique<llm_graph_input_static_i32>(values);
+
+    auto & cur = inp->tensor;
+
+    cur = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, (int64_t) values.size());
+    ggml_set_input(cur);
+    ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu);
+
+    res->add_input(std::move(inp));
+
+    return cur;
+}
+
 ggml_tensor * llm_graph_context::build_inp_attn_scale() const {
     auto inp = std::make_unique<llm_graph_input_attn_temp>(hparams.n_attn_temp_floor_scale, hparams.f_attn_temp_scale);
 
@@ -1520,13 +1549,30 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_build_forward_expand(gf, v_cur);
 
     const auto * mctx_cur = inp->mctx;
+    ggml_tensor * k_channel_order = nullptr;
+    ggml_tensor * q_channel_order = nullptr;
+    const auto * offline_k_order = llama_expt::nvfp4_k_offline_channel_order_get();
+    if (offline_k_order) {
+        if (cparams.flash_attn) {
+            GGML_ABORT("%s: %s requires non-flash attention\n",
+                    __func__, llama_expt::nvfp4_k_offline_channel_order_env());
+        }
+
+        llama_expt::nvfp4_k_offline_channel_order_maybe_log_enabled();
+        const std::vector<int32_t> k_indices = llama_expt::nvfp4_k_offline_channel_order_gqa_indices(
+                offline_k_order->per_layer.at((size_t) il), hparams.n_embd_head_k, hparams.n_head_kv(il));
+        const std::vector<int32_t> q_indices = llama_expt::nvfp4_k_offline_channel_order_gqa_indices(
+                offline_k_order->per_layer.at((size_t) il), hparams.n_embd_head_k, hparams.n_head(il));
+        k_channel_order = build_inp_static_i32(k_indices);
+        q_channel_order = build_inp_static_i32(q_indices);
+    }
 
     // store to KV cache
     {
         const auto & k_idxs = inp->get_k_idxs();
         const auto & v_idxs = inp->get_v_idxs();
 
-        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, k_channel_order, il));
         ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
     }
 
@@ -1535,6 +1581,23 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+
+    if (k_channel_order) {
+        if (k->type != GGML_TYPE_NVFP4) {
+            GGML_ABORT("%s: %s requires --cache-type-k nvfp4\n",
+                    __func__, llama_expt::nvfp4_k_offline_channel_order_env());
+        }
+
+        const int64_t q_head_dim  = q->ne[0];
+        const int64_t q_head_kv   = q->ne[1];
+        const int64_t q_n_tokens  = q->ne[2];
+        q = ggml_reshape_2d(ctx0, q, q_head_dim*q_head_kv, q_n_tokens);
+        q = ggml_cont(ctx0, ggml_transpose(ctx0, q));
+        q = ggml_get_rows(ctx0, q, q_channel_order);
+        q = ggml_cont(ctx0, ggml_transpose(ctx0, q));
+        q = ggml_reshape_3d(ctx0, q, q_head_dim, q_head_kv, q_n_tokens);
+        cb(q, "q_offline_k_channel_order", il);
+    }
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, nullptr, kq_scale, il);
     cb(cur, "kqv_out", il);
@@ -1606,6 +1669,10 @@ ggml_tensor * llm_graph_context::build_attn_with_sinks(
     const auto * mctx_iswa = inp->mctx;
 
     const bool is_swa = hparams.is_swa(il);
+    if (llama_expt::nvfp4_k_offline_channel_order_enabled()) {
+        GGML_ABORT("%s: %s is not implemented for SWA KV graphs\n",
+                __func__, llama_expt::nvfp4_k_offline_channel_order_env());
+    }
 
     const auto * mctx_cur = is_swa ? mctx_iswa->get_swa() : mctx_iswa->get_base();
 
@@ -1613,7 +1680,7 @@ ggml_tensor * llm_graph_context::build_attn_with_sinks(
     if (k_cur) {
         const auto & k_idxs = is_swa ? inp->get_k_idxs_swa() : inp->get_k_idxs();
 
-        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, nullptr, il));
     }
 
     if (v_cur) {

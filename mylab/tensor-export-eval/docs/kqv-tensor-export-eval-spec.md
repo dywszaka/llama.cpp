@@ -99,7 +99,14 @@ LLAMA_STDOUT_FILE="${WORKSPACE}/gpu.log" \
 
 这两个函数定义在 `ggml/src/ggml-quants.c` 中，并通过本地实验 evaluator 暴露。复用这些函数可以让离线基线与仓库中的参考 NVFP4 编码和解码行为保持一致，避免在 CLI 中复制一套独立模型。
 
-evaluator 将每条 manifest record 作为连续 F32 加载，量化为临时 `block_nvfp4` 数据，再反量化回 F32，然后把 roundtrip 后的值与导出的参考值比较。当前 CLI 接受 `--global-scale N`，默认值为 `1.0`。该值会原样传给参考 quantizer 和 dequantizer。
+evaluator 将每条 manifest record 作为连续 F32 加载，量化为临时 `block_nvfp4` 数据，再反量化回 F32，然后把 roundtrip 后的值与导出的参考值比较。当前 CLI 接受 `--global-scale N`，默认值为 `1.0`。该值会原样传给参考 quantizer 和 dequantizer。默认不指定算法时仍输出 `nvfp4_ref` JSON。
+
+K-channel 排序 evaluator 是离线比较算法，不改变运行时推理路径。CLI 支持：
+
+- `--k-channel-sort` 或 `--algorithm nvfp4_k_channel_sort`：仅接受 `kind == "k"` 的 records，把 `ne[0]` 视为 channel 数，用第一行的 `abs(value)` 降序生成 channel order，绝对值相同按 channel index 升序稳定打破平局。
+- `--k-channel-mean-sort` 或 `--algorithm nvfp4_k_channel_mean_sort`：仅接受 `kind == "k"` 的 records，把 `ne[0]` 视为 channel 数，剩余维度视为 rows/tokens；先对每个 channel 计算跨全部 rows 的 signed mean，再按 `abs(mean)` 降序生成 channel order，绝对值相同按 channel index 升序稳定打破平局。输出中的 `sort_basis` 为 `abs_mean`，表示排序依据是平均值绝对值而不是 signed mean 本身。
+
+两个 K-channel 排序 evaluator 都会先计算未排序 `nvfp4_ref` roundtrip 指标，再按 channel order 重排每一行、执行 NVFP4 roundtrip、按反向 order 还原布局，最后与原始 F32 reference 比较。输出包含 `baseline_metrics`、`sorted_metrics`、`delta_metrics`、`channel_count`、`row_count`、`sort_basis` 和 `channel_order`。这种离线流程用于判断 channel 分组对 NVFP4 roundtrip 误差的影响；它不保证运行时 PPL 可直接运行，因为运行时 K-cache channel 重排必须同时对 KQ 中的 Q 应用同一 per-layer channel order 才能保持 dot-product 语义。
 
 在 NVFP4 运行时路径中，`input_scale` 通常表示 `1 / global_scale`。后续如果做使用绑定张量 scale 的运行时派生评估，应明确导出值是 `input_scale` 还是 `global_scale`，并在 evaluator 边界完成转换。当前 manifest 不存储每条 record 的 scale，因此 `--global-scale` 是 run-level 评估参数，应随命令输出一起记录。
 
@@ -107,7 +114,7 @@ evaluator 将每条 manifest record 作为连续 F32 加载，量化为临时 `b
 
 ## 评估方法
 
-evaluator 读取 `manifest.json`，验证每条 record，从 manifest 目录相对路径加载 raw F32 文件，执行选定量化 roundtrip，并输出 JSON。当前输出包括：
+evaluator 读取 `manifest.json`，验证每条 record，从 manifest 目录相对路径加载 raw F32 文件，执行选定量化 roundtrip，并输出 JSON。`nvfp4_ref` 输出包括：
 
 - `algorithm`
 - `global_scale`
@@ -115,6 +122,8 @@ evaluator 读取 `manifest.json`，验证每条 record，从 manifest 目录相�
 - `aggregate_by_kind`
 
 每条 record 的输出保留 manifest 字段，并增加 `metrics`。`aggregate_by_kind` 会合并相同 `kind` 的全部 records。
+
+K-channel 排序算法的输出仍保留 `algorithm`、`global_scale`、`records` 和 `aggregate_by_kind`，另外顶层和 record 层都有 `sort_basis`。每条 record 使用 `baseline_metrics`、`sorted_metrics` 和 `delta_metrics` 代替单一 `metrics` 字段；`delta_metrics` 定义为 `sorted - baseline`。
 
 兼容性检查会拒绝不支持或不一致的数据：
 

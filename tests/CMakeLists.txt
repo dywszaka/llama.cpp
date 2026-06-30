@@ -214,6 +214,7 @@ llama_build_and_test(test-vcache-calibration.cpp)
 llama_build_and_test(test-vcache-nvfp4.cpp)
 llama_build_and_test(test-vcache-nvfp4-layout.cpp)
 llama_build_and_test(test-expt-tensor-export-eval.cpp)
+llama_build_and_test(test-expt-nvfp4-k-offline-channel-order.cpp)
 
 if (GGML_CUDA)
     enable_language(CUDA)

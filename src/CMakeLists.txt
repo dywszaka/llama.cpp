@@ -36,6 +36,8 @@ add_library(llama
             llama-vocab.cpp
             llama-vcache-calibration.cpp
             llama-vcache-nvfp4.cpp
+            expt/nvfp4-k-offline-channel-order.cpp
+            expt/nvfp4-k-offline-channel-order.h
             expt/tensor-export-eval.cpp
             expt/tensor-export-eval.h
             unicode-data.cpp

@@ -2,6 +2,23 @@
 
 ## Tensor Export and Offline Quantization Evaluation
 
+### `LLAMA_EXPT_NVFP4_K_OFFLINE_CHANNEL_ORDER`
+
+Enables an experimental NVFP4 K-cache channel-order runtime path from an
+offline-generated JSON order file. Default: unset/off.
+
+When set to a `kcur-mean-sort.raw.json`-style artifact, the runtime validates
+that the file contains 36 `Kcur-<layer>` records and that each `channel_order`
+is a 128-element permutation. Initial scope: Qwen3 8B, unified KV cache,
+non-flash attention, and `--cache-type-k nvfp4`.
+
+For semantic correctness, the path stores K cache rows in the per-layer offline
+channel order and applies the same per-layer channel order to Q before the KQ
+dot product. This changes NVFP4 K-cache quantization/block grouping while
+preserving matched K/Q coordinates for attention. The switch logs once when
+enabled and aborts clearly for unsupported graph paths instead of reporting an
+invalid PPL.
+
 ### `LLAMA_EXPT_TENSOR_EXPORT_DIR`
 
 Enables experimental runtime export of selected computed F32 graph tensors for
