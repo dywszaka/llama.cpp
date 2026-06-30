@@ -17,6 +17,8 @@
 #include <limits>
 #include <stdexcept>
 
+extern "C" ggml_backend_t ggml_backend_c100_init(void) __attribute__((weak));
+
 //
 // llama_context
 //
@@ -174,6 +176,25 @@ llama_context::llama_context(
                     throw std::runtime_error(format("failed to initialize %s backend", ggml_backend_dev_name(dev)));
                 }
                 backends.emplace_back(backend);
+            }
+        }
+
+        {
+            const char * LLAMA_C100_SOFTMAX_LAYER = getenv("LLAMA_C100_SOFTMAX_LAYER");
+            c100_softmax_layer = LLAMA_C100_SOFTMAX_LAYER ? atoi(LLAMA_C100_SOFTMAX_LAYER) : -1;
+
+            if (c100_softmax_layer >= 0) {
+                ggml_backend_t backend_c100 = ggml_backend_c100_init ? ggml_backend_c100_init() : nullptr;
+                if (backend_c100 == nullptr) {
+                    LLAMA_LOG_WARN("%s: LLAMA_C100_SOFTMAX_LAYER=%d requested but C100 backend is unavailable\n",
+                            __func__, c100_softmax_layer);
+                    c100_softmax_layer = -1;
+                } else {
+                    backend_c100_softmax = backend_c100;
+                    backends.emplace_back(backend_c100);
+                    LLAMA_LOG_INFO("%s: C100 single SoftMax hook enabled for layer %d\n",
+                            __func__, c100_softmax_layer);
+                }
             }
         }
 
@@ -748,6 +769,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         n_reused++;
     } else {
         res->reset();
+        c100_softmax_bind_count = 0;
 
         ggml_backend_sched_reset(sched.get());
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
@@ -1497,6 +1519,21 @@ llm_graph_cb llama_context::graph_get_cb() const {
         }
 
         llama_log::nvfp4_pin_tensor_if_match(cur, name, il, model.hparams.n_layer);
+
+        if (backend_c100_softmax != nullptr &&
+                il == c100_softmax_layer &&
+                strcmp(name, "kq_soft_max_ext") == 0 &&
+                cur->op == GGML_OP_SOFT_MAX) {
+            if (c100_softmax_bind_count == 0) {
+                ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend_c100_softmax);
+                c100_softmax_bind_count++;
+                LLAMA_LOG_INFO("%s: assigned %s-%d to backend %s\n",
+                        __func__, name, il, ggml_backend_name(backend_c100_softmax));
+            } else {
+                LLAMA_LOG_WARN("%s: ignoring additional C100 SoftMax candidate %s-%d\n",
+                        __func__, name, il);
+            }
+        }
 
         if (!cparams.offload_kqv) {
             if (strcmp(name, "kqv_merged_cont") == 0) {

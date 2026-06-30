@@ -263,6 +263,7 @@ private:
     ggml_backend_sched_ptr sched;
 
     ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_t backend_c100_softmax = nullptr;
     std::vector<ggml_backend_ptr> backends;
 
     // training
@@ -294,6 +295,10 @@ private:
 
     // env: LLAMA_GRAPH_REUSE_DISABLE
     bool graph_reuse_disable = false;
+
+    // env: LLAMA_C100_SOFTMAX_LAYER
+    int32_t c100_softmax_layer = -1;
+    mutable int32_t c100_softmax_bind_count = 0;
 
     // perf
     mutable int64_t t_start_us  = 0;

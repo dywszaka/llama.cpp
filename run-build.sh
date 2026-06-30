@@ -1,4 +1,8 @@
 #!/bin/bash
+#
+# Run from the repository root through Docker:
+# docker run --rm -v "$PWD:/app" -w /app llama.cpp.sim bash -lc \
+#   'cd ext/llama.cpp && bash run-build.sh'
 
 set -e
 

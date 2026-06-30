@@ -1,5 +1,19 @@
 # Experiment Switch Environment Variables
 
+## C100 SoftMax Offload
+
+### `LLAMA_C100_SOFTMAX_LAYER`
+
+Enables an experimental single-layer C100 backend hook for the attention
+SoftMax node. Default: unset/off.
+
+When set to a non-negative layer index, graph construction names the
+`ggml_soft_max_ext()` attention node as `kq_soft_max_ext`, and context setup
+initializes the C100 backend if available. The first matching SoftMax node for
+the selected layer is assigned to C100; additional candidates are ignored with a
+warning. If the C100 backend is unavailable, the hook is disabled and normal
+backend placement is preserved.
+
 ## Tensor Export and Offline Quantization Evaluation
 
 ### `LLAMA_EXPT_TENSOR_EXPORT_DIR`

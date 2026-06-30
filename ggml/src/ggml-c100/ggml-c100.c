@@ -29,25 +29,25 @@ extern "C" {
 #endif
 
 // Simulator singleton access
-void* get_simulator_instance(void);
+void* get_simulator_instance(void) __attribute__((weak));
 
 // llama_cpp.cpp C API functions
-bool c100_llama_write_cmd(const LlamaCmdHeader* cmd);
-bool c100_llama_read_cmd(LlamaCmdHeader* cmd);
-bool c100_llama_read_result(LlamaResult* result);
-bool c100_llama_write_result(const LlamaResult* result);
-uint32_t c100_llama_read_cmd_status(void);
+bool c100_llama_write_cmd(const LlamaCmdHeader* cmd) __attribute__((weak));
+bool c100_llama_read_cmd(LlamaCmdHeader* cmd) __attribute__((weak));
+bool c100_llama_read_result(LlamaResult* result) __attribute__((weak));
+bool c100_llama_write_result(const LlamaResult* result) __attribute__((weak));
+uint32_t c100_llama_read_cmd_status(void) __attribute__((weak));
 
 // Tensor memory allocation in simulator space
-uint64_t c100_llama_alloc_tensor(size_t size);
-uint64_t c100_llama_alloc_global(size_t size);
-uint64_t c100_llama_alloc_local(size_t size);
-void* c100_llama_get_host_ptr(uint64_t sim_addr);
+uint64_t c100_llama_alloc_tensor(size_t size) __attribute__((weak));
+uint64_t c100_llama_alloc_global(size_t size) __attribute__((weak));
+uint64_t c100_llama_alloc_local(size_t size) __attribute__((weak));
+void* c100_llama_get_host_ptr(uint64_t sim_addr) __attribute__((weak));
 uint64_t c100_llama_create_ext_param_block(void* cmd,
                                            uint32_t cmd_id,
                                            uint32_t flags,
                                            const void* payload,
-                                           uint32_t payload_size);
+                                           uint32_t payload_size) __attribute__((weak));
 
 #ifdef __cplusplus
 }
@@ -616,6 +616,28 @@ static void c100_buffer_get_tensor(ggml_backend_buffer_t buffer, const struct gg
     (void)buffer;
 }
 
+static bool c100_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor * src, struct ggml_tensor * dst) {
+    (void)buffer;
+    if (!src || !dst || !src->buffer || !dst->buffer) {
+        return false;
+    }
+
+    if (!ggml_are_same_layout(src, dst)) {
+        return false;
+    }
+
+    const size_t nbytes = ggml_nbytes(src);
+    void* tmp = malloc(nbytes);
+    if (!tmp) {
+        return false;
+    }
+
+    ggml_backend_tensor_get(src, tmp, 0, nbytes);
+    memcpy(dst->data, tmp, nbytes);
+    free(tmp);
+    return true;
+}
+
 static const struct ggml_backend_buffer_i c100_buffer_i = {
     /* .free_buffer     = */ c100_buffer_free,
     /* .get_base        = */ c100_buffer_get_base,
@@ -623,7 +645,7 @@ static const struct ggml_backend_buffer_i c100_buffer_i = {
     /* .memset_tensor   = */ NULL,
     /* .set_tensor      = */ c100_buffer_set_tensor,
     /* .get_tensor      = */ c100_buffer_get_tensor,
-    /* .cpy_tensor      = */ NULL,
+    /* .cpy_tensor      = */ c100_buffer_cpy_tensor,
     /* .clear           = */ NULL,
     /* .reset           = */ NULL,
 };
@@ -1279,15 +1301,15 @@ static size_t c100_reg_get_device_count(ggml_backend_reg_t reg) {
 }
 
 static ggml_backend_dev_t c100_reg_get_device(ggml_backend_reg_t reg, size_t index) {
-    (void)reg;
     if (index > 0) return NULL;
 
     static struct ggml_backend_device c100_device = {
         /* .iface   = */ c100_device_i,
-        /* .reg     = */ NULL,  // Set during registration
+        /* .reg     = */ NULL,
         /* .context = */ NULL,
     };
 
+    c100_device.reg = reg;
     return &c100_device;
 }
 
@@ -1303,7 +1325,7 @@ static const struct ggml_backend_reg_i c100_reg_i = {
 // ============================================================================
 
 bool ggml_backend_c100_is_available(void) {
-    return get_simulator_instance() != NULL;
+    return get_simulator_instance && get_simulator_instance() != NULL;
 }
 
 size_t ggml_backend_c100_get_device_count(void) {
@@ -1329,9 +1351,10 @@ static ggml_guid_t c100_guid(void) {
 ggml_backend_buffer_type_t ggml_backend_c100_buffer_type(void) {
     static struct ggml_backend_buffer_type buft = {
         /* .iface   = */ c100_buffer_type_i,
-        /* .device  = */ NULL,  // Set during device init
+        /* .device  = */ NULL,
         /* .context = */ NULL,
     };
+    buft.device = c100_reg_get_device(ggml_backend_c100_reg(), 0);
     return &buft;
 }
 
@@ -1341,6 +1364,7 @@ ggml_backend_buffer_type_t ggml_backend_c100_global_buffer_type(void) {
         /* .device  = */ NULL,
         /* .context = */ NULL,
     };
+    buft.device = c100_reg_get_device(ggml_backend_c100_reg(), 0);
     return &buft;
 }
 
@@ -1350,6 +1374,7 @@ ggml_backend_buffer_type_t ggml_backend_c100_local_buffer_type(void) {
         /* .device  = */ NULL,
         /* .context = */ NULL,
     };
+    buft.device = c100_reg_get_device(ggml_backend_c100_reg(), 0);
     return &buft;
 }
 
