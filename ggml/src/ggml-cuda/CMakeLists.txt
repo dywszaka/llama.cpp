@@ -42,10 +42,10 @@ if (CUDAToolkit_FOUND)
 
     enable_language(CUDA)
 
-    file(GLOB   GGML_HEADERS_CUDA "*.cuh" "expt/fp8/*.cuh" "expt/nvfp4/*.cuh")
+    file(GLOB   GGML_HEADERS_CUDA "*.cuh" "expt/*.cuh" "expt/fp8/*.cuh" "expt/nvfp4/*.cuh")
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
 
-    file(GLOB   GGML_SOURCES_CUDA "*.cu" "expt/fp8/*.cu" "expt/nvfp4/*.cu")
+    file(GLOB   GGML_SOURCES_CUDA "*.cu" "expt/*.cu" "expt/fp8/*.cu" "expt/nvfp4/*.cu")
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/mmq*.cu")

@@ -1,0 +1,121 @@
+# CUDA RMS Norm input/output protocol
+
+本文记录当前 CUDA `GGML_OP_RMS_NORM` 的输入、算法和输出约定，只覆盖未融合路径
+`ggml_cuda_op_rms_norm()`。融合的 RMS Norm + multiply、反向传播和其他 Norm 算子不在
+本文范围内。
+
+协议本身不以 `ggml_tensor` 结构体作为输入输出协议。当前 llama.cpp 会从 `dst`、
+`dst->src[0]`、`dst->op_params` 和 `ctx.stream()` 提取下面这些字段；重写实现时应把
+这些字段视为真正的 CUDA RMS Norm 协议。
+
+## 输入
+
+基本参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `input` | CUDA 可访问的输入基地址，当前来自 `dst->src[0]->data`。 |
+| `output` | CUDA 可访问的输出基地址，当前来自 `dst->data`。 |
+| `dtype` | 输入和输出当前都必须是 `F32`。 |
+| `ne0` | dim0 元素数，即每个向量的列数；RMS Norm 在该维度上归约。 |
+| `ne1` | dim1 元素数，即独立 row 数。 |
+| `ne2` | dim2 元素数，即独立 channel 数。 |
+| `ne3` | dim3 元素数，即独立 sample / outer batch 数。 |
+| `nb0` | dim0 字节步长；当前要求等于 `sizeof(float)`，所以每个归约向量内部连续。 |
+| `nb1..nb3` | dim1..dim3 字节步长；当前转换为 F32 元素步长后传入 kernel。 |
+| `s1..s3` | 输入元素步长，由 `nb1..nb3 / sizeof(float)` 得到。 |
+| `ncols` | `ne0`，每个归约向量的元素数。 |
+| `nrows` | `ne1`，grid x 维。 |
+| `nchannels` | `ne2`，grid y 维。 |
+| `nsamples` | `ne3`，grid z 维。 |
+| `total_elements` | `ne0 * ne1 * ne2 * ne3`，输入和输出的总元素数。 |
+| `row_elements` | `ne0`，单个 RMS Norm 向量的元素数。 |
+| `eps` | F32 标量，要求 `eps >= 0.0f`。 |
+| `stream` | CUDA stream，当前来自 `ctx.stream()`。 |
+
+维度语义：
+
+```text
+2D: [ne0, ne1]           => ncols=ne0, nrows=ne1, nchannels=1,   nsamples=1
+3D: [ne0, ne1, ne2]      => ncols=ne0, nrows=ne1, nchannels=ne2, nsamples=1
+4D: [ne0, ne1, ne2, ne3] => ncols=ne0, nrows=ne1, nchannels=ne2, nsamples=ne3
+```
+
+输入可以在 dim1..dim3 上是 strided layout，因为 kernel 使用 `s1..s3` 计算每个向量
+的起始地址；dim0 必须连续，因为 kernel 在向量内部直接读取 `x[col]`。当前未融合路径
+不使用 `src[1]`、`src[2]` 或额外 `op_params` 字节。
+
+当前实现从 `dst->op_params` 的前 `sizeof(float)` 字节读取 `eps`，并断言输入
+`src0->type == GGML_TYPE_F32`、输出 `dst->type == GGML_TYPE_F32`。
+
+## 算法
+
+CUDA launch 使用：
+
+```text
+grid  = (nrows, nchannels, nsamples)
+block = (WARP_SIZE, 1, 1) if ncols < 1024 else (1024, 1, 1)
+```
+
+一个 CUDA block 处理一个 `(row, channel, sample)` 对应的向量。该向量的输入和输出
+基地址为：
+
+```text
+input_base  = input  + sample*s3 + channel*s2 + row*s1
+output_base = output + ((sample*nchannels + channel)*nrows + row)*ncols
+```
+
+核心处理流程：
+
+```text
+sum = 0
+for col in columns assigned to this thread:
+    v = input_base[col]
+    sum += v * v
+
+sum = block_reduce_sum(sum)
+scale = rsqrt(sum / ncols + eps)
+
+for col in columns assigned to this thread:
+    output_base[col] = input_base[col] * scale
+```
+
+实现细节：
+
+- `ncols` 是归约长度，要求为正；当前代码对 `sum / ncols` 不做额外保护。
+- `block_reduce_sum` 先做 warp 内归约；1024-thread 路径再用共享内存归约每个 warp
+  的部分和。
+- 输入 dim1..dim3 的 strided 地址由 `s1..s3` 决定。
+- 输出地址按 dense row layout 线性递增，不使用输出张量的 stride 字段。
+- in-place 情况下 `output` 可与 `input` alias；当前算法先完成该向量的平方和归约，
+  再写回同一向量。
+
+## 输出
+
+输出参数和数据：
+
+| 参数 | 含义 |
+| --- | --- |
+| `output` | CUDA 可访问的输出基地址，写入归一化后的 F32 数据。 |
+| `output_dtype` | `F32`。 |
+| `output_dims` | 与输入相同：`[ne0, ne1, ne2, ne3]`。 |
+| `output_elements` | `ne0 * ne1 * ne2 * ne3`。 |
+| `output_bytes` | `output_elements * sizeof(float)`。 |
+| `row_layout` | Dense/contiguous row layout，dim0 最快。 |
+
+每个 `(row, channel, sample)` 输出向量占连续 `ne0` 个 F32 元素。
+
+因此，第 `(row, channel, sample)` 个输出向量位于：
+
+```text
+output + ((sample*nchannels + channel)*nrows + row)*ncols
+```
+
+其中每个元素满足：
+
+```text
+output[col] = input[col] * rsqrt(mean(input[0:ncols]^2) + eps)
+```
+
+当前未融合实现不写额外输出参数，也不产生 side data。若未来支持非连续输出 stride，
+需要把输出 byte stride / element stride 明确加入协议；当前实现没有这部分输出协议。

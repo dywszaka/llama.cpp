@@ -1,5 +1,43 @@
 # Experiment Switch Environment Variables
 
+## CUDA RMS_NORM CIM Comparison
+
+### `GGML_CUDA_RMS_NORM_CIM_MODE`
+
+Selects an experimental CUDA/CIM RMS_NORM runtime mode. Default: unset or
+`cuda`, preserving the existing CUDA-only path and producing no comparison
+artifact.
+
+Supported values:
+
+- `cuda`: run only the existing CUDA RMS_NORM implementation and use the CUDA
+  result.
+- `cim`: run only the experimental CIM/RPC placeholder path and use the CIM
+  result.
+- `compare_cuda`: start CUDA RMS_NORM and the CIM/RPC placeholder path
+  concurrently, wait for both, append an RMSE comparison artifact, and use the
+  CUDA result.
+- `compare_cim`: start CUDA RMS_NORM and the CIM/RPC placeholder path
+  concurrently, wait for both, append an RMSE comparison artifact, and use the
+  CIM result.
+
+The CIM entry currently stages the same RMS_NORM input bytes to host to model
+RPC/IO request behavior, waits for that transfer, and returns a zero-filled F32
+response. It is a placeholder for a real external CIM implementation and is not
+numerically correct. Unknown values fall back to `cuda`.
+
+Dual-run modes disable CUDA graph capture for graphs containing RMS_NORM because
+the experiment performs host IO, synchronization, and artifact writes. Single
+run modes do not generate comparison artifacts.
+
+### `GGML_CUDA_RMS_NORM_CIM_ARTIFACT`
+
+Overrides the append-only JSONL artifact path used by `compare_cuda` and
+`compare_cim`. Default: `experiments/rms-norm-cim-compare.jsonl` relative to
+the process working directory. Parent directories are created when possible.
+Each line records at least the destination tensor name (`dst`) and `rmse`, plus
+the ggml operator descriptor (`op`).
+
 ## Tensor Export and Offline Quantization Evaluation
 
 ### `LLAMA_EXPT_NVFP4_K_OFFLINE_CHANNEL_ORDER`

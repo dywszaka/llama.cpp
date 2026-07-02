@@ -1,4 +1,5 @@
 #include "norm.cuh"
+#include "expt/rms-norm-cim.cuh"
 #include <cstdint>
 
 template <int block_size>
@@ -438,7 +439,15 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t s02 = nb02 / ts0;
     const int64_t s03 = nb03 / ts0;
 
-    rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+    if (!ggml_cuda_rms_norm_cim_enabled()) {
+        rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+        return;
+    }
+
+    const ggml_cuda_rms_norm_cim_params params = {
+        src0_d, dst_d, (int) ne00, (int) ne01, (int) ne02, (int) ne03, s01, s02, s03, eps,
+    };
+    ggml_cuda_rms_norm_cim_run(ctx, dst, params, rms_norm_f32_cuda);
 }
 
 void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * mul_tensor) {
