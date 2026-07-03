@@ -375,6 +375,7 @@ endif()
 
 ggml_add_backend(BLAS)
 ggml_add_backend(CANN)
+ggml_add_backend(C100)
 ggml_add_backend(CUDA)
 ggml_add_backend(HIP)
 ggml_add_backend(METAL)

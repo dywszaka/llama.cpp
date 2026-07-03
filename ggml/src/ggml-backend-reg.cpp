@@ -65,6 +65,10 @@
 #include "ggml-cann.h"
 #endif
 
+#ifdef GGML_USE_C100
+#include "ggml-c100.h"
+#endif
+
 // disable C++17 deprecation warning for std::codecvt_utf8
 #if defined(__clang__)
 #    pragma clang diagnostic push
@@ -185,6 +189,9 @@ struct ggml_backend_registry {
 #endif
 #ifdef GGML_USE_CANN
         register_backend(ggml_backend_cann_reg());
+#endif
+#ifdef GGML_USE_C100
+        register_backend(ggml_backend_c100_reg());
 #endif
 #ifdef GGML_USE_BLAS
         register_backend(ggml_backend_blas_reg());

@@ -87,6 +87,12 @@ option(LLAMA_BUILD_SERVER   "llama: build server example" ${LLAMA_STANDALONE})
 option(LLAMA_CURL       "llama: use libcurl to download model from an URL" ON)
 option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured output in common utils" OFF)
 
+# C100 simulator integration is optional and default-off. The default path is a
+# convenience cache value only; it is validated only when the runtime is enabled.
+option(LLAMA_C100_RUNTIME "llama: link the optional C100 simulator runtime" OFF)
+set(C100_SIM_ROOT "/home/allen/host_workspace/develop/llama.cpp.sim" CACHE PATH
+    "Path to the C100 simulator repository used by LLAMA_C100_RUNTIME")
+
 # Required for relocatable CMake package
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/common.cmake)
@@ -164,6 +170,13 @@ if (LLAMA_USE_SYSTEM_GGML)
 endif()
 
 if (NOT TARGET ggml AND NOT LLAMA_USE_SYSTEM_GGML)
+    if (LLAMA_C100_RUNTIME)
+        if (NOT GGML_C100)
+            message(FATAL_ERROR "LLAMA_C100_RUNTIME requires GGML_C100=ON")
+        endif()
+        include(c100-runtime)
+    endif()
+
     set(GGML_BUILD_NUMBER ${LLAMA_BUILD_NUMBER})
     set(GGML_BUILD_COMMIT ${LLAMA_BUILD_COMMIT})
     add_subdirectory(ggml)

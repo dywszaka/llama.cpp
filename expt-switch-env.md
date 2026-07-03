@@ -1,5 +1,23 @@
 # Experiment Switch Environment Variables
 
+## C100 Simulator Backend
+
+### `C100_TEST_MODE`
+
+Diagnostic switch for the optional C100 GGML backend. Default: unset/off.
+
+When set, selected backend command-preparation paths mark commands as test-mode
+commands for simulator firmware diagnostics. It is only relevant in builds with
+`GGML_C100=ON` and the C100 backend selected.
+
+### `C100_SPIKE_TRACE`
+
+Diagnostic switch for the optional C100 simulator runtime. Default: unset/off.
+
+When set to a truthy value, `LLAMA_C100_RUNTIME` startup enables verbose Spike
+instruction tracing for the SU and VE firmware adapters. This can be very noisy
+and should not be used for normal performance measurements.
+
 ## Tensor Export and Offline Quantization Evaluation
 
 ### `LLAMA_EXPT_NVFP4_K_OFFLINE_CHANNEL_ORDER`
