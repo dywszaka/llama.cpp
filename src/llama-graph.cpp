@@ -4,6 +4,8 @@
 #include "llama-batch.h"
 #include "llama-cparams.h"
 
+#include "ggml-backend.h"
+
 #include "llama-kv-cache-unified.h"
 #include "llama-kv-cache-unified-iswa.h"
 #include "llama-memory-hybrid.h"
@@ -21,6 +23,58 @@ static bool llama_env_flag_enabled(const char * name) {
         std::strcmp(value, "0") != 0 &&
         std::strcmp(value, "false") != 0 &&
         std::strcmp(value, "FALSE") != 0;
+}
+
+static bool llama_expt_c100_soft_max_enabled() {
+    return llama_env_flag_enabled("LLAMA_EXPT_C100_SOFT_MAX");
+}
+
+static ggml_backend_t llama_sched_find_backend_by_name(ggml_backend_sched_t sched, const char * name) {
+    if (sched == nullptr) {
+        return nullptr;
+    }
+
+    const int n_backends = ggml_backend_sched_get_n_backends(sched);
+    for (int i = 0; i < n_backends; ++i) {
+        ggml_backend_t backend = ggml_backend_sched_get_backend(sched, i);
+        if (std::strcmp(ggml_backend_name(backend), name) == 0) {
+            return backend;
+        }
+    }
+
+    return nullptr;
+}
+
+static void llama_expt_pin_soft_max_to_c100(ggml_backend_sched_t sched, ggml_tensor * soft_max) {
+    if (!llama_expt_c100_soft_max_enabled() || soft_max == nullptr) {
+        return;
+    }
+
+    static bool logged_pinned      = false;
+    static bool logged_unavailable = false;
+
+    ggml_backend_t c100_backend = llama_sched_find_backend_by_name(sched, "C100");
+    if (c100_backend == nullptr) {
+        if (!logged_unavailable) {
+            LLAMA_LOG_WARN("%s: LLAMA_EXPT_C100_SOFT_MAX=1 but C100 backend is not in the scheduler\n", __func__);
+            logged_unavailable = true;
+        }
+        return;
+    }
+
+    if (!ggml_backend_supports_op(c100_backend, soft_max)) {
+        if (!logged_unavailable) {
+            LLAMA_LOG_WARN("%s: LLAMA_EXPT_C100_SOFT_MAX=1 but C100 does not support this SOFT_MAX op\n", __func__);
+            logged_unavailable = true;
+        }
+        return;
+    }
+
+    ggml_backend_sched_set_tensor_backend(sched, soft_max, c100_backend);
+    if (!logged_pinned) {
+        LLAMA_LOG_INFO("%s: LLAMA_EXPT_C100_SOFT_MAX=1, pinning non-flash attention SOFT_MAX nodes to C100\n", __func__);
+        logged_pinned = true;
+    }
 }
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
@@ -1395,6 +1449,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
 
         kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
+        llama_expt_pin_soft_max_to_c100(sched, kq);
         ggml_soft_max_add_sinks(kq, sinks);
 
         if (!v_trans) {

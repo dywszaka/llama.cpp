@@ -18,6 +18,24 @@ When set to a truthy value, `LLAMA_C100_RUNTIME` startup enables verbose Spike
 instruction tracing for the SU and VE firmware adapters. This can be very noisy
 and should not be used for normal performance measurements.
 
+### `LLAMA_EXPT_C100_SOFT_MAX`
+
+Enables experimental scheduler pinning of non-flash-attention
+`GGML_OP_SOFT_MAX` nodes to the C100 backend. Default: unset/off.
+
+When enabled, graph construction checks whether the active scheduler contains a
+backend named `C100` and whether that backend supports the specific softmax
+node. If both checks pass, the softmax tensor produced by
+`ggml_soft_max_ext()` in the non-flash MHA path is assigned to C100 with
+`ggml_backend_sched_set_tensor_backend()`. If C100 is missing or does not
+support the op, the runtime logs one warning and preserves the default scheduler
+placement.
+
+The switch only affects the non-flash attention path. Runtime validation should
+include `GGML_SCHED_DEBUG=2` and a device list that makes C100 visible to the
+scheduler, for example `--device CUDA0,C100`. If C100 should not receive model
+weights, also provide a split such as `--tensor-split 1,0`.
+
 ## Tensor Export and Offline Quantization Evaluation
 
 ### `LLAMA_EXPT_NVFP4_K_OFFLINE_CHANNEL_ORDER`
