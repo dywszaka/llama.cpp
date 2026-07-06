@@ -22,7 +22,7 @@ status=0
   "${BIN}" \
       --device CUDA0,C100 \
       --tensor-split 1,0 \
-      -m /home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf \
+      -m "${ROOT_DIR}/data/models/qwen3-8b-nvfp4.gguf" \
       -f "${ROOT_DIR}/data/wikitext/wikitext-2-raw/wiki.test.raw" \
       --cache-type-k f16 \
       --cache-type-v f16 \
