@@ -476,6 +476,7 @@ void verify_rounding() {
     }
 }
 
+#ifdef FP32_TO_BF16_STANDALONE
 int main() {
     printf("FP32 to BF16 Converter in C\n");
     printf("============================\n\n");
@@ -494,3 +495,4 @@ int main() {
     
     return 0;
 }
+#endif
