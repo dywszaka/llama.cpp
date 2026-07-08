@@ -18,4 +18,6 @@ cmake -S . -B build_cuda \
     -DLLAMA_CURL=OFF \
     -DCMAKE_CUDA_ARCHITECTURES="${cuda_arch}" \
     -DCMAKE_BUILD_TYPE=Release
-cmake --build build_cuda --config Release -j "$(nproc)" --target llama-perplexity
+
+docker run --gpus all --rm -v "$PWD:/app" -w /app llama.cpp.sim bash -lc \
+    'cmake --build build_cuda --config Release -j "$(nproc)" --target llama-perplexity'

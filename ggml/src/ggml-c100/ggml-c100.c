@@ -37,6 +37,7 @@ bool c100_llama_read_cmd(LlamaCmdHeader* cmd) __attribute__((weak));
 bool c100_llama_read_result(LlamaResult* result) __attribute__((weak));
 bool c100_llama_write_result(const LlamaResult* result) __attribute__((weak));
 uint32_t c100_llama_read_cmd_status(void) __attribute__((weak));
+bool c100_llama_is_running(void) __attribute__((weak));
 
 // Tensor memory allocation in simulator space
 uint64_t c100_llama_alloc_tensor(size_t size) __attribute__((weak));
@@ -48,6 +49,7 @@ uint64_t c100_llama_create_ext_param_block(void* cmd,
                                            uint32_t flags,
                                            const void* payload,
                                            uint32_t payload_size) __attribute__((weak));
+void c100_llama_free_tensor(uint64_t sim_addr) __attribute__((weak));
 
 #ifdef __cplusplus
 }
@@ -61,7 +63,24 @@ static const char* GGML_C100_NAME = "C100";
 
 // Default polling configuration
 #define C100_DEFAULT_POLL_INTERVAL_US  1000   // 1ms
-#define C100_DEFAULT_MAX_POLL_ITERATIONS 50000  // 50 seconds max
+#define C100_DEFAULT_MAX_POLL_ITERATIONS 300000  // 300 seconds max
+#define C100_SOFTMAX_MIN_POLL_ITERATIONS C100_DEFAULT_MAX_POLL_ITERATIONS
+#define C100_SOFTMAX_POLL_ELEMENTS_PER_ITERATION 32
+
+static int c100_env_i32_or_default(const char* name, int default_value) {
+    const char* value = getenv(name);
+    if (!value || value[0] == '\0') {
+        return default_value;
+    }
+
+    char* end = NULL;
+    long parsed = strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed <= 0 || parsed > 2147483647L) {
+        fprintf(stderr, "[WARN] C100: Ignoring invalid %s=%s\n", name, value);
+        return default_value;
+    }
+    return (int)parsed;
+}
 
 static uint32_t c100_float_to_u32(float value) {
     union {
@@ -71,17 +90,42 @@ static uint32_t c100_float_to_u32(float value) {
     return converted.u32;
 }
 
+static uint16_t c100_fp32_to_bf16(float value) {
+    union {
+        float f32;
+        uint32_t u32;
+    } bits = {.f32 = value};
+    uint32_t rounding_bias = 0x7fffu + ((bits.u32 >> 16) & 1u);
+    return (uint16_t)((bits.u32 + rounding_bias) >> 16);
+}
+
+static float c100_bf16_to_fp32(uint16_t value) {
+    union {
+        uint32_t u32;
+        float f32;
+    } bits = {.u32 = ((uint32_t)value) << 16};
+    return bits.f32;
+}
+
 // ============================================================================
 // Forward declarations
 // ============================================================================
 
 ggml_backend_t ggml_backend_c100_init(void);
 ggml_backend_buffer_type_t ggml_backend_c100_buffer_type(void);
+static bool c100_poll_cmd_done(uint32_t* cycles);
+static bool c100_poll_cmd_done_with_limit(uint32_t* cycles, int max_iterations);
 
 static bool c100_is_view_op(enum ggml_op op) {
     return op == GGML_OP_VIEW || op == GGML_OP_RESHAPE ||
            op == GGML_OP_PERMUTE || op == GGML_OP_TRANSPOSE;
 }
+
+typedef enum c100_softmax_scratch_kind {
+    C100_SOFTMAX_SCRATCH_SRC,
+    C100_SOFTMAX_SCRATCH_DST,
+    C100_SOFTMAX_SCRATCH_MASK,
+} c100_softmax_scratch_kind_t;
 
 // ============================================================================
 // C100 Buffer Context
@@ -119,64 +163,260 @@ static uint64_t c100_get_sim_addr(const struct ggml_tensor* tensor) {
     return ctx->sim_addr + offset;
 }
 
-/**
- * @brief Prepare a CMD header for SoftMax operation
- */
-static void c100_prepare_softmax_cmd(
-    LlamaCmdHeader* cmd,
-    const struct ggml_tensor* src,
-    struct ggml_tensor* dst
-) {
+static bool c100_ensure_softmax_scratch(ggml_backend_c100_context* ctx,
+                                        c100_softmax_scratch_kind_t kind,
+                                        size_t bytes) {
+    uint64_t* addr = NULL;
+    void** host = NULL;
+    size_t* capacity = NULL;
+    const char* name = NULL;
+
+    switch (kind) {
+        case C100_SOFTMAX_SCRATCH_SRC:
+            addr = &ctx->softmax_src_addr;
+            host = &ctx->softmax_src_host;
+            capacity = &ctx->softmax_src_capacity;
+            name = "source";
+            break;
+        case C100_SOFTMAX_SCRATCH_DST:
+            addr = &ctx->softmax_dst_addr;
+            host = &ctx->softmax_dst_host;
+            capacity = &ctx->softmax_dst_capacity;
+            name = "destination";
+            break;
+        case C100_SOFTMAX_SCRATCH_MASK:
+            addr = &ctx->softmax_mask_addr;
+            host = &ctx->softmax_mask_host;
+            capacity = &ctx->softmax_mask_capacity;
+            name = "mask";
+            break;
+        default:
+            return false;
+    }
+
+    if (*host && *capacity >= bytes) {
+        return true;
+    }
+
+    // Free previous allocation before reallocating
+    if (*addr != 0 && c100_llama_free_tensor) {
+        c100_llama_free_tensor(*addr);
+    }
+
+    uint64_t sim_addr = c100_llama_alloc_tensor(bytes);
+    if (sim_addr == 0) {
+        fprintf(stderr, "[ERROR] C100: Failed to allocate BF16 SoftMax %s staging (%zu bytes)\n",
+                name, bytes);
+        return false;
+    }
+
+    void* host_ptr = c100_llama_get_host_ptr(sim_addr);
+    if (!host_ptr) {
+        fprintf(stderr,
+                "[ERROR] C100: Failed to map BF16 SoftMax %s staging at 0x%lx (%zu bytes)\n",
+                name, sim_addr, bytes);
+        return false;
+    }
+
+    *addr = sim_addr;
+    *host = host_ptr;
+    *capacity = bytes;
+    return true;
+}
+
+static void c100_convert_f32_to_bf16(const float* src, uint16_t* dst, int64_t count) {
+    for (int64_t i = 0; i < count; ++i) {
+        dst[i] = c100_fp32_to_bf16(src[i]);
+    }
+}
+
+static void c100_convert_f16_to_bf16(const ggml_fp16_t* src, uint16_t* dst, int64_t count) {
+    for (int64_t i = 0; i < count; ++i) {
+        dst[i] = c100_fp32_to_bf16(GGML_COMPUTE_FP16_TO_FP32(src[i]));
+    }
+}
+
+static void c100_convert_bf16_to_f32(const uint16_t* src, float* dst, int64_t count) {
+    for (int64_t i = 0; i < count; ++i) {
+        dst[i] = c100_bf16_to_fp32(src[i]);
+    }
+}
+
+typedef struct c100_softmax_cmd_args {
+    uint64_t src_addr;
+    uint64_t src_size;
+    uint64_t mask_addr;
+    uint64_t mask_size;
+    uint64_t dst_addr;
+    uint64_t dst_size;
+    uint32_t ne0;
+    uint32_t ne1;
+    uint32_t ne2;
+    uint32_t ne3;
+    uint32_t mask_ne1;
+    uint32_t mask_ne2;
+    uint32_t mask_ne3;
+    uint32_t flags;
+    float scale;
+    float max_bias;
+} c100_softmax_cmd_args_t;
+
+static void c100_prepare_softmax_cmd(LlamaCmdHeader* cmd,
+                                     const c100_softmax_cmd_args_t* args) {
     memset(cmd, 0, sizeof(*cmd));
     cmd->cmd_magic = CMD_MAGIC;
     cmd->cmd_id = CMD_ID_SOFTMAX;  // 0x01
 
-    // Get simulator addresses
-    cmd->src0_addr = c100_get_sim_addr(src);
-    cmd->src0_size = ggml_nbytes(src);
-    cmd->dst_addr = c100_get_sim_addr(dst);
-    cmd->dst_size = ggml_nbytes(dst);
+    cmd->src0_addr = args->src_addr;
+    cmd->src0_size = args->src_size;
+    cmd->src1_addr = args->mask_addr;
+    cmd->src1_size = args->mask_size;
+    cmd->dst_addr = args->dst_addr;
+    cmd->dst_size = args->dst_size;
+
+    cmd->params[0] = args->ne0;
+    cmd->params[1] = args->ne1;
+    cmd->params[2] = args->flags;
+    cmd->params[3] = c100_float_to_u32(args->scale);
+    cmd->params[4] = c100_float_to_u32(args->max_bias);
+    cmd->params[5] = args->ne2;
+    cmd->params[6] = args->ne3;
+    cmd->params[7] = args->mask_ne1;
+
+    if ((args->flags & CMD_SOFTMAX_FLAG_HAS_MASK) &&
+        (args->mask_ne2 > 1 || args->mask_ne3 > 1)) {
+        llama_softmax_ext_payload_t payload = {
+            .payload_magic = LLAMA_SOFTMAX_EXT_PAYLOAD_MAGIC,
+            .payload_version = LLAMA_SOFTMAX_EXT_PAYLOAD_VERSION,
+            .mask_ne2 = args->mask_ne2,
+            .mask_ne3 = args->mask_ne3,
+        };
+        if (c100_llama_create_ext_param_block) {
+            c100_llama_create_ext_param_block(cmd, CMD_ID_SOFTMAX, 0, &payload, sizeof(payload));
+        }
+    }
+
+    cmd->status = CMD_STATUS_RUNNING;  // Set to RUNNING so firmware processes it
+}
+
+static enum ggml_status c100_execute_softmax(ggml_backend_c100_context* ctx,
+                                             const struct ggml_tensor* src,
+                                             struct ggml_tensor* dst) {
+    if (!ctx || !src || !dst) {
+        return GGML_STATUS_FAILED;
+    }
 
     const struct ggml_tensor* mask = dst->src[1];
     const float* op_params = (const float*)dst->op_params;
     const float scale = op_params ? op_params[0] : 1.0f;
     const float max_bias = op_params ? op_params[1] : 0.0f;
-    uint32_t rows = src->ne[1] > 0 ? src->ne[1] : 1;
-    uint32_t cols = src->ne[0];
-
-    if (mask) {
-        cmd->src1_addr = c100_get_sim_addr(mask);
-        cmd->src1_size = ggml_nbytes(mask);
+    const int64_t elements = ggml_nelements(src);
+    if (elements <= 0) {
+        fprintf(stderr, "[ERROR] C100: SoftMax has invalid element count\n");
+        return GGML_STATUS_FAILED;
     }
 
-    bool is_f32 = src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
-                  (!mask || mask->type == GGML_TYPE_F32);
-    bool requires_extended = mask || scale != 1.0f || max_bias != 0.0f || is_f32;
-    uint32_t flags = 0;
-    if (mask) {
-        flags |= CMD_SOFTMAX_FLAG_HAS_MASK;
-    }
-    if (is_f32) {
-        flags |= CMD_SOFTMAX_FLAG_F32;
-    }
-    if (requires_extended) {
-        flags |= CMD_SOFTMAX_FLAG_SHAPE4D;
+    c100_softmax_cmd_args_t args = {
+        .src_addr = c100_get_sim_addr(src),
+        .src_size = ggml_nbytes(src),
+        .mask_addr = 0,
+        .mask_size = 0,
+        .dst_addr = c100_get_sim_addr(dst),
+        .dst_size = ggml_nbytes(dst),
+        .ne0 = (uint32_t)src->ne[0],
+        .ne1 = (uint32_t)(src->ne[1] > 0 ? src->ne[1] : 1),
+        .ne2 = (uint32_t)(src->ne[2] > 0 ? src->ne[2] : 1),
+        .ne3 = (uint32_t)(src->ne[3] > 0 ? src->ne[3] : 1),
+        .mask_ne1 = mask ? (uint32_t)(mask->ne[1] > 0 ? mask->ne[1] : 1) : 0,
+        .mask_ne2 = mask ? (uint32_t)(mask->ne[2] > 0 ? mask->ne[2] : 1) : 0,
+        .mask_ne3 = mask ? (uint32_t)(mask->ne[3] > 0 ? mask->ne[3] : 1) : 0,
+        .flags = mask ? CMD_SOFTMAX_FLAG_HAS_MASK : 0,
+        .scale = scale,
+        .max_bias = max_bias,
+    };
+
+    const bool f32_src_dst = src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
+    const bool bf16_src_dst = src->type == GGML_TYPE_BF16 && dst->type == GGML_TYPE_BF16;
+    if (!f32_src_dst && !bf16_src_dst) {
+        fprintf(stderr, "[ERROR] C100: SoftMax supports only F32 staged or BF16 direct tensors\n");
+        return GGML_STATUS_FAILED;
     }
 
-    // params[0] keeps the legacy rows/cols encoding for plain SoftMax.
-    cmd->params[0] = ((uint32_t)cols << 16) | rows;
-    if (requires_extended) {
-        cmd->params[0] = CMD_SOFTMAX_PACK_U16_PAIR(src->ne[0], src->ne[1]);
-        cmd->params[1] = CMD_SOFTMAX_EXT_MAGIC;
-        cmd->params[2] = flags;
-        cmd->params[3] = c100_float_to_u32(scale);
-        cmd->params[4] = c100_float_to_u32(max_bias);
-        cmd->params[5] = CMD_SOFTMAX_PACK_U16_PAIR(src->ne[2], src->ne[3]);
-        cmd->params[6] = mask ? CMD_SOFTMAX_PACK_U16_PAIR(mask->ne[1], mask->ne[2]) : 0;
-        cmd->params[7] = mask ? CMD_SOFTMAX_PACK_U16_PAIR(mask->ne[3], 0) : 0;
+    if (f32_src_dst) {
+        const size_t bf16_bytes = (size_t)elements * sizeof(uint16_t);
+        if (!c100_ensure_softmax_scratch(ctx, C100_SOFTMAX_SCRATCH_SRC, bf16_bytes) ||
+            !c100_ensure_softmax_scratch(ctx, C100_SOFTMAX_SCRATCH_DST, bf16_bytes)) {
+            return GGML_STATUS_FAILED;
+        }
+
+        c100_convert_f32_to_bf16((const float*)src->data,
+                                 (uint16_t*)ctx->softmax_src_host,
+                                 elements);
+        args.src_addr = ctx->softmax_src_addr;
+        args.src_size = bf16_bytes;
+        args.dst_addr = ctx->softmax_dst_addr;
+        args.dst_size = bf16_bytes;
+
+        if (mask) {
+            if (mask->type != GGML_TYPE_F32 && mask->type != GGML_TYPE_F16) {
+                fprintf(stderr, "[ERROR] C100: F32 SoftMax staging expects F32 or F16 mask tensor\n");
+                return GGML_STATUS_FAILED;
+            }
+            const int64_t mask_elements = ggml_nelements(mask);
+            const size_t mask_bf16_bytes = (size_t)mask_elements * sizeof(uint16_t);
+            if (!c100_ensure_softmax_scratch(ctx, C100_SOFTMAX_SCRATCH_MASK,
+                                             mask_bf16_bytes)) {
+                return GGML_STATUS_FAILED;
+            }
+            if (mask->type == GGML_TYPE_F32) {
+                c100_convert_f32_to_bf16((const float*)mask->data,
+                                         (uint16_t*)ctx->softmax_mask_host,
+                                         mask_elements);
+            } else {
+                c100_convert_f16_to_bf16((const ggml_fp16_t*)mask->data,
+                                         (uint16_t*)ctx->softmax_mask_host,
+                                         mask_elements);
+            }
+            args.mask_addr = ctx->softmax_mask_addr;
+            args.mask_size = mask_bf16_bytes;
+        }
+    } else if (mask) {
+        if (mask->type != GGML_TYPE_BF16) {
+            fprintf(stderr, "[ERROR] C100: BF16 SoftMax direct path expects BF16 mask tensor\n");
+            return GGML_STATUS_FAILED;
+        }
+        args.mask_addr = c100_get_sim_addr(mask);
+        args.mask_size = ggml_nbytes(mask);
     }
 
-    cmd->status = CMD_STATUS_RUNNING;  // Set to RUNNING so firmware processes it
+    LlamaCmdHeader cmd;
+    c100_prepare_softmax_cmd(&cmd, &args);
+
+    if (!c100_llama_write_cmd(&cmd)) {
+        fprintf(stderr, "[ERROR] C100: Failed to write SoftMax CMD\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    int softmax_poll_iterations =
+        (int)(elements / C100_SOFTMAX_POLL_ELEMENTS_PER_ITERATION);
+    if (softmax_poll_iterations < C100_SOFTMAX_MIN_POLL_ITERATIONS) {
+        softmax_poll_iterations = C100_SOFTMAX_MIN_POLL_ITERATIONS;
+    }
+    softmax_poll_iterations =
+        c100_env_i32_or_default("C100_SOFTMAX_MAX_POLL_ITERATIONS",
+                                softmax_poll_iterations);
+    if (!c100_poll_cmd_done_with_limit(NULL, softmax_poll_iterations)) {
+        fprintf(stderr, "[ERROR] C100: SoftMax execution failed or timeout\n");
+        return GGML_STATUS_FAILED;
+    }
+
+    if (f32_src_dst) {
+        c100_convert_bf16_to_f32((const uint16_t*)ctx->softmax_dst_host,
+                                 (float*)dst->data,
+                                 elements);
+    }
+
+    return GGML_STATUS_SUCCESS;
 }
 
 /**
@@ -548,9 +788,11 @@ static void c100_prepare_rms_norm_cmd(
 
     cmd->status = CMD_STATUS_RUNNING;
 }
-static bool c100_poll_cmd_done(uint32_t* cycles) {
+static bool c100_poll_cmd_done_with_limit(uint32_t* cycles, int max_iterations) {
+    int poll_interval_us = c100_env_i32_or_default("C100_POLL_INTERVAL_US",
+                                                   C100_DEFAULT_POLL_INTERVAL_US);
     int iterations = 0;
-    while (iterations < C100_DEFAULT_MAX_POLL_ITERATIONS) {
+    while (iterations < max_iterations) {
         uint32_t status = c100_llama_read_cmd_status();
         if (status == CMD_STATUS_DONE) {
             if (cycles) {
@@ -564,10 +806,21 @@ static bool c100_poll_cmd_done(uint32_t* cycles) {
         if (status == CMD_STATUS_ERROR) {
             return false;
         }
-        usleep(C100_DEFAULT_POLL_INTERVAL_US);
+        if (c100_llama_is_running && !c100_llama_is_running()) {
+            fprintf(stderr, "[ERROR] C100: Simulator stopped before command completion\n");
+            return false;
+        }
+        usleep(poll_interval_us);
         iterations++;
     }
     return false;  // Timeout
+}
+
+static bool c100_poll_cmd_done(uint32_t* cycles) {
+    const int max_iterations =
+        c100_env_i32_or_default("C100_MAX_POLL_ITERATIONS",
+                                C100_DEFAULT_MAX_POLL_ITERATIONS);
+    return c100_poll_cmd_done_with_limit(cycles, max_iterations);
 }
 
 // ============================================================================
@@ -852,6 +1105,7 @@ static enum ggml_status c100_backend_graph_compute(ggml_backend_t backend, struc
         return GGML_STATUS_FAILED;
     }
 
+    ggml_backend_c100_context* ctx = ggml_c100_ctx(backend);
     LlamaCmdHeader cmd;
     LlamaResult result;
     (void)result;  // May be used later for cycle counting
@@ -867,18 +1121,9 @@ static enum ggml_status c100_backend_graph_compute(ggml_backend_t backend, struc
                 struct ggml_tensor* src0 = node->src[0];
                 if (!src0) continue;
 
-                // Prepare and send CMD
-                c100_prepare_softmax_cmd(&cmd, src0, node);
-
-                if (!c100_llama_write_cmd(&cmd)) {
-                    fprintf(stderr, "[ERROR] C100: Failed to write SoftMax CMD\n");
-                    return GGML_STATUS_FAILED;
-                }
-
-                // Poll for completion
-                if (!c100_poll_cmd_done(NULL)) {
-                    fprintf(stderr, "[ERROR] C100: SoftMax execution failed or timeout\n");
-                    return GGML_STATUS_FAILED;
+                enum ggml_status status = c100_execute_softmax(ctx, src0, node);
+                if (status != GGML_STATUS_SUCCESS) {
+                    return status;
                 }
 
                 break;
