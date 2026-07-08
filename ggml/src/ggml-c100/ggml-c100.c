@@ -32,6 +32,9 @@ extern "C" {
 void* get_simulator_instance(void) __attribute__((weak));
 
 // llama_cpp.cpp C API functions
+bool c100_llama_init(void) __attribute__((weak));
+bool c100_llama_start(void) __attribute__((weak));
+void c100_llama_cleanup(void) __attribute__((weak));
 bool c100_llama_write_cmd(const LlamaCmdHeader* cmd) __attribute__((weak));
 bool c100_llama_read_cmd(LlamaCmdHeader* cmd) __attribute__((weak));
 bool c100_llama_read_result(LlamaResult* result) __attribute__((weak));
@@ -76,6 +79,21 @@ static int c100_env_i32_or_default(const char* name, int default_value) {
     char* end = NULL;
     long parsed = strtol(value, &end, 10);
     if (end == value || *end != '\0' || parsed <= 0 || parsed > 2147483647L) {
+        fprintf(stderr, "[WARN] C100: Ignoring invalid %s=%s\n", name, value);
+        return default_value;
+    }
+    return (int)parsed;
+}
+
+static int c100_env_i32_nonnegative_or_default(const char* name, int default_value) {
+    const char* value = getenv(name);
+    if (!value || value[0] == '\0') {
+        return default_value;
+    }
+
+    char* end = NULL;
+    long parsed = strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < 0 || parsed > 2147483647L) {
         fprintf(stderr, "[WARN] C100: Ignoring invalid %s=%s\n", name, value);
         return default_value;
     }
@@ -397,14 +415,8 @@ static enum ggml_status c100_execute_softmax(ggml_backend_c100_context* ctx,
         return GGML_STATUS_FAILED;
     }
 
-    int softmax_poll_iterations =
-        (int)(elements / C100_SOFTMAX_POLL_ELEMENTS_PER_ITERATION);
-    if (softmax_poll_iterations < C100_SOFTMAX_MIN_POLL_ITERATIONS) {
-        softmax_poll_iterations = C100_SOFTMAX_MIN_POLL_ITERATIONS;
-    }
-    softmax_poll_iterations =
-        c100_env_i32_or_default("C100_SOFTMAX_MAX_POLL_ITERATIONS",
-                                softmax_poll_iterations);
+    const int softmax_poll_iterations =
+        c100_env_i32_nonnegative_or_default("C100_SOFTMAX_MAX_POLL_ITERATIONS", 0);
     if (!c100_poll_cmd_done_with_limit(NULL, softmax_poll_iterations)) {
         fprintf(stderr, "[ERROR] C100: SoftMax execution failed or timeout\n");
         return GGML_STATUS_FAILED;
@@ -792,8 +804,10 @@ static bool c100_poll_cmd_done_with_limit(uint32_t* cycles, int max_iterations) 
     int poll_interval_us = c100_env_i32_or_default("C100_POLL_INTERVAL_US",
                                                    C100_DEFAULT_POLL_INTERVAL_US);
     int iterations = 0;
-    while (iterations < max_iterations) {
+    uint32_t last_status = CMD_STATUS_IDLE;
+    while (max_iterations <= 0 || iterations < max_iterations) {
         uint32_t status = c100_llama_read_cmd_status();
+        last_status = status;
         if (status == CMD_STATUS_DONE) {
             if (cycles) {
                 LlamaResult result;
@@ -813,6 +827,10 @@ static bool c100_poll_cmd_done_with_limit(uint32_t* cycles, int max_iterations) 
         usleep(poll_interval_us);
         iterations++;
     }
+    fprintf(stderr,
+            "[ERROR] C100: command poll timeout after %d iterations "
+            "(interval_us=%d, last_status=%u)\n",
+            iterations, poll_interval_us, last_status);
     return false;  // Timeout
 }
 
@@ -1092,6 +1110,9 @@ static void c100_backend_free(ggml_backend_t backend) {
             c100_context_free(backend->context);
         }
         free(backend);
+    }
+    if (c100_llama_cleanup) {
+        c100_llama_cleanup();
     }
 }
 
@@ -1542,7 +1563,7 @@ static const char* c100_reg_get_name(ggml_backend_reg_t reg) {
 
 static size_t c100_reg_get_device_count(ggml_backend_reg_t reg) {
     (void)reg;
-    return ggml_backend_c100_is_available() ? 1 : 0;
+    return 1;
 }
 
 static ggml_backend_dev_t c100_reg_get_device(ggml_backend_reg_t reg, size_t index) {
@@ -1570,11 +1591,11 @@ static const struct ggml_backend_reg_i c100_reg_i = {
 // ============================================================================
 
 bool ggml_backend_c100_is_available(void) {
-    return get_simulator_instance && get_simulator_instance() != NULL;
+    return get_simulator_instance && c100_llama_init && c100_llama_start;
 }
 
 size_t ggml_backend_c100_get_device_count(void) {
-    return ggml_backend_c100_is_available() ? 1 : 0;
+    return 1;
 }
 
 ggml_backend_reg_t ggml_backend_c100_reg(void) {
@@ -1625,8 +1646,17 @@ ggml_backend_buffer_type_t ggml_backend_c100_local_buffer_type(void) {
 
 ggml_backend_t ggml_backend_c100_init(void) {
     if (!ggml_backend_c100_is_available()) {
-        fprintf(stderr, "[ERROR] C100: Simulator not available\n");
+        fprintf(stderr, "[ERROR] C100: Simulator runtime not linked\n");
         return NULL;
+    }
+    if (get_simulator_instance() == NULL) {
+        if (!c100_llama_init() || !c100_llama_start()) {
+            fprintf(stderr, "[ERROR] C100: Failed to initialize simulator runtime\n");
+            if (c100_llama_cleanup) {
+                c100_llama_cleanup();
+            }
+            return NULL;
+        }
     }
 
     struct ggml_backend_c100_context* ctx = c100_context_create();

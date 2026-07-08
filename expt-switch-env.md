@@ -18,6 +18,22 @@ When set to a truthy value, `LLAMA_C100_RUNTIME` startup enables verbose Spike
 instruction tracing for the SU and VE firmware adapters. This can be very noisy
 and should not be used for normal performance measurements.
 
+### `C100_POLL_INTERVAL_US`
+
+Polling interval, in microseconds, used by the C100 GGML backend while waiting
+for simulator command completion. Default: `1000`.
+
+### `C100_MAX_POLL_ITERATIONS`
+
+Maximum poll iterations for non-SoftMax C100 backend commands. Default:
+`300000`.
+
+### `C100_SOFTMAX_MAX_POLL_ITERATIONS`
+
+Maximum poll iterations for C100 SoftMax commands. Default: unset/`0`, meaning
+no host-side SoftMax poll limit; simulator cycle/run-state limits still apply.
+Set this to a positive value for bounded diagnostic runs.
+
 ### `LLAMA_EXPT_C100_SOFT_MAX`
 
 Enables experimental scheduler pinning of non-flash-attention

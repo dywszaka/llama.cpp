@@ -16,4 +16,8 @@ target_compile_definitions(ggml-c100 PRIVATE
     GGML_COMMIT="c100-integration"
 )
 
+if (TARGET c100_runtime)
+    target_link_libraries(ggml-c100 PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,c100_runtime>)
+endif()
+
 message(STATUS "C100 backend enabled")

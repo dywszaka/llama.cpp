@@ -72,12 +72,24 @@ if [ -z "${LLAMA_IN_DOCKER:-}" ]; then
   fi
   mkdir -p "${ROOT_DIR}/${EXP_REL}/logs" "${ROOT_DIR}/${EXP_REL}/results"
 
+  DOCKER_ENV_ARGS=()
+  for env_name in \
+      C100_MAX_SIMULATION_CYCLES \
+      C100_MAX_POLL_ITERATIONS \
+      C100_POLL_INTERVAL_US \
+      C100_SOFTMAX_MAX_POLL_ITERATIONS; do
+    if [ -n "${!env_name:-}" ]; then
+      DOCKER_ENV_ARGS+=(-e "${env_name}=${!env_name}")
+    fi
+  done
+
   exec docker run --rm --runtime=nvidia --gpus all \
       -v "${docker_root}:${CONTAINER_ROOT}" \
       -w "${CONTAINER_ROOT}" \
       -e LLAMA_IN_DOCKER=1 \
       -e CUDA_VISIBLE_DEVICES=0 \
       -e LLAMA_PPL_MODE="${MODE}" \
+      "${DOCKER_ENV_ARGS[@]}" \
       --entrypoint "" \
       "${RUNTIME_IMAGE}" \
       bash "${CONTAINER_ROOT}/${SELF_REL}" "${MODE}"
