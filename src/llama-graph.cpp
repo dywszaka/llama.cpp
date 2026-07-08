@@ -9,6 +9,7 @@
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
 #include "expt/nvfp4-k-offline-channel-order.h"
+#include "expt/tensor-export-eval.h"
 
 #include <cassert>
 #include <cmath>
@@ -1395,6 +1396,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
 
         kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
+        cb(kq, "kq-softmax", il);
         ggml_soft_max_add_sinks(kq, sinks);
 
         if (!v_trans) {
@@ -1597,6 +1599,16 @@ ggml_tensor * llm_graph_context::build_attn(
         q = ggml_cont(ctx0, ggml_transpose(ctx0, q));
         q = ggml_reshape_3d(ctx0, q, q_head_dim, q_head_kv, q_n_tokens);
         cb(q, "q_offline_k_channel_order", il);
+    }
+
+    if (il == 0 && !cparams.flash_attn && llama_expt::tensor_export_enabled()) {
+        ggml_tensor * q_export = ggml_cont(ctx0, q);
+        cb(q_export, "q-attn", il);
+        ggml_build_forward_expand(gf, q_export);
+
+        ggml_tensor * k_export = ggml_cont(ctx0, ggml_cast(ctx0, k, GGML_TYPE_F32));
+        cb(k_export, "k-attn", il);
+        ggml_build_forward_expand(gf, k_export);
     }
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, v_mla, nullptr, kq_scale, il);

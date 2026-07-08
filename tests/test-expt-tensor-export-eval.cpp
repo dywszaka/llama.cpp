@@ -49,6 +49,72 @@ static void write_f32(const std::string & path, const std::vector<float> & value
     out.write(reinterpret_cast<const char *>(values.data()), (std::streamsize) (values.size() * sizeof(float)));
 }
 
+static void compute_attention_reference(
+        const std::vector<float> & k_data,
+        const std::vector<float> & q_data,
+        const std::vector<float> & mask_data,
+        std::vector<float> & kq_data,
+        std::vector<float> & softmax_data) {
+    struct ggml_init_params params = {
+        /* .mem_size   = */ 16u * 1024u * 1024u,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        throw std::runtime_error("failed to init ggml context");
+    }
+
+    ggml_tensor * k_base = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 4, 2, 1, 1);
+    ggml_tensor * q_base = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 4, 2, 1, 1);
+    ggml_tensor * mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 1, 2, 1, 1);
+    ggml_tensor * k = k_base;
+    ggml_tensor * q = q_base;
+    q = ggml_reshape_4d(ctx, q, q->ne[0], q->ne[1], q->ne[2], 1);
+    q = ggml_permute(ctx, q, 0, 2, 1, 3);
+    k = ggml_permute(ctx, k, 0, 2, 1, 3);
+
+    ggml_tensor * kq = ggml_mul_mat(ctx, k, q);
+    ggml_tensor * probs = ggml_soft_max_ext(ctx, kq, mask, 1.0f, 0.0f);
+
+    ggml_cgraph * gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, kq);
+    ggml_build_forward_expand(gf, probs);
+
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (!backend) {
+        ggml_free(ctx);
+        throw std::runtime_error("failed to init ggml backend");
+    }
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (!buf) {
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        throw std::runtime_error("failed to alloc ggml backend buffer");
+    }
+
+    ggml_backend_tensor_set(k_base, k_data.data(), 0, k_data.size() * sizeof(float));
+    ggml_backend_tensor_set(q_base, q_data.data(), 0, q_data.size() * sizeof(float));
+    ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(float));
+
+    if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        ggml_free(ctx);
+        throw std::runtime_error("failed to compute attention reference");
+    }
+
+    kq_data.resize((size_t) ggml_nelements(kq));
+    softmax_data.resize((size_t) ggml_nelements(probs));
+    ggml_backend_tensor_get(kq, kq_data.data(), 0, kq_data.size() * sizeof(float));
+    ggml_backend_tensor_get(probs, softmax_data.data(), 0, softmax_data.size() * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
+    ggml_free(ctx);
+}
+
 static bool test_metrics() {
     const std::vector<float> a = { 1.0f, 2.0f, 4.0f, -1.0f };
     const std::vector<float> b = { 0.0f, 2.0f, 1.0f,  1.0f };
@@ -290,6 +356,78 @@ static bool test_k_channel_mean_sort_manifest_eval_reports_basis_and_deltas() {
     return true;
 }
 
+static bool test_attention_replay_manifest_eval_reports_small_error() {
+    const std::string dir = temp_dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    const std::vector<float> k_data = {
+         1.0f,  0.0f,  0.5f, -0.5f,
+         0.0f,  1.0f, -0.5f,  0.5f,
+    };
+    const std::vector<float> q_data = {
+         1.0f, -1.0f,
+         0.5f,  0.5f,
+        -0.5f,  1.0f,
+         1.0f,  0.0f,
+    };
+    const std::vector<float> mask_data = {
+         0.0f,
+        -INFINITY,
+    };
+    std::vector<float> kq_data;
+    std::vector<float> softmax_data;
+    compute_attention_reference(k_data, q_data, mask_data, kq_data, softmax_data);
+
+    write_f32(dir + "/k.bin", k_data);
+    write_f32(dir + "/q.bin", q_data);
+    write_f32(dir + "/mask.bin", mask_data);
+    write_f32(dir + "/kq.bin", kq_data);
+    write_f32(dir + "/softmax.bin", softmax_data);
+
+    write_file(dir + "/manifest-attention.json",
+            "{\n"
+            "  \"records\": [\n"
+            "    {\"name\":\"Kcur-0\",\"kind\":\"k\",\"dtype\":\"f32\",\"ne\":[4,2,1,1],\"nb\":[4,16,32,32],\"path\":\"k.bin\",\"byte_size\":32},\n"
+            "    {\"name\":\"Qcur-0\",\"kind\":\"q\",\"dtype\":\"f32\",\"ne\":[4,2,1,1],\"nb\":[4,16,32,32],\"path\":\"q.bin\",\"byte_size\":32},\n"
+            "    {\"name\":\"kq-0\",\"kind\":\"kq\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"kq.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-mask-0\",\"kind\":\"kq_mask\",\"dtype\":\"f32\",\"ne\":[1,2,1,1],\"nb\":[4,4,8,8],\"path\":\"mask.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-softmax-0\",\"kind\":\"kq_softmax\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"softmax.bin\",\"byte_size\":8,\n"
+            "     \"meta\":{\"src_k\":\"Kcur-0\",\"src_q\":\"Qcur-0\",\"src_kq\":\"kq-0\",\"src_mask\":\"kq-mask-0\",\"kq_scale\":\"1\",\"max_bias\":\"0\"}}\n"
+            "  ]\n"
+            "}\n");
+
+    const llama_expt::attention_replay_eval_report report =
+        llama_expt::evaluate_manifest_attention_replay(dir + "/manifest-attention.json");
+    if (!expect(report.records.size() == 1, "expected one attention replay record")) {
+        return false;
+    }
+
+    const llama_expt::attention_replay_report & rr = report.records[0];
+    if (!expect_close(rr.max_abs_err_kq, 0.0, 1e-6, "expected exact KQ replay")) {
+        return false;
+    }
+    if (!expect_close(rr.max_abs_err_softmax, 0.0, 1e-6, "expected exact softmax replay")) {
+        return false;
+    }
+    if (!expect(rr.softmax_metrics.n == softmax_data.size(), "expected softmax metric count")) {
+        return false;
+    }
+
+    const std::string json = llama_expt::format_attention_replay_eval_report_json(report);
+    if (!expect(json.find("\"algorithm\": \"attention_replay\"") != std::string::npos,
+            "expected attention replay algorithm in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"max_abs_err_softmax\": 0.0") != std::string::npos ||
+                json.find("\"max_abs_err_softmax\": 0") != std::string::npos,
+            "expected softmax max_abs_err in JSON")) {
+        return false;
+    }
+
+    return true;
+}
+
 int main() {
     if (!test_metrics()) {
         return 1;
@@ -304,6 +442,9 @@ int main() {
         return 1;
     }
     if (!test_k_channel_mean_sort_manifest_eval_reports_basis_and_deltas()) {
+        return 1;
+    }
+    if (!test_attention_replay_manifest_eval_reports_small_error()) {
         return 1;
     }
 

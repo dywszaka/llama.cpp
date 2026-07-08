@@ -26,20 +26,24 @@ offline quantization evaluation. Default: unset/off.
 
 When set to a non-empty output directory, the decode graph export pass scans
 completed graph nodes and writes supported F32 tensors whose names map to K, Q,
-V, KQ, or KQV records. It creates the directory when needed, writes one
-contiguous raw `.bin` file per tensor, and writes `manifest.json` containing
-`name`, `kind`, `dtype`, `ne`, `nb`, `path`, and `byte_size`. Unsupported dtypes
-are skipped with a warning so normal inference does not fail solely because
-export is enabled. The export hook is narrow and does not change inference math;
-when this switch is unset or empty, no tensors are written.
+V, KQ, post-softmax KQ probabilities, KQ masks, K-attention replay inputs,
+Q-attention replay inputs, or KQV records. It creates the directory when
+needed, writes one raw `.bin` file per exported tensor, and writes
+`manifest.json` containing `name`, `kind`, `dtype`, `ne`, `nb`, `path`,
+`byte_size`, and per-record `meta` when replay/export bookkeeping needs extra
+context. Unsupported dtypes are skipped with a warning so normal inference does
+not fail solely because export is enabled. The export hook is narrow and does
+not change inference math when this switch is unset or empty.
 
 ### `LLAMA_EXPT_TENSOR_EXPORT_KINDS`
 
-Comma-separated tensor kinds to export. Default: `k,q,v,kq,kqv`.
+Comma-separated tensor kinds to export. Default:
+`k,q,v,kq,kqv,kq_softmax,kq_mask,k_attn,q_attn`.
 
-Supported values are `k`, `q`, `v`, `kq`, and `kqv`. This switch only filters
-which recognized graph tensor names are exported; it does not enable export
-without `LLAMA_EXPT_TENSOR_EXPORT_DIR`.
+Supported values are `k`, `q`, `v`, `kq`, `kqv`, `kq_softmax`, `kq_mask`,
+`k_attn`, and `q_attn`. This switch only filters which recognized graph tensor
+names are exported; it does not enable export without
+`LLAMA_EXPT_TENSOR_EXPORT_DIR`.
 
 ## FP8 E4M3 E8M0 32 K-Cache
 

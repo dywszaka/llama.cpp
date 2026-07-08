@@ -8,7 +8,7 @@
 static void print_usage(const char * argv0) {
     std::fprintf(stderr,
             "usage: %s --manifest path/to/manifest.json [--global-scale N] "
-            "[--algorithm nvfp4_ref|nvfp4_k_channel_sort|nvfp4_k_channel_mean_sort] "
+            "[--algorithm nvfp4_ref|attention_replay|nvfp4_k_channel_sort|nvfp4_k_channel_mean_sort] "
             "[--k-channel-sort] [--k-channel-mean-sort]\n",
             argv0);
 }
@@ -49,6 +49,10 @@ int main(int argc, char ** argv) {
         if (algorithm == "nvfp4_ref") {
             const llama_expt::eval_report report = llama_expt::evaluate_manifest(manifest_path, global_scale);
             std::printf("%s\n", llama_expt::format_eval_report_json(report).c_str());
+        } else if (algorithm == "attention_replay") {
+            const llama_expt::attention_replay_eval_report report =
+                llama_expt::evaluate_manifest_attention_replay(manifest_path);
+            std::printf("%s\n", llama_expt::format_attention_replay_eval_report_json(report).c_str());
         } else if (algorithm == "nvfp4_k_channel_sort") {
             const llama_expt::k_channel_sort_eval_report report =
                 llama_expt::evaluate_manifest_k_channel_sort(

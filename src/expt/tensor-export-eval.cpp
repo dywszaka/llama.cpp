@@ -13,6 +13,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <unordered_set>
@@ -48,6 +50,27 @@ std::string sanitize_filename(std::string name) {
     return name;
 }
 
+std::string json_scalar_to_string(const json & value) {
+    if (value.is_string()) {
+        return value.get<std::string>();
+    }
+    if (value.is_boolean()) {
+        return value.get<bool>() ? "true" : "false";
+    }
+    if (value.is_number_integer()) {
+        return std::to_string(value.get<long long>());
+    }
+    if (value.is_number_unsigned()) {
+        return std::to_string(value.get<unsigned long long>());
+    }
+    if (value.is_number_float()) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.9g", value.get<double>());
+        return buf;
+    }
+    return value.dump();
+}
+
 bool has_prefix(const std::string & text, const char * prefix) {
     const size_t n = std::strlen(prefix);
     return text.size() >= n && text.compare(0, n, prefix) == 0;
@@ -58,6 +81,24 @@ std::string tensor_kind(const char * raw_name) {
     const size_t dash = name.find('-');
     const std::string base = dash == std::string::npos ? name : name.substr(0, dash);
 
+    if (base == "kq_softmax" || has_prefix(name, "kq-softmax-")) {
+        return "kq_softmax";
+    }
+    if (base == "kq_mask" || has_prefix(name, "kq-mask-")) {
+        return "kq_mask";
+    }
+    if (base == "k_attn" || has_prefix(name, "k-attn-")) {
+        return "k_attn";
+    }
+    if (base == "q_attn" || has_prefix(name, "q-attn-")) {
+        return "q_attn";
+    }
+    if (name.find("cache_k_l") != std::string::npos) {
+        return "k_attn";
+    }
+    if (name.find("(permuted)") != std::string::npos && has_prefix(name, "Qcur-")) {
+        return "q_attn";
+    }
     if (base == "kqv" || base == "kqv_out" || has_prefix(name, "kqv-")) {
         return "kqv";
     }
@@ -79,7 +120,7 @@ std::string tensor_kind(const char * raw_name) {
 std::set<std::string> selected_kinds() {
     const std::string raw = env_str(ENV_KINDS);
     if (raw.empty()) {
-        return { "k", "q", "v", "kq", "kqv" };
+        return { "k", "q", "v", "kq", "kqv", "kq_softmax", "kq_mask", "k_attn", "q_attn" };
     }
 
     std::set<std::string> out;
@@ -113,6 +154,12 @@ json record_to_json(const tensor_record & rec) {
     obj["nb"] = { rec.nb[0], rec.nb[1], rec.nb[2], rec.nb[3] };
     obj["path"] = rec.path;
     obj["byte_size"] = rec.byte_size;
+    if (!rec.meta.empty()) {
+        obj["meta"] = json::object();
+        for (const auto & kv : rec.meta) {
+            obj["meta"][kv.first] = kv.second;
+        }
+    }
     return obj;
 }
 
@@ -142,6 +189,15 @@ tensor_record record_from_json(const json & obj) {
         rec.ne[i] = ne.at(i).get<int64_t>();
         rec.nb[i] = nb.at(i).get<size_t>();
     }
+    if (obj.contains("meta")) {
+        const auto & meta = obj.at("meta");
+        if (!meta.is_object()) {
+            throw std::runtime_error("manifest record '" + rec.name + "' meta must be an object");
+        }
+        for (auto it = meta.begin(); it != meta.end(); ++it) {
+            rec.meta[it.key()] = json_scalar_to_string(it.value());
+        }
+    }
     return rec;
 }
 
@@ -153,7 +209,7 @@ std::filesystem::path manifest_dir(const std::string & manifest_path) {
     return std::filesystem::current_path();
 }
 
-std::vector<float> load_record_f32(const std::filesystem::path & base_dir, const tensor_record & rec) {
+std::vector<float> load_record_f32(const std::filesystem::path & base_dir, const tensor_record & rec, bool require_nvfp4_row_shape = true) {
     if (rec.dtype != "f32") {
         throw std::runtime_error("record '" + rec.name + "' has incompatible dtype '" + rec.dtype + "', expected f32");
     }
@@ -168,7 +224,7 @@ std::vector<float> load_record_f32(const std::filesystem::path & base_dir, const
     if (n <= 0) {
         throw std::runtime_error("record '" + rec.name + "' has empty shape");
     }
-    if (rec.ne[0] % QK_NVFP4 != 0) {
+    if (require_nvfp4_row_shape && rec.ne[0] % QK_NVFP4 != 0) {
         throw std::runtime_error("record '" + rec.name + "' row shape is not divisible by NVFP4 block size");
     }
     const size_t expected = (size_t) n * sizeof(float);
@@ -196,6 +252,152 @@ std::vector<float> load_record_f32(const std::filesystem::path & base_dir, const
         throw std::runtime_error("failed to read raw tensor '" + path.string() + "'");
     }
     return values;
+}
+
+int64_t tensor_record_nelements(const tensor_record & rec) {
+    int64_t n = 1;
+    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+        if (rec.ne[i] <= 0) {
+            throw std::runtime_error("record '" + rec.name + "' has invalid shape");
+        }
+        n *= rec.ne[i];
+    }
+    return n;
+}
+
+double compute_max_abs_err(const std::vector<float> & reference, const std::vector<float> & actual) {
+    if (reference.size() != actual.size()) {
+        throw std::runtime_error("max_abs_err input size mismatch");
+    }
+
+    double out = 0.0;
+    for (size_t i = 0; i < reference.size(); ++i) {
+        out = std::max(out, std::fabs((double) actual[i] - (double) reference[i]));
+    }
+    return out;
+}
+
+bool tensor_name_is_layer0_attention(const char * name, const char * prefix) {
+    if (!name || !prefix) {
+        return false;
+    }
+    const size_t prefix_len = std::strlen(prefix);
+    return std::strncmp(name, prefix, prefix_len) == 0 && std::strcmp(name + prefix_len, "0") == 0;
+}
+
+bool tensor_name_is_softmax_prob(const char * name) {
+    return tensor_name_is_layer0_attention(name, "kq-softmax-");
+}
+
+bool tensor_name_is_presoftmax_kq(const char * name) {
+    return tensor_name_is_layer0_attention(name, "kq-");
+}
+
+bool tensor_name_is_layer0_q(const char * name) {
+    return tensor_name_is_layer0_attention(name, "Qcur-");
+}
+
+bool tensor_name_is_layer0_k(const char * name) {
+    return tensor_name_is_layer0_attention(name, "Kcur-");
+}
+
+bool tensor_name_is_layer0_k_mask(const char * name) {
+    return tensor_name_is_layer0_attention(name, "kq-mask-");
+}
+
+bool parse_meta_f32(const tensor_record & rec, const char * key, float & out) {
+    const auto it = rec.meta.find(key);
+    if (it == rec.meta.end()) {
+        return false;
+    }
+    char * end = nullptr;
+    errno = 0;
+    const float value = std::strtof(it->second.c_str(), &end);
+    if (errno != 0 || end == it->second.c_str() || (end && *end != '\0')) {
+        throw std::runtime_error("record '" + rec.name + "' has invalid float meta '" + key + "'");
+    }
+    out = value;
+    return true;
+}
+
+std::string require_meta_str(const tensor_record & rec, const char * key) {
+    const auto it = rec.meta.find(key);
+    if (it == rec.meta.end() || it->second.empty()) {
+        throw std::runtime_error("record '" + rec.name + "' is missing meta '" + key + "'");
+    }
+    return it->second;
+}
+
+void replay_attention_scores_and_probs(
+        const std::vector<float> & k_values,
+        const tensor_record & k_record,
+        const std::vector<float> & q_values,
+        const tensor_record & q_record,
+        const std::vector<float> & mask_values,
+        const tensor_record & mask_record,
+        float kq_scale,
+        float max_bias,
+        std::vector<float> & out_kq,
+        std::vector<float> & out_softmax) {
+    struct ggml_init_params params = {
+        /*.mem_size   =*/ 64u * 1024u * 1024u,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+
+    std::unique_ptr<ggml_context, void (*)(ggml_context *)> ctx(ggml_init(params), ggml_free);
+    if (!ctx) {
+        throw std::runtime_error("failed to initialize ggml replay context");
+    }
+
+    ggml_tensor * k_base = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32,
+            k_record.ne[0], k_record.ne[1], k_record.ne[2], k_record.ne[3]);
+    ggml_tensor * q_base = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32,
+            q_record.ne[0], q_record.ne[1], q_record.ne[2], q_record.ne[3]);
+    ggml_tensor * mask = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32,
+            mask_record.ne[0], mask_record.ne[1], mask_record.ne[2], mask_record.ne[3]);
+
+    ggml_tensor * k = k_base;
+    ggml_tensor * q = q_base;
+    const int64_t n_stream = k->ne[3];
+    q = ggml_reshape_4d(ctx.get(), q, q->ne[0], q->ne[1], q->ne[2] / n_stream, n_stream);
+    q = ggml_permute(ctx.get(), q, 0, 2, 1, 3);
+    k = ggml_permute(ctx.get(), k, 0, 2, 1, 3);
+
+    ggml_tensor * kq = ggml_mul_mat(ctx.get(), k, q);
+    ggml_tensor * probs = ggml_soft_max_ext(ctx.get(), kq, mask, kq_scale, max_bias);
+
+    ggml_cgraph * gf = ggml_new_graph(ctx.get());
+    ggml_build_forward_expand(gf, kq);
+    ggml_build_forward_expand(gf, probs);
+
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (backend == nullptr) {
+        throw std::runtime_error("failed to initialize ggml CPU backend for attention replay");
+    }
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx.get(), backend);
+    if (buf == nullptr) {
+        ggml_backend_free(backend);
+        throw std::runtime_error("failed to allocate ggml replay tensors");
+    }
+
+    ggml_backend_tensor_set(k_base, k_values.data(), 0, k_values.size() * sizeof(float));
+    ggml_backend_tensor_set(q_base, q_values.data(), 0, q_values.size() * sizeof(float));
+    ggml_backend_tensor_set(mask, mask_values.data(), 0, mask_values.size() * sizeof(float));
+
+    const ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        throw std::runtime_error("ggml attention replay graph compute failed");
+    }
+
+    out_kq.resize((size_t) ggml_nelements(kq));
+    out_softmax.resize((size_t) ggml_nelements(probs));
+    ggml_backend_tensor_get(kq, out_kq.data(), 0, out_kq.size() * sizeof(float));
+    ggml_backend_tensor_get(probs, out_softmax.data(), 0, out_softmax.size() * sizeof(float));
+    ggml_backend_buffer_free(buf);
+    ggml_backend_free(backend);
 }
 
 std::vector<float> nvfp4_roundtrip(const std::vector<float> & input, float global_scale) {
@@ -319,6 +521,54 @@ void write_manifest(const std::filesystem::path & dir, const std::vector<tensor_
     out << manifest.dump(2) << "\n";
 }
 
+void maybe_fill_attention_record_meta(ggml_tensor * t, tensor_record & rec) {
+    if (!t || t->op != GGML_OP_SOFT_MAX || rec.kind != "kq_softmax") {
+        return;
+    }
+    const char * name = ggml_get_name(t);
+    if (!tensor_name_is_softmax_prob(name)) {
+        return;
+    }
+
+    if (!t->src[0] || !t->src[1]) {
+        return;
+    }
+
+    float kq_scale = 1.0f;
+    float max_bias = 0.0f;
+    std::memcpy(&kq_scale, (const float *) t->op_params + 0, sizeof(float));
+    std::memcpy(&max_bias, (const float *) t->op_params + 1, sizeof(float));
+
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.9g", (double) kq_scale);
+    rec.meta["kq_scale"] = buf;
+    std::snprintf(buf, sizeof(buf), "%.9g", (double) max_bias);
+    rec.meta["max_bias"] = buf;
+    rec.meta["src_kq"] = ggml_get_name(t->src[0]) ? ggml_get_name(t->src[0]) : "";
+    rec.meta["src_mask"] = tensor_name_is_softmax_prob(name)
+            ? "kq-mask-0"
+            : (ggml_get_name(t->src[1]) ? ggml_get_name(t->src[1]) : "");
+    rec.meta["src_k"] = tensor_name_is_softmax_prob(name) ? "k-attn-0" : "";
+    rec.meta["src_q"] = tensor_name_is_softmax_prob(name) ? "q-attn-0" : "";
+    if (rec.meta["src_k"].empty() && t->src[0]->src[0]) {
+        rec.meta["src_k"] = ggml_get_name(t->src[0]->src[0]) ? ggml_get_name(t->src[0]->src[0]) : "";
+    }
+    if (rec.meta["src_q"].empty() && t->src[0]->src[1]) {
+        rec.meta["src_q"] = ggml_get_name(t->src[0]->src[1]) ? ggml_get_name(t->src[0]->src[1]) : "";
+    }
+}
+
+std::string export_record_name_for_tensor(const ggml_tensor * t) {
+    const char * name = ggml_get_name(t);
+    if (t != nullptr && t->op == GGML_OP_NONE && t->type == GGML_TYPE_F32 && name && std::strstr(name, "kq-mask-") != nullptr) {
+        return name;
+    }
+    if (t != nullptr && name && std::strstr(name, "kq-mask-") != nullptr) {
+        return name;
+    }
+    return name ? name : "";
+}
+
 } // namespace
 
 bool tensor_export_enabled() {
@@ -361,6 +611,11 @@ bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf) {
     const auto kinds = selected_kinds();
     std::vector<tensor_record> records;
     std::unordered_set<const ggml_tensor *> seen;
+    struct extra_export_tensor {
+        ggml_tensor * tensor;
+        std::string forced_name;
+    };
+    std::vector<extra_export_tensor> extra_tensors;
 
     ggml_backend_sched_synchronize(sched);
 
@@ -369,6 +624,10 @@ bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf) {
         ggml_tensor * t = ggml_graph_node(gf, i);
         if (!t || !seen.insert(t).second) {
             continue;
+        }
+
+        if (t->op == GGML_OP_SOFT_MAX && tensor_name_is_softmax_prob(ggml_get_name(t)) && t->src[1] != nullptr) {
+            extra_tensors.push_back({ t->src[1], "kq-mask-0" });
         }
 
         const std::string kind = tensor_kind(ggml_get_name(t));
@@ -400,6 +659,57 @@ bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf) {
         }
         rec.byte_size = byte_size;
         rec.path = std::to_string(records.size()) + "-" + sanitize_filename(rec.name) + ".bin";
+        maybe_fill_attention_record_meta(t, rec);
+
+        std::ofstream out(dir / rec.path, std::ios::binary);
+        if (!out) {
+            LLAMA_LOG_ERROR("%s: failed to write tensor '%s'\n", __func__, rec.name.c_str());
+            continue;
+        }
+        out.write(reinterpret_cast<const char *>(bytes.data()), (std::streamsize) bytes.size());
+        if (!out) {
+            LLAMA_LOG_ERROR("%s: failed while writing tensor '%s'\n", __func__, rec.name.c_str());
+            continue;
+        }
+        records.push_back(rec);
+    }
+
+    for (const extra_export_tensor & extra : extra_tensors) {
+        ggml_tensor * t = extra.tensor;
+        if (!t || !seen.insert(t).second) {
+            continue;
+        }
+        const std::string export_name = extra.forced_name.empty() ? ggml_get_name(t) : extra.forced_name;
+        const std::string kind = tensor_kind(export_name.c_str());
+        if (kind.empty() || kinds.count(kind) == 0) {
+            continue;
+        }
+        if (t->type != GGML_TYPE_F32) {
+            LLAMA_LOG_WARN("%s: skipping tensor '%s' kind=%s dtype=%s, only f32 export is supported\n",
+                    __func__, ggml_get_name(t), kind.c_str(), ggml_type_name(t->type));
+            continue;
+        }
+        if (!ggml_is_contiguous(t)) {
+            LLAMA_LOG_WARN("%s: skipping tensor '%s' kind=%s because only contiguous f32 export is supported\n",
+                    __func__, ggml_get_name(t), kind.c_str());
+            continue;
+        }
+
+        const size_t byte_size = tensor_f32_byte_size(t);
+        std::vector<uint8_t> bytes(byte_size);
+        ggml_backend_tensor_get(t, bytes.data(), 0, byte_size);
+
+        tensor_record rec;
+        rec.name = export_name;
+        rec.kind = kind;
+        rec.dtype = "f32";
+        for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+            rec.ne[d] = t->ne[d];
+            rec.nb[d] = t->nb[d];
+        }
+        rec.byte_size = byte_size;
+        rec.path = std::to_string(records.size()) + "-" + sanitize_filename(rec.name) + ".bin";
+        maybe_fill_attention_record_meta(t, rec);
 
         std::ofstream out(dir / rec.path, std::ios::binary);
         if (!out) {
@@ -541,6 +851,72 @@ eval_report evaluate_manifest(const std::string & manifest_path, float global_sc
     return report;
 }
 
+attention_replay_eval_report evaluate_manifest_attention_replay(const std::string & manifest_path) {
+    attention_replay_eval_report report;
+    const std::filesystem::path base_dir = manifest_dir(manifest_path);
+    const std::vector<tensor_record> records = load_manifest_records(manifest_path);
+
+    std::map<std::string, const tensor_record *> by_name;
+    for (const tensor_record & rec : records) {
+        by_name[rec.name] = &rec;
+    }
+
+    for (const tensor_record & rec : records) {
+        if (rec.kind != "kq_softmax" || !tensor_name_is_softmax_prob(rec.name.c_str())) {
+            continue;
+        }
+
+        const std::string k_name = require_meta_str(rec, "src_k");
+        const std::string q_name = require_meta_str(rec, "src_q");
+        const std::string kq_name = require_meta_str(rec, "src_kq");
+        const std::string mask_name = require_meta_str(rec, "src_mask");
+
+        if (by_name.count(k_name) == 0 || by_name.count(q_name) == 0 || by_name.count(kq_name) == 0 || by_name.count(mask_name) == 0) {
+            throw std::runtime_error("attention replay inputs are missing from manifest for '" + rec.name + "'");
+        }
+
+        const tensor_record & k_rec = *by_name.at(k_name);
+        const tensor_record & q_rec = *by_name.at(q_name);
+        const tensor_record & kq_rec = *by_name.at(kq_name);
+        const tensor_record & mask_rec = *by_name.at(mask_name);
+
+        float kq_scale = 1.0f;
+        float max_bias = 0.0f;
+        (void) parse_meta_f32(rec, "kq_scale", kq_scale);
+        (void) parse_meta_f32(rec, "max_bias", max_bias);
+
+        const std::vector<float> k_values = load_record_f32(base_dir, k_rec, false);
+        const std::vector<float> q_values = load_record_f32(base_dir, q_rec, false);
+        const std::vector<float> kq_values = load_record_f32(base_dir, kq_rec, false);
+        const std::vector<float> softmax_values = load_record_f32(base_dir, rec, false);
+        const std::vector<float> mask_values = load_record_f32(base_dir, mask_rec, false);
+
+        std::vector<float> replay_kq;
+        std::vector<float> replay_softmax;
+        replay_attention_scores_and_probs(
+                k_values, k_rec,
+                q_values, q_rec,
+                mask_values, mask_rec,
+                kq_scale, max_bias,
+                replay_kq, replay_softmax);
+
+        attention_replay_report rr;
+        rr.k_record = k_rec;
+        rr.q_record = q_rec;
+        rr.kq_record = kq_rec;
+        rr.softmax_record = rec;
+        rr.kq_metrics = compute_error_metrics(kq_values, replay_kq);
+        rr.softmax_metrics = compute_error_metrics(softmax_values, replay_softmax);
+        rr.max_abs_err_kq = compute_max_abs_err(kq_values, replay_kq);
+        rr.max_abs_err_softmax = compute_max_abs_err(softmax_values, replay_softmax);
+        rr.kq_scale = kq_scale;
+        rr.max_bias = max_bias;
+        report.records.push_back(std::move(rr));
+    }
+
+    return report;
+}
+
 k_channel_sort_eval_report evaluate_manifest_k_channel_sort(
         const std::string & manifest_path,
         k_channel_sort_basis sort_basis,
@@ -631,6 +1007,27 @@ std::string format_eval_report_json(const eval_report & report) {
     root["aggregate_by_kind"] = json::object();
     for (const auto & kv : report.by_kind) {
         root["aggregate_by_kind"][kv.first] = metrics_to_json(kv.second);
+    }
+    return root.dump(2);
+}
+
+std::string format_attention_replay_eval_report_json(const attention_replay_eval_report & report) {
+    json root;
+    root["algorithm"] = "attention_replay";
+    root["records"] = json::array();
+    for (const attention_replay_report & rr : report.records) {
+        json item;
+        item["k_record"] = record_to_json(rr.k_record);
+        item["q_record"] = record_to_json(rr.q_record);
+        item["kq_record"] = record_to_json(rr.kq_record);
+        item["softmax_record"] = record_to_json(rr.softmax_record);
+        item["kq_scale"] = rr.kq_scale;
+        item["max_bias"] = rr.max_bias;
+        item["kq_metrics"] = metrics_to_json(rr.kq_metrics);
+        item["softmax_metrics"] = metrics_to_json(rr.softmax_metrics);
+        item["max_abs_err_kq"] = rr.max_abs_err_kq;
+        item["max_abs_err_softmax"] = rr.max_abs_err_softmax;
+        root["records"].push_back(std::move(item));
     }
     return root.dump(2);
 }

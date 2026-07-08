@@ -19,6 +19,7 @@ struct tensor_record {
     size_t  nb[GGML_MAX_DIMS] = { 0, 0, 0, 0 };
     std::string path;
     size_t byte_size = 0;
+    std::map<std::string, std::string> meta;
 };
 
 struct tensor_error_metrics {
@@ -37,6 +38,23 @@ struct eval_report {
     std::vector<eval_record_report> records;
     std::map<std::string, tensor_error_metrics> by_kind;
     float global_scale = 1.0f;
+};
+
+struct attention_replay_report {
+    tensor_record k_record;
+    tensor_record q_record;
+    tensor_record kq_record;
+    tensor_record softmax_record;
+    tensor_error_metrics kq_metrics;
+    tensor_error_metrics softmax_metrics;
+    double max_abs_err_kq = 0.0;
+    double max_abs_err_softmax = 0.0;
+    float kq_scale = 1.0f;
+    float max_bias = 0.0f;
+};
+
+struct attention_replay_eval_report {
+    std::vector<attention_replay_report> records;
 };
 
 enum class k_channel_sort_basis {
@@ -77,11 +95,13 @@ std::vector<size_t> make_k_channel_order_from_first_row(const std::vector<float>
 std::vector<size_t> make_k_channel_order_from_abs_mean(const std::vector<float> & values, size_t row_size);
 std::vector<tensor_record> load_manifest_records(const std::string & manifest_path);
 eval_report evaluate_manifest(const std::string & manifest_path, float global_scale = 1.0f);
+attention_replay_eval_report evaluate_manifest_attention_replay(const std::string & manifest_path);
 k_channel_sort_eval_report evaluate_manifest_k_channel_sort(
         const std::string & manifest_path,
         k_channel_sort_basis sort_basis = k_channel_sort_basis::FIRST_ROW_ABS,
         float global_scale = 1.0f);
 std::string format_eval_report_json(const eval_report & report);
+std::string format_attention_replay_eval_report_json(const attention_replay_eval_report & report);
 std::string format_k_channel_sort_eval_report_json(const k_channel_sort_eval_report & report);
 
 } // namespace llama_expt
