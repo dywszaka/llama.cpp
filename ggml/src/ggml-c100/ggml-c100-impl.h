@@ -43,6 +43,17 @@ typedef struct ggml_backend_c100_context {
     int use_polling;                  // 1 = poll for completion, 0 = async
     int poll_interval_us;             // Polling interval in microseconds
     int max_poll_iterations;          // Maximum poll iterations before timeout
+
+    // Reusable BF16 staging for F32 SoftMax commands.
+    uint64_t softmax_src_addr;
+    void* softmax_src_host;
+    size_t softmax_src_capacity;
+    uint64_t softmax_dst_addr;
+    void* softmax_dst_host;
+    size_t softmax_dst_capacity;
+    uint64_t softmax_mask_addr;
+    void* softmax_mask_host;
+    size_t softmax_mask_capacity;
 } ggml_backend_c100_context;
 
 // ============================================================================

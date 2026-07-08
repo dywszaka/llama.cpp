@@ -32,13 +32,7 @@ enum {
 #define LLAMA_CMD_ID_PERMUTE 0x15
 #define LLAMA_CMD_ID_CONT 0x16
 
-#define LLAMA_SOFTMAX_EXT_MAGIC 0x534D5854u
 #define LLAMA_SOFTMAX_FLAG_HAS_MASK 0x1u
-#define LLAMA_SOFTMAX_FLAG_F32 0x2u
-#define LLAMA_SOFTMAX_FLAG_SHAPE4D 0x4u
-
-#define LLAMA_SOFTMAX_PACK_U16_PAIR(low, high) \
-    ((((uint32_t)(high) & 0xFFFFu) << 16) | ((uint32_t)(low) & 0xFFFFu))
 
 #define LLAMA_CMD_FLAG_EXT_PARAM 0x1u
 
@@ -64,6 +58,9 @@ enum {
 #define LLAMA_EXT_PARAM_DEBUG_PAYLOAD_VERSION 1u
 #define LLAMA_EXT_PARAM_DEBUG_CHECK_XOR 0xC100E001u
 
+#define LLAMA_SOFTMAX_EXT_PAYLOAD_MAGIC 0x534D5845u
+#define LLAMA_SOFTMAX_EXT_PAYLOAD_VERSION 1u
+
 typedef struct {
     uint32_t magic;
     uint32_t version;
@@ -82,6 +79,13 @@ typedef struct {
     uint32_t value1;
     uint32_t checksum;
 } llama_ext_param_debug_payload_t;
+
+typedef struct {
+    uint32_t payload_magic;
+    uint32_t payload_version;
+    uint32_t mask_ne2;
+    uint32_t mask_ne3;
+} llama_softmax_ext_payload_t;
 
 static inline uint32_t llama_ext_param_debug_checksum(uint32_t value0, uint32_t value1) {
     return value0 ^ value1 ^ LLAMA_EXT_PARAM_DEBUG_CHECK_XOR;
