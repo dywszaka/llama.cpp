@@ -18,6 +18,15 @@ When set to a truthy value, `LLAMA_C100_RUNTIME` startup enables verbose Spike
 instruction tracing for the SU and VE firmware adapters. This can be very noisy
 and should not be used for normal performance measurements.
 
+### `LLAMA_C100_REGISTER_DEVICE`
+
+Registers the optional C100 GGML backend device. Default: unset/off.
+
+When unset, C100 reports zero devices to automatic backend enumeration even when
+the backend is compiled in. Set this to a truthy value for experiments that need
+the C100 device visible to the scheduler, for example `--device C100` or mixed
+device lists.
+
 ### `C100_POLL_INTERVAL_US`
 
 Polling interval, in microseconds, used by the C100 GGML backend while waiting

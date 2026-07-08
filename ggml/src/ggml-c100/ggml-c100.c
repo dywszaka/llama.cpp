@@ -85,6 +85,18 @@ static int c100_env_i32_or_default(const char* name, int default_value) {
     return (int)parsed;
 }
 
+static bool c100_env_flag_enabled(const char* name) {
+    const char* value = getenv(name);
+    if (!value || value[0] == '\0') {
+        return false;
+    }
+    return strcmp(value, "0") != 0 &&
+           strcmp(value, "false") != 0 &&
+           strcmp(value, "FALSE") != 0 &&
+           strcmp(value, "off") != 0 &&
+           strcmp(value, "OFF") != 0;
+}
+
 static int c100_env_i32_nonnegative_or_default(const char* name, int default_value) {
     const char* value = getenv(name);
     if (!value || value[0] == '\0') {
@@ -1563,7 +1575,7 @@ static const char* c100_reg_get_name(ggml_backend_reg_t reg) {
 
 static size_t c100_reg_get_device_count(ggml_backend_reg_t reg) {
     (void)reg;
-    return 1;
+    return c100_env_flag_enabled("LLAMA_C100_REGISTER_DEVICE") ? 1 : 0;
 }
 
 static ggml_backend_dev_t c100_reg_get_device(ggml_backend_reg_t reg, size_t index) {
@@ -1595,7 +1607,7 @@ bool ggml_backend_c100_is_available(void) {
 }
 
 size_t ggml_backend_c100_get_device_count(void) {
-    return 1;
+    return c100_reg_get_device_count(ggml_backend_c100_reg());
 }
 
 ggml_backend_reg_t ggml_backend_c100_reg(void) {
