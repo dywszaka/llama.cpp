@@ -88,6 +88,7 @@ struct k_channel_sort_eval_report {
 
 bool tensor_export_enabled();
 bool tensor_export_maybe_log_config();
+void tensor_export_pin_named_tensor(ggml_tensor * tensor);
 bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf);
 
 tensor_error_metrics compute_error_metrics(const std::vector<float> & reference, const std::vector<float> & actual);

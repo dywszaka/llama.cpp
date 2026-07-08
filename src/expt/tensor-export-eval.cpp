@@ -350,7 +350,7 @@ void replay_attention_scores_and_probs(
         throw std::runtime_error("failed to initialize ggml replay context");
     }
 
-    ggml_tensor * k_base = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32,
+    ggml_tensor * k_base = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F16,
             k_record.ne[0], k_record.ne[1], k_record.ne[2], k_record.ne[3]);
     ggml_tensor * q_base = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32,
             q_record.ne[0], q_record.ne[1], q_record.ne[2], q_record.ne[3]);
@@ -365,6 +365,7 @@ void replay_attention_scores_and_probs(
     k = ggml_permute(ctx.get(), k, 0, 2, 1, 3);
 
     ggml_tensor * kq = ggml_mul_mat(ctx.get(), k, q);
+    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
     ggml_tensor * probs = ggml_soft_max_ext(ctx.get(), kq, mask, kq_scale, max_bias);
 
     ggml_cgraph * gf = ggml_new_graph(ctx.get());
@@ -381,7 +382,10 @@ void replay_attention_scores_and_probs(
         throw std::runtime_error("failed to allocate ggml replay tensors");
     }
 
-    ggml_backend_tensor_set(k_base, k_values.data(), 0, k_values.size() * sizeof(float));
+    std::vector<ggml_fp16_t> k_values_f16(k_values.size());
+    ggml_fp32_to_fp16_row(k_values.data(), k_values_f16.data(), (int64_t) k_values.size());
+
+    ggml_backend_tensor_set(k_base, k_values_f16.data(), 0, k_values_f16.size() * sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(q_base, q_values.data(), 0, q_values.size() * sizeof(float));
     ggml_backend_tensor_set(mask, mask_values.data(), 0, mask_values.size() * sizeof(float));
 
@@ -590,6 +594,22 @@ bool tensor_export_maybe_log_config() {
         LLAMA_LOG_INFO("%s: disabled; %s is unset\n", __func__, ENV_DIR);
     }
     return enabled;
+}
+
+void tensor_export_pin_named_tensor(ggml_tensor * tensor) {
+    if (!tensor_export_enabled() || tensor == nullptr) {
+        return;
+    }
+
+    const char * name = ggml_get_name(tensor);
+    if (tensor_name_is_softmax_prob(name) ||
+            tensor_name_is_presoftmax_kq(name) ||
+            tensor_name_is_layer0_q(name) ||
+            tensor_name_is_layer0_k(name) ||
+            (name && std::strcmp(name, "k-attn-0") == 0) ||
+            (name && std::strcmp(name, "q-attn-0") == 0)) {
+        ggml_set_output(tensor);
+    }
 }
 
 bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf) {

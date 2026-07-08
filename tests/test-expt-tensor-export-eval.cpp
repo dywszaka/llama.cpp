@@ -53,6 +53,18 @@ static void compute_attention_reference(
         const std::vector<float> & k_data,
         const std::vector<float> & q_data,
         const std::vector<float> & mask_data,
+        int64_t k_ne0,
+        int64_t k_ne1,
+        int64_t k_ne2,
+        int64_t k_ne3,
+        int64_t q_ne0,
+        int64_t q_ne1,
+        int64_t q_ne2,
+        int64_t q_ne3,
+        int64_t mask_ne0,
+        int64_t mask_ne1,
+        int64_t mask_ne2,
+        int64_t mask_ne3,
         std::vector<float> & kq_data,
         std::vector<float> & softmax_data) {
     struct ggml_init_params params = {
@@ -66,16 +78,19 @@ static void compute_attention_reference(
         throw std::runtime_error("failed to init ggml context");
     }
 
-    ggml_tensor * k_base = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 4, 2, 1, 1);
-    ggml_tensor * q_base = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 4, 2, 1, 1);
-    ggml_tensor * mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 1, 2, 1, 1);
+    ggml_tensor * k_base = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, k_ne0, k_ne1, k_ne2, k_ne3);
+    ggml_tensor * q_base = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, q_ne0, q_ne1, q_ne2, q_ne3);
+    ggml_tensor * mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, mask_ne0, mask_ne1, mask_ne2, mask_ne3);
+
     ggml_tensor * k = k_base;
     ggml_tensor * q = q_base;
-    q = ggml_reshape_4d(ctx, q, q->ne[0], q->ne[1], q->ne[2], 1);
+    const int64_t n_stream = k->ne[3];
+    q = ggml_reshape_4d(ctx, q, q->ne[0], q->ne[1], q->ne[2] / n_stream, n_stream);
     q = ggml_permute(ctx, q, 0, 2, 1, 3);
     k = ggml_permute(ctx, k, 0, 2, 1, 3);
 
     ggml_tensor * kq = ggml_mul_mat(ctx, k, q);
+    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
     ggml_tensor * probs = ggml_soft_max_ext(ctx, kq, mask, 1.0f, 0.0f);
 
     ggml_cgraph * gf = ggml_new_graph(ctx);
@@ -94,7 +109,10 @@ static void compute_attention_reference(
         throw std::runtime_error("failed to alloc ggml backend buffer");
     }
 
-    ggml_backend_tensor_set(k_base, k_data.data(), 0, k_data.size() * sizeof(float));
+    std::vector<ggml_fp16_t> k_data_f16(k_data.size());
+    ggml_fp32_to_fp16_row(k_data.data(), k_data_f16.data(), (int64_t) k_data.size());
+
+    ggml_backend_tensor_set(k_base, k_data_f16.data(), 0, k_data_f16.size() * sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(q_base, q_data.data(), 0, q_data.size() * sizeof(float));
     ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(float));
 
@@ -140,6 +158,52 @@ static bool test_export_dir_switch_enables_export() {
     }
 
     return expect(enabled, "expected LLAMA_EXPT_TENSOR_EXPORT_DIR to enable export");
+}
+
+static bool test_attention_export_pin_marks_output_tensors() {
+    const char * old_dir = std::getenv("LLAMA_EXPT_TENSOR_EXPORT_DIR");
+    const std::string old_dir_value = old_dir ? old_dir : "";
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", "/tmp/llama-expt-export-pin-test", 1);
+
+    struct ggml_init_params params = {
+        /* .mem_size   = */ 1u * 1024u * 1024u,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        throw std::runtime_error("failed to init ggml context");
+    }
+
+    ggml_tensor * kq = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_set_name(kq, "kq-0");
+    llama_expt::tensor_export_pin_named_tensor(kq);
+
+    ggml_tensor * kcur = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_set_name(kcur, "Kcur-0");
+    llama_expt::tensor_export_pin_named_tensor(kcur);
+
+    ggml_tensor * softmax = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_set_name(softmax, "kq-softmax-0");
+    llama_expt::tensor_export_pin_named_tensor(softmax);
+
+    ggml_tensor * other = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_set_name(other, "kq-1");
+    llama_expt::tensor_export_pin_named_tensor(other);
+
+    const bool ok =
+        expect((kq->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected kq-0 to be pinned as output") &&
+        expect((kcur->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-0 to be pinned as output") &&
+        expect((softmax->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected kq-softmax-0 to be pinned as output") &&
+        expect((other->flags & GGML_TENSOR_FLAG_OUTPUT) == 0, "expected non-layer0 tensor to remain unpinned");
+
+    ggml_free(ctx);
+    if (old_dir) {
+        setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", old_dir_value.c_str(), 1);
+    } else {
+        unsetenv("LLAMA_EXPT_TENSOR_EXPORT_DIR");
+    }
+    return ok;
 }
 
 static bool test_manifest_eval_and_rejection() {
@@ -377,7 +441,12 @@ static bool test_attention_replay_manifest_eval_reports_small_error() {
     };
     std::vector<float> kq_data;
     std::vector<float> softmax_data;
-    compute_attention_reference(k_data, q_data, mask_data, kq_data, softmax_data);
+    compute_attention_reference(
+            k_data, q_data, mask_data,
+            4, 2, 1, 1,
+            4, 2, 1, 1,
+            1, 2, 1, 1,
+            kq_data, softmax_data);
 
     write_f32(dir + "/k.bin", k_data);
     write_f32(dir + "/q.bin", q_data);
@@ -433,6 +502,9 @@ int main() {
         return 1;
     }
     if (!test_export_dir_switch_enables_export()) {
+        return 1;
+    }
+    if (!test_attention_export_pin_marks_output_tensors()) {
         return 1;
     }
     if (!test_manifest_eval_and_rejection()) {

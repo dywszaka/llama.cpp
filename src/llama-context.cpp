@@ -1496,6 +1496,7 @@ llm_graph_cb llama_context::graph_get_cb() const {
             ggml_set_name(cur, name);
         }
 
+        llama_expt::tensor_export_pin_named_tensor(cur);
         llama_log::nvfp4_pin_tensor_if_match(cur, name, il, model.hparams.n_layer);
 
         if (!cparams.offload_kqv) {
