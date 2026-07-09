@@ -132,6 +132,20 @@ if (NOT WIN32)
         WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
         ARGS https://huggingface.co/ggml-org/vocabs ${PROJECT_SOURCE_DIR}/models/ggml-vocabs
     )
+
+    llama_test_cmd(
+        bash
+        NAME test-c100-sim-paths
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-sim-paths.sh
+    )
+
+    llama_test_cmd(
+        bash
+        NAME test-c100-softmax-run-ppl-one-chunk
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-softmax-run-ppl-one-chunk.sh
+    )
 endif()
 
 if (LLAMA_LLGUIDANCE)

@@ -20,7 +20,7 @@ Options:
 Environment:
   IMAGE                 default: allen/llamacpp-builder:latest
   LLAMA_CPP_ROOT        default: current repository root
-  C100_SIM_ROOT         default: sibling ../llama.cpp.sim
+  C100_SIM_ROOT         default: ${LLAMA_CPP_ROOT}/c100-sim
   CUDA_BUILD_DIR        default: $LLAMA_CPP_ROOT/build-cuda
   CUDA_DEBUG_BUILD_DIR  default: $LLAMA_CPP_ROOT/build_cuda_debug
   CUDA_C100_BUILD_DIR   default: $LLAMA_CPP_ROOT/build-cuda-c100
@@ -276,12 +276,12 @@ configure_and_build_cuda_c100() {
     if ! docker run --rm \
         "${gpu_args[@]}" \
         -v "${LLAMA_CPP_DOCKER_ROOT}:/workspace/llama.cpp" \
-        -v "${C100_SIM_DOCKER_ROOT}:/workspace/llama.cpp.sim" \
+        -v "${C100_SIM_DOCKER_ROOT}:/workspace/llama.cpp/c100-sim" \
         -e GIT_CONFIG_COUNT=1 \
         -e GIT_CONFIG_KEY_0=safe.directory \
         -e GIT_CONFIG_VALUE_0=/workspace/llama.cpp \
         -e LLAMA_CPP_ROOT=/workspace/llama.cpp \
-        -e C100_SIM_ROOT=/workspace/llama.cpp.sim \
+        -e C100_SIM_ROOT=/workspace/llama.cpp/c100-sim \
         -e BUILD_DIR="${CUDA_C100_BUILD_DIR}" \
         -e BUILD_TARGET="${BUILD_TARGET}" \
         -e BUILD_TYPE="${BUILD_TYPE}" \
@@ -319,7 +319,7 @@ main() {
 
     IMAGE="${IMAGE:-allen/llamacpp-builder:latest}"
     LLAMA_CPP_ROOT="${LLAMA_CPP_ROOT:-$(repo_root)}"
-    C100_SIM_ROOT="${C100_SIM_ROOT:-$(cd -- "${LLAMA_CPP_ROOT}/.." && pwd)/llama.cpp.sim}"
+    C100_SIM_ROOT="${C100_SIM_ROOT:-${LLAMA_CPP_ROOT}/c100-sim}"
     CUDA_BUILD_DIR="${CUDA_BUILD_DIR:-/workspace/llama.cpp/build-cuda}"
     CUDA_DEBUG_BUILD_DIR="${CUDA_DEBUG_BUILD_DIR:-/workspace/llama.cpp/build_cuda_debug}"
     CUDA_C100_BUILD_DIR="${CUDA_C100_BUILD_DIR:-/workspace/llama.cpp/build-cuda-c100}"

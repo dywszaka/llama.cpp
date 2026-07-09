@@ -1,0 +1,4 @@
+[submodule "c100-sim"]
+	path = c100-sim
+	url = git@192.168.15.5:guangda.dong/llama.cpp.sim.git
+	branch = test-softmax

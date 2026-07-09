@@ -27,6 +27,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SELF_REL="c100-sim-scripts/$(basename -- "${BASH_SOURCE[0]}")"
 BIN_REL="build-cuda-c100/bin/llama-perplexity"
+SIM_REL="c100-sim"
 
 # Path-prefix rewrite from the host-visible repo root to the Docker-daemon-
 # visible source path. Override via env if the layout changes.
@@ -100,6 +101,11 @@ fi
 
 # --- Container mode (LLAMA_IN_DOCKER=1): install missing libs, then run. ---
 cd "${CONTAINER_ROOT}"
+
+if [ ! -d "${CONTAINER_ROOT}/${SIM_REL}" ]; then
+  echo "missing c100 simulator submodule at ${CONTAINER_ROOT}/${SIM_REL}" >&2
+  exit 1
+fi
 
 # Stock CUDA runtime image lacks libcurl4 (direct link dep of llama-perplexity)
 # and libgomp1 (link dep of libggml-cpu). The C100/Spike runtime also invokes

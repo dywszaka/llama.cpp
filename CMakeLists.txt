@@ -90,7 +90,7 @@ option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured
 # C100 simulator integration is optional and default-off. The default path is a
 # convenience cache value only; it is validated only when the runtime is enabled.
 option(LLAMA_C100_RUNTIME "llama: link the optional C100 simulator runtime" OFF)
-set(C100_SIM_ROOT "/home/allen/host_workspace/develop/llama.cpp.sim" CACHE PATH
+set(C100_SIM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/c100-sim" CACHE PATH
     "Path to the C100 simulator repository used by LLAMA_C100_RUNTIME")
 
 # Required for relocatable CMake package

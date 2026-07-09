@@ -8,10 +8,11 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 
 FAKE_ROOT="${TMP_DIR}/root"
 FAKE_BIN_DIR="${FAKE_ROOT}/build-cuda-c100/bin"
+FAKE_SIM_DIR="${FAKE_ROOT}/c100-sim"
 FAKE_TOOLS_DIR="${TMP_DIR}/tools"
 OUTPUT_LOG="${TMP_DIR}/stdout.log"
 
-mkdir -p "${FAKE_BIN_DIR}" "${FAKE_TOOLS_DIR}"
+mkdir -p "${FAKE_BIN_DIR}" "${FAKE_SIM_DIR}" "${FAKE_TOOLS_DIR}"
 
 cat > "${FAKE_BIN_DIR}/llama-perplexity" <<'EOF'
 #!/usr/bin/env bash
