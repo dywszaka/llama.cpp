@@ -1,7 +1,8 @@
 #include "tensor-export-eval.h"
 
 #include "llama-impl.h"
-#include "../llama-kv-cache-nvfp4-outlier-config.h"
+#include "quant_algo/attention-quant-round.h"
+#include "quant_algo/nvfp4-outlier.h"
 
 #include "../../ggml/src/ggml-quants.h"
 
@@ -29,7 +30,6 @@ using json = nlohmann::ordered_json;
 
 constexpr const char * ENV_DIR    = "LLAMA_EXPT_TENSOR_EXPORT_DIR";
 constexpr const char * ENV_KINDS  = "LLAMA_EXPT_TENSOR_EXPORT_KINDS";
-constexpr float NVFP4_GLOBAL_SCALE_MAX = 1344.0f;
 constexpr double KLD_EPSILON = 1e-12;
 
 std::string env_str(const char * name) {
@@ -173,6 +173,37 @@ json metrics_to_json(const tensor_error_metrics & metrics) {
         { "rmse", metrics.rmse },
         { "n", metrics.n },
     };
+}
+
+json quant_round_metadata_to_json(const quant_round_tensor_metadata & metadata) {
+    json out;
+    out["mode"] = metadata.mode;
+    for (const auto & kv : metadata.string_fields) {
+        out[kv.first] = kv.second;
+    }
+    for (const auto & kv : metadata.number_fields) {
+        out[kv.first] = kv.second;
+    }
+    for (const auto & kv : metadata.integer_fields) {
+        out[kv.first] = kv.second;
+    }
+    return out;
+}
+
+double quant_round_number_field_or(
+        const quant_round_tensor_metadata & metadata,
+        const std::string & key,
+        double fallback) {
+    const auto it = metadata.number_fields.find(key);
+    return it == metadata.number_fields.end() ? fallback : it->second;
+}
+
+uint64_t quant_round_integer_field_or(
+        const quant_round_tensor_metadata & metadata,
+        const std::string & key,
+        uint64_t fallback) {
+    const auto it = metadata.integer_fields.find(key);
+    return it == metadata.integer_fields.end() ? fallback : it->second;
 }
 
 tensor_record record_from_json(const json & obj) {
@@ -416,79 +447,6 @@ std::vector<float> nvfp4_roundtrip(const std::vector<float> & input, float globa
     std::vector<float> output(input.size());
     quantize_row_nvfp4_ref(input.data(), quantized.data(), (int64_t) input.size(), global_scale);
     dequantize_row_nvfp4(quantized.data(), output.data(), (int64_t) output.size(), global_scale);
-    return output;
-}
-
-float nvfp4_global_scale_from_amax(float amax) {
-    return (amax > 0.0f && std::isfinite(amax)) ? (NVFP4_GLOBAL_SCALE_MAX / amax) : 0.0f;
-}
-
-std::vector<float> nvfp4_roundtrip_rows_dynamic(
-        const std::vector<float> & input,
-        size_t row_size,
-        std::vector<float> * row_global_scales = nullptr) {
-    if (row_size == 0 || row_size % QK_NVFP4 != 0 || input.size() % row_size != 0) {
-        throw std::runtime_error("NVFP4 dynamic row roundtrip requires rows divisible by block size");
-    }
-
-    const size_t rows = input.size() / row_size;
-    std::vector<float> output(input.size());
-    std::vector<block_nvfp4> quantized(row_size / QK_NVFP4);
-    if (row_global_scales) {
-        row_global_scales->resize(rows);
-    }
-
-    for (size_t row = 0; row < rows; ++row) {
-        const size_t offset = row * row_size;
-        float amax = 0.0f;
-        for (size_t col = 0; col < row_size; ++col) {
-            amax = std::max(amax, std::fabs(input[offset + col]));
-        }
-        const float global_scale = nvfp4_global_scale_from_amax(amax);
-        if (row_global_scales) {
-            (*row_global_scales)[row] = global_scale;
-        }
-        quantize_row_nvfp4_ref(input.data() + offset, quantized.data(), (int64_t) row_size, global_scale);
-        dequantize_row_nvfp4(quantized.data(), output.data() + offset, (int64_t) row_size, global_scale);
-    }
-
-    return output;
-}
-
-std::vector<float> nvfp4_roundtrip_k_outlier(
-        const std::vector<float> & input,
-        size_t row_size,
-        float threshold,
-        float global_scale,
-        size_t & outlier_count) {
-    if (row_size == 0 || row_size % QK_NVFP4 != 0 || input.size() % row_size != 0) {
-        throw std::runtime_error("NVFP4 K outlier roundtrip requires rows divisible by block size");
-    }
-
-    outlier_count = 0;
-    std::vector<float> residual(input);
-    for (float & value : residual) {
-        if (std::fabs(value) > threshold) {
-            value = 0.0f;
-            ++outlier_count;
-        }
-    }
-
-    std::vector<float> output(input.size());
-    std::vector<block_nvfp4> quantized(row_size / QK_NVFP4);
-    const size_t rows = input.size() / row_size;
-    for (size_t row = 0; row < rows; ++row) {
-        const size_t offset = row * row_size;
-        quantize_row_nvfp4_ref(residual.data() + offset, quantized.data(), (int64_t) row_size, global_scale);
-        dequantize_row_nvfp4(quantized.data(), output.data() + offset, (int64_t) row_size, global_scale);
-        for (size_t col = 0; col < row_size; ++col) {
-            const float original = input[offset + col];
-            if (std::fabs(original) > threshold) {
-                output[offset + col] = original;
-            }
-        }
-    }
-
     return output;
 }
 
@@ -1036,8 +994,11 @@ attention_replay_eval_report evaluate_manifest_attention_replay(const std::strin
     return report;
 }
 
-attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_nvfp4_outlier(const std::string & manifest_path) {
+attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_quant_round(
+        const std::string & manifest_path,
+        const attention_quant_round_algo & quant_round_algo) {
     attention_replay_nvfp4_outlier_eval_report report;
+    report.quant_round_algorithm = quant_round_algo.name();
     const std::filesystem::path base_dir = manifest_dir(manifest_path);
     const std::vector<tensor_record> records = load_manifest_records(manifest_path);
 
@@ -1076,22 +1037,19 @@ attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_nv
         const std::vector<float> softmax_values = load_record_f32(base_dir, rec, false);
         const std::vector<float> mask_values = load_record_f32(base_dir, mask_rec, false);
 
-        const float k_threshold = llama_nvfp4_kcache_outlier_layer_threshold(0, false);
-        const float k_global_scale = nvfp4_global_scale_from_amax(k_threshold);
-        size_t k_outlier_count = 0;
-        const std::vector<float> k_nvfp4 = nvfp4_roundtrip_k_outlier(
+        const attention_quant_round_result quant_round = quant_round_algo.quant_round({
+                k_rec,
+                q_rec,
                 k_values,
-                (size_t) k_rec.ne[0],
-                k_threshold,
-                k_global_scale,
-                k_outlier_count);
-        const std::vector<float> q_nvfp4 = nvfp4_roundtrip_rows_dynamic(q_values, (size_t) q_rec.ne[0]);
+                q_values,
+                0,
+        });
 
         std::vector<float> replay_kq;
         std::vector<float> replay_softmax;
         replay_attention_scores_and_probs(
-                k_nvfp4, k_rec,
-                q_nvfp4, q_rec,
+                quant_round.k.values, k_rec,
+                quant_round.q.values, q_rec,
                 mask_values, mask_rec,
                 kq_scale, max_bias,
                 replay_kq, replay_softmax);
@@ -1103,23 +1061,31 @@ attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_nv
         rr.softmax_record = rec;
         rr.kq_metrics = compute_error_metrics(kq_values, replay_kq);
         rr.softmax_metrics = compute_error_metrics(softmax_values, replay_softmax);
-        rr.k_quant_metrics = compute_error_metrics(k_values, k_nvfp4);
-        rr.q_quant_metrics = compute_error_metrics(q_values, q_nvfp4);
+        rr.k_quant_metrics = compute_error_metrics(k_values, quant_round.k.values);
+        rr.q_quant_metrics = compute_error_metrics(q_values, quant_round.q.values);
         rr.softmax_kld = compute_kld_reference_distribution(softmax_values, replay_softmax, KLD_EPSILON);
         rr.kld_epsilon = KLD_EPSILON;
         rr.max_abs_err_kq = compute_max_abs_err(kq_values, replay_kq);
         rr.max_abs_err_softmax = compute_max_abs_err(softmax_values, replay_softmax);
         rr.kq_scale = kq_scale;
         rr.max_bias = max_bias;
-        rr.k_threshold = k_threshold;
-        rr.k_global_scale = k_global_scale;
-        rr.k_outlier_count = k_outlier_count;
-        rr.k_quantization_mode = "nvfp4_outlier_threshold_layer0";
-        rr.q_quantization_mode = "nvfp4_dynamic_row_amax";
+        rr.quant_round_algorithm = quant_round_algo.name();
+        rr.k_quant_round = quant_round.k.metadata;
+        rr.q_quant_round = quant_round.q.metadata;
+        rr.k_threshold = (float) quant_round_number_field_or(quant_round.k.metadata, "threshold", 0.0);
+        rr.k_global_scale = (float) quant_round_number_field_or(quant_round.k.metadata, "global_scale", 0.0);
+        rr.k_outlier_count = (size_t) quant_round_integer_field_or(quant_round.k.metadata, "outlier_count", 0);
+        rr.k_quantization_mode = quant_round.k.metadata.mode;
+        rr.q_quantization_mode = quant_round.q.metadata.mode;
         report.records.push_back(std::move(rr));
     }
 
     return report;
+}
+
+attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_nvfp4_outlier(const std::string & manifest_path) {
+    const std::unique_ptr<attention_quant_round_algo> algo = make_nvfp4_outlier_attention_quant_round_algo();
+    return evaluate_manifest_attention_replay_quant_round(manifest_path, *algo);
 }
 
 k_channel_sort_eval_report evaluate_manifest_k_channel_sort(
@@ -1239,7 +1205,8 @@ std::string format_attention_replay_eval_report_json(const attention_replay_eval
 
 std::string format_attention_replay_nvfp4_outlier_eval_report_json(const attention_replay_nvfp4_outlier_eval_report & report) {
     json root;
-    root["algorithm"] = "attention_replay_nvfp4_outlier";
+    root["algorithm"] = report.algorithm;
+    root["quant_round_algorithm"] = report.quant_round_algorithm;
     root["kld_reference_distribution"] = "exported_softmax";
     root["kld_zero_probability_handling"] = "clamp reference and actual probabilities to epsilon before log";
     root["kld_epsilon"] = KLD_EPSILON;
@@ -1252,17 +1219,11 @@ std::string format_attention_replay_nvfp4_outlier_eval_report_json(const attenti
         item["softmax_record"] = record_to_json(rr.softmax_record);
         item["kq_scale"] = rr.kq_scale;
         item["max_bias"] = rr.max_bias;
-        item["k_quantization"] = {
-            { "mode", rr.k_quantization_mode },
-            { "layer", 0 },
-            { "threshold", rr.k_threshold },
-            { "global_scale", rr.k_global_scale },
-            { "outlier_count", rr.k_outlier_count },
-        };
-        item["q_quantization"] = {
-            { "mode", rr.q_quantization_mode },
-            { "global_scale", "dynamic_per_row_amax" },
-        };
+        item["quant_round_algorithm"] = rr.quant_round_algorithm;
+        item["k_quant_round"] = quant_round_metadata_to_json(rr.k_quant_round);
+        item["q_quant_round"] = quant_round_metadata_to_json(rr.q_quant_round);
+        item["k_quantization"] = quant_round_metadata_to_json(rr.k_quant_round);
+        item["q_quantization"] = quant_round_metadata_to_json(rr.q_quant_round);
         item["k_quant_metrics"] = metrics_to_json(rr.k_quant_metrics);
         item["q_quant_metrics"] = metrics_to_json(rr.q_quant_metrics);
         item["kq_metrics"] = metrics_to_json(rr.kq_metrics);

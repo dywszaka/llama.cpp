@@ -1,4 +1,5 @@
 #include "../src/expt/tensor-export-eval.h"
+#include "../src/expt/quant_algo/attention-quant-round.h"
 
 #include <cmath>
 #include <cstdio>
@@ -48,6 +49,25 @@ static void write_f32(const std::string & path, const std::vector<float> & value
     }
     out.write(reinterpret_cast<const char *>(values.data()), (std::streamsize) (values.size() * sizeof(float)));
 }
+
+class test_identity_attention_quant_round_algo : public llama_expt::attention_quant_round_algo {
+public:
+    std::string name() const override {
+        return "test_identity";
+    }
+
+    llama_expt::attention_quant_round_result quant_round(
+            const llama_expt::attention_quant_round_input & input) const override {
+        llama_expt::attention_quant_round_result result;
+        result.k.values = input.k_values;
+        result.k.metadata.mode = "identity_k";
+        result.k.metadata.integer_fields["layer"] = input.layer;
+        result.q.values = input.q_values;
+        result.q.metadata.mode = "identity_q";
+        result.q.metadata.string_fields["global_scale"] = "none";
+        return result;
+    }
+};
 
 static void compute_attention_reference(
         const std::vector<float> & k_data,
@@ -607,6 +627,92 @@ static bool test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics() 
     return true;
 }
 
+static bool test_attention_replay_quant_round_accepts_custom_algo() {
+    const std::string dir = temp_dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    std::vector<float> k_data(32);
+    std::vector<float> q_data(32);
+    for (size_t i = 0; i < 16; ++i) {
+        k_data[i] = (float) i * 0.125f - 0.75f;
+        k_data[16 + i] = (float) i * -0.0625f + 0.5f;
+        q_data[i] = (float) i * 0.03125f + 0.125f;
+        q_data[16 + i] = (float) i * -0.046875f + 0.25f;
+    }
+
+    const std::vector<float> mask_data = {
+         0.0f,
+        -INFINITY,
+    };
+    std::vector<float> kq_data;
+    std::vector<float> softmax_data;
+    compute_attention_reference(
+            k_data, q_data, mask_data,
+            16, 2, 1, 1,
+            16, 2, 1, 1,
+            1, 2, 1, 1,
+            kq_data, softmax_data);
+
+    write_f32(dir + "/k.bin", k_data);
+    write_f32(dir + "/q.bin", q_data);
+    write_f32(dir + "/mask.bin", mask_data);
+    write_f32(dir + "/kq.bin", kq_data);
+    write_f32(dir + "/softmax.bin", softmax_data);
+
+    write_file(dir + "/manifest-attention.json",
+            "{\n"
+            "  \"records\": [\n"
+            "    {\"name\":\"Kcur-0\",\"kind\":\"k\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"k.bin\",\"byte_size\":128},\n"
+            "    {\"name\":\"Qcur-0\",\"kind\":\"q\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"q.bin\",\"byte_size\":128},\n"
+            "    {\"name\":\"kq-0\",\"kind\":\"kq\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"kq.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-mask-0\",\"kind\":\"kq_mask\",\"dtype\":\"f32\",\"ne\":[1,2,1,1],\"nb\":[4,4,8,8],\"path\":\"mask.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-softmax-0\",\"kind\":\"kq_softmax\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"softmax.bin\",\"byte_size\":8,\n"
+            "     \"meta\":{\"src_k\":\"Kcur-0\",\"src_q\":\"Qcur-0\",\"src_kq\":\"kq-0\",\"src_mask\":\"kq-mask-0\",\"kq_scale\":\"1\",\"max_bias\":\"0\"}}\n"
+            "  ]\n"
+            "}\n");
+
+    const test_identity_attention_quant_round_algo algo;
+    const llama_expt::attention_replay_nvfp4_outlier_eval_report report =
+        llama_expt::evaluate_manifest_attention_replay_quant_round(dir + "/manifest-attention.json", algo);
+    if (!expect(report.records.size() == 1, "expected one custom quant round attention replay record")) {
+        return false;
+    }
+    if (!expect(report.quant_round_algorithm == "test_identity", "expected custom quant round algorithm name")) {
+        return false;
+    }
+
+    const llama_expt::attention_replay_nvfp4_outlier_report & rr = report.records[0];
+    if (!expect_close(rr.max_abs_err_kq, 0.0, 1e-6, "expected exact custom KQ replay")) {
+        return false;
+    }
+    if (!expect_close(rr.max_abs_err_softmax, 0.0, 1e-6, "expected exact custom softmax replay")) {
+        return false;
+    }
+    if (!expect(rr.k_quantization_mode == "identity_k", "expected custom K mode")) {
+        return false;
+    }
+    if (!expect(rr.q_quantization_mode == "identity_q", "expected custom Q mode")) {
+        return false;
+    }
+
+    const std::string json = llama_expt::format_attention_replay_nvfp4_outlier_eval_report_json(report);
+    if (!expect(json.find("\"quant_round_algorithm\": \"test_identity\"") != std::string::npos,
+            "expected custom quant round algorithm in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"k_quant_round\"") != std::string::npos,
+            "expected K quant round metadata in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"mode\": \"identity_q\"") != std::string::npos,
+            "expected custom Q mode in JSON")) {
+        return false;
+    }
+
+    return true;
+}
+
 int main() {
     if (!test_metrics()) {
         return 1;
@@ -630,6 +736,9 @@ int main() {
         return 1;
     }
     if (!test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics()) {
+        return 1;
+    }
+    if (!test_attention_replay_quant_round_accepts_custom_algo()) {
         return 1;
     }
 
