@@ -497,6 +497,116 @@ static bool test_attention_replay_manifest_eval_reports_small_error() {
     return true;
 }
 
+static bool test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics() {
+    const std::string dir = temp_dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    std::vector<float> k_data(32);
+    std::vector<float> q_data(32);
+    for (size_t i = 0; i < 16; ++i) {
+        k_data[i] = (float) i * 0.125f - 0.75f;
+        k_data[16 + i] = (float) i * -0.0625f + 0.5f;
+        q_data[i] = (float) i * 0.03125f + 0.125f;
+        q_data[16 + i] = (float) i * -0.046875f + 0.25f;
+    }
+    k_data[3] = 300.0f;
+    k_data[22] = -320.0f;
+
+    const std::vector<float> mask_data = {
+         0.0f,
+        -INFINITY,
+    };
+    std::vector<float> kq_data;
+    std::vector<float> softmax_data;
+    compute_attention_reference(
+            k_data, q_data, mask_data,
+            16, 2, 1, 1,
+            16, 2, 1, 1,
+            1, 2, 1, 1,
+            kq_data, softmax_data);
+
+    write_f32(dir + "/k.bin", k_data);
+    write_f32(dir + "/q.bin", q_data);
+    write_f32(dir + "/mask.bin", mask_data);
+    write_f32(dir + "/kq.bin", kq_data);
+    write_f32(dir + "/softmax.bin", softmax_data);
+
+    write_file(dir + "/manifest-attention.json",
+            "{\n"
+            "  \"records\": [\n"
+            "    {\"name\":\"Kcur-0\",\"kind\":\"k\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"k.bin\",\"byte_size\":128},\n"
+            "    {\"name\":\"Qcur-0\",\"kind\":\"q\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"q.bin\",\"byte_size\":128},\n"
+            "    {\"name\":\"kq-0\",\"kind\":\"kq\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"kq.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-mask-0\",\"kind\":\"kq_mask\",\"dtype\":\"f32\",\"ne\":[1,2,1,1],\"nb\":[4,4,8,8],\"path\":\"mask.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-softmax-0\",\"kind\":\"kq_softmax\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"softmax.bin\",\"byte_size\":8,\n"
+            "     \"meta\":{\"src_k\":\"Kcur-0\",\"src_q\":\"Qcur-0\",\"src_kq\":\"kq-0\",\"src_mask\":\"kq-mask-0\",\"kq_scale\":\"1\",\"max_bias\":\"0\"}}\n"
+            "  ]\n"
+            "}\n");
+
+    const llama_expt::attention_replay_nvfp4_outlier_eval_report report =
+        llama_expt::evaluate_manifest_attention_replay_nvfp4_outlier(dir + "/manifest-attention.json");
+    if (!expect(report.records.size() == 1, "expected one NVFP4 outlier attention replay record")) {
+        return false;
+    }
+
+    const llama_expt::attention_replay_nvfp4_outlier_report & rr = report.records[0];
+    if (!expect(rr.softmax_metrics.n == softmax_data.size(), "expected softmax metric count")) {
+        return false;
+    }
+    if (!expect(rr.k_outlier_count == 2, "expected K outliers above layer threshold")) {
+        return false;
+    }
+    if (!expect(rr.k_threshold > 0.0f, "expected K threshold metadata")) {
+        return false;
+    }
+    if (!expect(rr.k_global_scale > 0.0f, "expected K global scale metadata")) {
+        return false;
+    }
+    if (!expect(rr.softmax_kld >= 0.0, "expected non-negative softmax KLD")) {
+        return false;
+    }
+    if (!expect_close(rr.kld_epsilon, 1e-12, 0.0, "expected KLD epsilon")) {
+        return false;
+    }
+
+    const std::string json = llama_expt::format_attention_replay_nvfp4_outlier_eval_report_json(report);
+    if (!expect(json.find("\"algorithm\": \"attention_replay_nvfp4_outlier\"") != std::string::npos,
+            "expected NVFP4 outlier attention replay algorithm in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"mode\": \"nvfp4_outlier_threshold_layer0\"") != std::string::npos,
+            "expected K quantization mode in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"mode\": \"nvfp4_dynamic_row_amax\"") != std::string::npos,
+            "expected Q quantization mode in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"threshold\"") != std::string::npos,
+            "expected threshold in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_mse\"") != std::string::npos,
+            "expected softmax MSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_kld\"") != std::string::npos,
+            "expected softmax KLD in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kld_reference_distribution\": \"exported_softmax\"") != std::string::npos,
+            "expected KLD reference distribution in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("clamp reference and actual probabilities to epsilon") != std::string::npos,
+            "expected KLD epsilon clamp documentation in JSON")) {
+        return false;
+    }
+
+    return true;
+}
+
 int main() {
     if (!test_metrics()) {
         return 1;
@@ -517,6 +627,9 @@ int main() {
         return 1;
     }
     if (!test_attention_replay_manifest_eval_reports_small_error()) {
+        return 1;
+    }
+    if (!test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics()) {
         return 1;
     }
 

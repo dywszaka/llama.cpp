@@ -1,6 +1,7 @@
 #include "tensor-export-eval.h"
 
 #include "llama-impl.h"
+#include "../llama-kv-cache-nvfp4-outlier-config.h"
 
 #include "../../ggml/src/ggml-quants.h"
 
@@ -28,6 +29,8 @@ using json = nlohmann::ordered_json;
 
 constexpr const char * ENV_DIR    = "LLAMA_EXPT_TENSOR_EXPORT_DIR";
 constexpr const char * ENV_KINDS  = "LLAMA_EXPT_TENSOR_EXPORT_KINDS";
+constexpr float NVFP4_GLOBAL_SCALE_MAX = 1344.0f;
+constexpr double KLD_EPSILON = 1e-12;
 
 std::string env_str(const char * name) {
     const char * value = std::getenv(name);
@@ -414,6 +417,102 @@ std::vector<float> nvfp4_roundtrip(const std::vector<float> & input, float globa
     quantize_row_nvfp4_ref(input.data(), quantized.data(), (int64_t) input.size(), global_scale);
     dequantize_row_nvfp4(quantized.data(), output.data(), (int64_t) output.size(), global_scale);
     return output;
+}
+
+float nvfp4_global_scale_from_amax(float amax) {
+    return (amax > 0.0f && std::isfinite(amax)) ? (NVFP4_GLOBAL_SCALE_MAX / amax) : 0.0f;
+}
+
+std::vector<float> nvfp4_roundtrip_rows_dynamic(
+        const std::vector<float> & input,
+        size_t row_size,
+        std::vector<float> * row_global_scales = nullptr) {
+    if (row_size == 0 || row_size % QK_NVFP4 != 0 || input.size() % row_size != 0) {
+        throw std::runtime_error("NVFP4 dynamic row roundtrip requires rows divisible by block size");
+    }
+
+    const size_t rows = input.size() / row_size;
+    std::vector<float> output(input.size());
+    std::vector<block_nvfp4> quantized(row_size / QK_NVFP4);
+    if (row_global_scales) {
+        row_global_scales->resize(rows);
+    }
+
+    for (size_t row = 0; row < rows; ++row) {
+        const size_t offset = row * row_size;
+        float amax = 0.0f;
+        for (size_t col = 0; col < row_size; ++col) {
+            amax = std::max(amax, std::fabs(input[offset + col]));
+        }
+        const float global_scale = nvfp4_global_scale_from_amax(amax);
+        if (row_global_scales) {
+            (*row_global_scales)[row] = global_scale;
+        }
+        quantize_row_nvfp4_ref(input.data() + offset, quantized.data(), (int64_t) row_size, global_scale);
+        dequantize_row_nvfp4(quantized.data(), output.data() + offset, (int64_t) row_size, global_scale);
+    }
+
+    return output;
+}
+
+std::vector<float> nvfp4_roundtrip_k_outlier(
+        const std::vector<float> & input,
+        size_t row_size,
+        float threshold,
+        float global_scale,
+        size_t & outlier_count) {
+    if (row_size == 0 || row_size % QK_NVFP4 != 0 || input.size() % row_size != 0) {
+        throw std::runtime_error("NVFP4 K outlier roundtrip requires rows divisible by block size");
+    }
+
+    outlier_count = 0;
+    std::vector<float> residual(input);
+    for (float & value : residual) {
+        if (std::fabs(value) > threshold) {
+            value = 0.0f;
+            ++outlier_count;
+        }
+    }
+
+    std::vector<float> output(input.size());
+    std::vector<block_nvfp4> quantized(row_size / QK_NVFP4);
+    const size_t rows = input.size() / row_size;
+    for (size_t row = 0; row < rows; ++row) {
+        const size_t offset = row * row_size;
+        quantize_row_nvfp4_ref(residual.data() + offset, quantized.data(), (int64_t) row_size, global_scale);
+        dequantize_row_nvfp4(quantized.data(), output.data() + offset, (int64_t) row_size, global_scale);
+        for (size_t col = 0; col < row_size; ++col) {
+            const float original = input[offset + col];
+            if (std::fabs(original) > threshold) {
+                output[offset + col] = original;
+            }
+        }
+    }
+
+    return output;
+}
+
+double compute_kld_reference_distribution(
+        const std::vector<float> & reference,
+        const std::vector<float> & actual,
+        double epsilon) {
+    if (reference.size() != actual.size()) {
+        throw std::runtime_error("KLD input size mismatch");
+    }
+    if (reference.empty()) {
+        throw std::runtime_error("KLD input is empty");
+    }
+    if (!(epsilon > 0.0)) {
+        throw std::runtime_error("KLD epsilon must be positive");
+    }
+
+    double out = 0.0;
+    for (size_t i = 0; i < reference.size(); ++i) {
+        const double p = std::max((double) reference[i], epsilon);
+        const double q = std::max((double) actual[i], epsilon);
+        out += p * std::log(p / q);
+    }
+    return out;
 }
 
 tensor_error_metrics metric_delta(const tensor_error_metrics & sorted, const tensor_error_metrics & baseline) {
@@ -937,6 +1036,92 @@ attention_replay_eval_report evaluate_manifest_attention_replay(const std::strin
     return report;
 }
 
+attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_nvfp4_outlier(const std::string & manifest_path) {
+    attention_replay_nvfp4_outlier_eval_report report;
+    const std::filesystem::path base_dir = manifest_dir(manifest_path);
+    const std::vector<tensor_record> records = load_manifest_records(manifest_path);
+
+    std::map<std::string, const tensor_record *> by_name;
+    for (const tensor_record & rec : records) {
+        by_name[rec.name] = &rec;
+    }
+
+    for (const tensor_record & rec : records) {
+        if (rec.kind != "kq_softmax" || !tensor_name_is_softmax_prob(rec.name.c_str())) {
+            continue;
+        }
+
+        const std::string k_name = require_meta_str(rec, "src_k");
+        const std::string q_name = require_meta_str(rec, "src_q");
+        const std::string kq_name = require_meta_str(rec, "src_kq");
+        const std::string mask_name = require_meta_str(rec, "src_mask");
+
+        if (by_name.count(k_name) == 0 || by_name.count(q_name) == 0 || by_name.count(kq_name) == 0 || by_name.count(mask_name) == 0) {
+            throw std::runtime_error("NVFP4 outlier attention replay inputs are missing from manifest for '" + rec.name + "'");
+        }
+
+        const tensor_record & k_rec = *by_name.at(k_name);
+        const tensor_record & q_rec = *by_name.at(q_name);
+        const tensor_record & kq_rec = *by_name.at(kq_name);
+        const tensor_record & mask_rec = *by_name.at(mask_name);
+
+        float kq_scale = 1.0f;
+        float max_bias = 0.0f;
+        (void) parse_meta_f32(rec, "kq_scale", kq_scale);
+        (void) parse_meta_f32(rec, "max_bias", max_bias);
+
+        const std::vector<float> k_values = load_record_f32(base_dir, k_rec, false);
+        const std::vector<float> q_values = load_record_f32(base_dir, q_rec, false);
+        const std::vector<float> kq_values = load_record_f32(base_dir, kq_rec, false);
+        const std::vector<float> softmax_values = load_record_f32(base_dir, rec, false);
+        const std::vector<float> mask_values = load_record_f32(base_dir, mask_rec, false);
+
+        const float k_threshold = llama_nvfp4_kcache_outlier_layer_threshold(0, false);
+        const float k_global_scale = nvfp4_global_scale_from_amax(k_threshold);
+        size_t k_outlier_count = 0;
+        const std::vector<float> k_nvfp4 = nvfp4_roundtrip_k_outlier(
+                k_values,
+                (size_t) k_rec.ne[0],
+                k_threshold,
+                k_global_scale,
+                k_outlier_count);
+        const std::vector<float> q_nvfp4 = nvfp4_roundtrip_rows_dynamic(q_values, (size_t) q_rec.ne[0]);
+
+        std::vector<float> replay_kq;
+        std::vector<float> replay_softmax;
+        replay_attention_scores_and_probs(
+                k_nvfp4, k_rec,
+                q_nvfp4, q_rec,
+                mask_values, mask_rec,
+                kq_scale, max_bias,
+                replay_kq, replay_softmax);
+
+        attention_replay_nvfp4_outlier_report rr;
+        rr.k_record = k_rec;
+        rr.q_record = q_rec;
+        rr.kq_record = kq_rec;
+        rr.softmax_record = rec;
+        rr.kq_metrics = compute_error_metrics(kq_values, replay_kq);
+        rr.softmax_metrics = compute_error_metrics(softmax_values, replay_softmax);
+        rr.k_quant_metrics = compute_error_metrics(k_values, k_nvfp4);
+        rr.q_quant_metrics = compute_error_metrics(q_values, q_nvfp4);
+        rr.softmax_kld = compute_kld_reference_distribution(softmax_values, replay_softmax, KLD_EPSILON);
+        rr.kld_epsilon = KLD_EPSILON;
+        rr.max_abs_err_kq = compute_max_abs_err(kq_values, replay_kq);
+        rr.max_abs_err_softmax = compute_max_abs_err(softmax_values, replay_softmax);
+        rr.kq_scale = kq_scale;
+        rr.max_bias = max_bias;
+        rr.k_threshold = k_threshold;
+        rr.k_global_scale = k_global_scale;
+        rr.k_outlier_count = k_outlier_count;
+        rr.k_quantization_mode = "nvfp4_outlier_threshold_layer0";
+        rr.q_quantization_mode = "nvfp4_dynamic_row_amax";
+        report.records.push_back(std::move(rr));
+    }
+
+    return report;
+}
+
 k_channel_sort_eval_report evaluate_manifest_k_channel_sort(
         const std::string & manifest_path,
         k_channel_sort_basis sort_basis,
@@ -1045,6 +1230,46 @@ std::string format_attention_replay_eval_report_json(const attention_replay_eval
         item["max_bias"] = rr.max_bias;
         item["kq_metrics"] = metrics_to_json(rr.kq_metrics);
         item["softmax_metrics"] = metrics_to_json(rr.softmax_metrics);
+        item["max_abs_err_kq"] = rr.max_abs_err_kq;
+        item["max_abs_err_softmax"] = rr.max_abs_err_softmax;
+        root["records"].push_back(std::move(item));
+    }
+    return root.dump(2);
+}
+
+std::string format_attention_replay_nvfp4_outlier_eval_report_json(const attention_replay_nvfp4_outlier_eval_report & report) {
+    json root;
+    root["algorithm"] = "attention_replay_nvfp4_outlier";
+    root["kld_reference_distribution"] = "exported_softmax";
+    root["kld_zero_probability_handling"] = "clamp reference and actual probabilities to epsilon before log";
+    root["kld_epsilon"] = KLD_EPSILON;
+    root["records"] = json::array();
+    for (const attention_replay_nvfp4_outlier_report & rr : report.records) {
+        json item;
+        item["k_record"] = record_to_json(rr.k_record);
+        item["q_record"] = record_to_json(rr.q_record);
+        item["kq_record"] = record_to_json(rr.kq_record);
+        item["softmax_record"] = record_to_json(rr.softmax_record);
+        item["kq_scale"] = rr.kq_scale;
+        item["max_bias"] = rr.max_bias;
+        item["k_quantization"] = {
+            { "mode", rr.k_quantization_mode },
+            { "layer", 0 },
+            { "threshold", rr.k_threshold },
+            { "global_scale", rr.k_global_scale },
+            { "outlier_count", rr.k_outlier_count },
+        };
+        item["q_quantization"] = {
+            { "mode", rr.q_quantization_mode },
+            { "global_scale", "dynamic_per_row_amax" },
+        };
+        item["k_quant_metrics"] = metrics_to_json(rr.k_quant_metrics);
+        item["q_quant_metrics"] = metrics_to_json(rr.q_quant_metrics);
+        item["kq_metrics"] = metrics_to_json(rr.kq_metrics);
+        item["softmax_metrics"] = metrics_to_json(rr.softmax_metrics);
+        item["softmax_mse"] = rr.softmax_metrics.mse;
+        item["softmax_kld"] = rr.softmax_kld;
+        item["kld_epsilon"] = rr.kld_epsilon;
         item["max_abs_err_kq"] = rr.max_abs_err_kq;
         item["max_abs_err_softmax"] = rr.max_abs_err_softmax;
         root["records"].push_back(std::move(item));

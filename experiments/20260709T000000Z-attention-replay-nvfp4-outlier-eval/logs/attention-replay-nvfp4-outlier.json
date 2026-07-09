@@ -1,0 +1,136 @@
+{
+  "algorithm": "attention_replay_nvfp4_outlier",
+  "kld_reference_distribution": "exported_softmax",
+  "kld_zero_probability_handling": "clamp reference and actual probabilities to epsilon before log",
+  "kld_epsilon": 1e-12,
+  "records": [
+    {
+      "k_record": {
+        "name": "k-attn-0",
+        "kind": "k_attn",
+        "dtype": "f32",
+        "ne": [
+          128,
+          8,
+          16,
+          1
+        ],
+        "nb": [
+          4,
+          512,
+          4096,
+          65536
+        ],
+        "path": "13-k-attn-0.bin",
+        "byte_size": 65536
+      },
+      "q_record": {
+        "name": "q-attn-0",
+        "kind": "q_attn",
+        "dtype": "f32",
+        "ne": [
+          128,
+          32,
+          9,
+          1
+        ],
+        "nb": [
+          4,
+          512,
+          16384,
+          147456
+        ],
+        "path": "11-q-attn-0.bin",
+        "byte_size": 147456
+      },
+      "kq_record": {
+        "name": "kq-0",
+        "kind": "kq",
+        "dtype": "f32",
+        "ne": [
+          16,
+          9,
+          32,
+          1
+        ],
+        "nb": [
+          4,
+          64,
+          576,
+          18432
+        ],
+        "path": "15-kq-0.bin",
+        "byte_size": 18432
+      },
+      "softmax_record": {
+        "name": "kq-softmax-0",
+        "kind": "kq_softmax",
+        "dtype": "f32",
+        "ne": [
+          16,
+          9,
+          32,
+          1
+        ],
+        "nb": [
+          4,
+          64,
+          576,
+          18432
+        ],
+        "path": "16-kq-softmax-0.bin",
+        "byte_size": 18432,
+        "meta": {
+          "kq_scale": "0.0883883461",
+          "max_bias": "0",
+          "src_k": "k-attn-0",
+          "src_kq": "kq-0",
+          "src_mask": "kq-mask-0",
+          "src_q": "q-attn-0"
+        }
+      },
+      "kq_scale": 0.0883883461356163,
+      "max_bias": 0.0,
+      "k_quantization": {
+        "mode": "nvfp4_outlier_threshold_layer0",
+        "layer": 0,
+        "threshold": 256.0,
+        "global_scale": 5.25,
+        "outlier_count": 0
+      },
+      "q_quantization": {
+        "mode": "nvfp4_dynamic_row_amax",
+        "global_scale": "dynamic_per_row_amax"
+      },
+      "k_quant_metrics": {
+        "mae": 0.14710672395813162,
+        "mse": 0.21074717948121421,
+        "rmse": 0.4590720852776982,
+        "n": 16384
+      },
+      "q_quant_metrics": {
+        "mae": 0.10145506637082057,
+        "mse": 0.02037854752535458,
+        "rmse": 0.14275345013468005,
+        "n": 36864
+      },
+      "kq_metrics": {
+        "mae": 4.300628274342873,
+        "mse": 72.05224747454021,
+        "rmse": 8.488359527879354,
+        "n": 4608
+      },
+      "softmax_metrics": {
+        "mae": 0.014775247736386162,
+        "mse": 0.002568306835889052,
+        "rmse": 0.05067846520849908,
+        "n": 4608
+      },
+      "softmax_mse": 0.002568306835889052,
+      "softmax_kld": 23.936649096022784,
+      "kld_epsilon": 1e-12,
+      "max_abs_err_kq": 63.4787483215332,
+      "max_abs_err_softmax": 0.5944187194108963
+    }
+  ]
+}
