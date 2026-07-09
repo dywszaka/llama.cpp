@@ -44,6 +44,7 @@ case "${MODE}" in
     TIME_REL="${EXP_REL}/results/time.txt"
     DEVICE_ARGS=(--device CUDA0)
     SET_C100_SOFTMAX=0
+    REGISTER_C100_DEVICE=0
     SCHED_DEBUG=0
     REQUIRE_PPL=0
     ;;
@@ -53,6 +54,7 @@ case "${MODE}" in
     TIME_REL="${EXP_REL}/results/time-c100-softmax.txt"
     DEVICE_ARGS=(--device CUDA0,C100 --tensor-split 1,0)
     SET_C100_SOFTMAX=1
+    REGISTER_C100_DEVICE=1
     SCHED_DEBUG=2
     REQUIRE_PPL=1
     ;;
@@ -88,6 +90,7 @@ if [ -z "${LLAMA_IN_DOCKER:-}" ]; then
       -w "${CONTAINER_ROOT}" \
       -e LLAMA_IN_DOCKER=1 \
       -e CUDA_VISIBLE_DEVICES=0 \
+      -e LLAMA_C100_REGISTER_DEVICE="${REGISTER_C100_DEVICE}" \
       -e LLAMA_PPL_MODE="${MODE}" \
       "${DOCKER_ENV_ARGS[@]}" \
       --entrypoint "" \
@@ -133,6 +136,7 @@ status=0
   export CUDA_VISIBLE_DEVICES=0
   export PROJECT_ROOT="${CONTAINER_ROOT}/build-cuda-c100"
   export LD_LIBRARY_PATH="${CONTAINER_ROOT}/build-cuda-c100/bin:/usr/local/cuda/lib64"
+  export LLAMA_C100_REGISTER_DEVICE="${REGISTER_C100_DEVICE}"
   if [ "${SET_C100_SOFTMAX}" -eq 1 ]; then
     export LLAMA_EXPT_C100_SOFT_MAX=1
   else
