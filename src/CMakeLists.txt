@@ -39,6 +39,8 @@ add_library(llama
             expt/nvfp4-k-offline-channel-order.cpp
             expt/nvfp4-k-offline-channel-order.h
             expt/quant_algo/attention-quant-round.h
+            expt/quant_algo/fp8-e4m3-e8m0.cpp
+            expt/quant_algo/fp8-e4m3-e8m0.h
             expt/quant_algo/nvfp4-outlier.cpp
             expt/quant_algo/nvfp4-outlier.h
             expt/tensor-export-eval.cpp

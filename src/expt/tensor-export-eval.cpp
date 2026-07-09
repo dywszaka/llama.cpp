@@ -2,6 +2,7 @@
 
 #include "llama-impl.h"
 #include "quant_algo/attention-quant-round.h"
+#include "quant_algo/fp8-e4m3-e8m0.h"
 #include "quant_algo/nvfp4-outlier.h"
 
 #include "../../ggml/src/ggml-quants.h"
@@ -833,6 +834,28 @@ tensor_error_metrics compute_error_metrics(const std::vector<float> & reference,
     return out;
 }
 
+double compute_nmse(const std::vector<float> & reference, const std::vector<float> & actual) {
+    if (reference.size() != actual.size()) {
+        throw std::runtime_error("NMSE input size mismatch");
+    }
+    if (reference.empty()) {
+        throw std::runtime_error("NMSE input is empty");
+    }
+
+    double sum_sq_err = 0.0;
+    double sum_sq_ref = 0.0;
+    for (size_t i = 0; i < reference.size(); ++i) {
+        const double ref = (double) reference[i];
+        const double diff = (double) actual[i] - ref;
+        sum_sq_err += diff * diff;
+        sum_sq_ref += ref * ref;
+    }
+    if (sum_sq_ref == 0.0) {
+        return sum_sq_err == 0.0 ? 0.0 : std::numeric_limits<double>::infinity();
+    }
+    return sum_sq_err / sum_sq_ref;
+}
+
 std::vector<size_t> make_k_channel_order_from_first_row(const std::vector<float> & values, size_t row_size) {
     if (row_size == 0 || values.size() < row_size) {
         throw std::runtime_error("K channel sort requires a non-empty first row");
@@ -986,6 +1009,7 @@ attention_replay_eval_report evaluate_manifest_attention_replay(const std::strin
         rr.softmax_metrics = compute_error_metrics(softmax_values, replay_softmax);
         rr.max_abs_err_kq = compute_max_abs_err(kq_values, replay_kq);
         rr.max_abs_err_softmax = compute_max_abs_err(softmax_values, replay_softmax);
+        rr.softmax_nmse = compute_nmse(softmax_values, replay_softmax);
         rr.kq_scale = kq_scale;
         rr.max_bias = max_bias;
         report.records.push_back(std::move(rr));
@@ -1067,6 +1091,7 @@ attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_qu
         rr.kld_epsilon = KLD_EPSILON;
         rr.max_abs_err_kq = compute_max_abs_err(kq_values, replay_kq);
         rr.max_abs_err_softmax = compute_max_abs_err(softmax_values, replay_softmax);
+        rr.softmax_nmse = compute_nmse(softmax_values, replay_softmax);
         rr.kq_scale = kq_scale;
         rr.max_bias = max_bias;
         rr.quant_round_algorithm = quant_round_algo.name();
@@ -1086,6 +1111,13 @@ attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_qu
 attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_nvfp4_outlier(const std::string & manifest_path) {
     const std::unique_ptr<attention_quant_round_algo> algo = make_nvfp4_outlier_attention_quant_round_algo();
     return evaluate_manifest_attention_replay_quant_round(manifest_path, *algo);
+}
+
+attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_fp8_e4m3_e8m0(const std::string & manifest_path) {
+    const std::unique_ptr<attention_quant_round_algo> algo = make_fp8_e4m3_e8m0_attention_quant_round_algo();
+    attention_replay_nvfp4_outlier_eval_report report = evaluate_manifest_attention_replay_quant_round(manifest_path, *algo);
+    report.algorithm = "attention_replay_fp8_e4m3_e8m0";
+    return report;
 }
 
 k_channel_sort_eval_report evaluate_manifest_k_channel_sort(
@@ -1196,6 +1228,7 @@ std::string format_attention_replay_eval_report_json(const attention_replay_eval
         item["max_bias"] = rr.max_bias;
         item["kq_metrics"] = metrics_to_json(rr.kq_metrics);
         item["softmax_metrics"] = metrics_to_json(rr.softmax_metrics);
+        item["softmax_nmse"] = rr.softmax_nmse;
         item["max_abs_err_kq"] = rr.max_abs_err_kq;
         item["max_abs_err_softmax"] = rr.max_abs_err_softmax;
         root["records"].push_back(std::move(item));
@@ -1229,6 +1262,7 @@ std::string format_attention_replay_nvfp4_outlier_eval_report_json(const attenti
         item["kq_metrics"] = metrics_to_json(rr.kq_metrics);
         item["softmax_metrics"] = metrics_to_json(rr.softmax_metrics);
         item["softmax_mse"] = rr.softmax_metrics.mse;
+        item["softmax_nmse"] = rr.softmax_nmse;
         item["softmax_kld"] = rr.softmax_kld;
         item["kld_epsilon"] = rr.kld_epsilon;
         item["max_abs_err_kq"] = rr.max_abs_err_kq;

@@ -160,6 +160,7 @@ static bool test_metrics() {
     return expect_close(m.mae, 1.5, 1e-12, "MAE mismatch") &&
            expect_close(m.mse, 3.5, 1e-12, "MSE mismatch") &&
            expect_close(m.rmse, std::sqrt(3.5), 1e-12, "RMSE mismatch") &&
+           expect_close(llama_expt::compute_nmse(a, b), 14.0 / 22.0, 1e-12, "NMSE mismatch") &&
            expect(m.n == 4, "metric count mismatch");
 }
 
@@ -502,6 +503,9 @@ static bool test_attention_replay_manifest_eval_reports_small_error() {
     if (!expect(rr.softmax_metrics.n == softmax_data.size(), "expected softmax metric count")) {
         return false;
     }
+    if (!expect_close(rr.softmax_nmse, 0.0, 1e-12, "expected exact softmax NMSE")) {
+        return false;
+    }
 
     const std::string json = llama_expt::format_attention_replay_eval_report_json(report);
     if (!expect(json.find("\"algorithm\": \"attention_replay\"") != std::string::npos,
@@ -511,6 +515,10 @@ static bool test_attention_replay_manifest_eval_reports_small_error() {
     if (!expect(json.find("\"max_abs_err_softmax\": 0.0") != std::string::npos ||
                 json.find("\"max_abs_err_softmax\": 0") != std::string::npos,
             "expected softmax max_abs_err in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_nmse\"") != std::string::npos,
+            "expected softmax NMSE in JSON")) {
         return false;
     }
 
@@ -586,6 +594,9 @@ static bool test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics() 
     if (!expect(rr.softmax_kld >= 0.0, "expected non-negative softmax KLD")) {
         return false;
     }
+    if (!expect(rr.softmax_nmse >= 0.0, "expected non-negative softmax NMSE")) {
+        return false;
+    }
     if (!expect_close(rr.kld_epsilon, 1e-12, 0.0, "expected KLD epsilon")) {
         return false;
     }
@@ -609,6 +620,10 @@ static bool test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics() 
     }
     if (!expect(json.find("\"softmax_mse\"") != std::string::npos,
             "expected softmax MSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_nmse\"") != std::string::npos,
+            "expected softmax NMSE in JSON")) {
         return false;
     }
     if (!expect(json.find("\"softmax_kld\"") != std::string::npos,
@@ -713,6 +728,108 @@ static bool test_attention_replay_quant_round_accepts_custom_algo() {
     return true;
 }
 
+static bool test_attention_replay_fp8_e4m3_e8m0_reports_metrics() {
+    const std::string dir = temp_dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    std::vector<float> k_data(64);
+    std::vector<float> q_data(64);
+    for (size_t i = 0; i < 32; ++i) {
+        k_data[i] = (float) i * 0.0625f - 1.0f;
+        k_data[32 + i] = (float) i * -0.03125f + 0.75f;
+        q_data[i] = (float) i * 0.046875f + 0.0625f;
+        q_data[32 + i] = (float) i * -0.0390625f + 0.5f;
+    }
+
+    const std::vector<float> mask_data = {
+         0.0f,
+        -INFINITY,
+    };
+    std::vector<float> kq_data;
+    std::vector<float> softmax_data;
+    compute_attention_reference(
+            k_data, q_data, mask_data,
+            32, 2, 1, 1,
+            32, 2, 1, 1,
+            1, 2, 1, 1,
+            kq_data, softmax_data);
+
+    write_f32(dir + "/k.bin", k_data);
+    write_f32(dir + "/q.bin", q_data);
+    write_f32(dir + "/mask.bin", mask_data);
+    write_f32(dir + "/kq.bin", kq_data);
+    write_f32(dir + "/softmax.bin", softmax_data);
+
+    write_file(dir + "/manifest-attention.json",
+            "{\n"
+            "  \"records\": [\n"
+            "    {\"name\":\"Kcur-0\",\"kind\":\"k\",\"dtype\":\"f32\",\"ne\":[32,2,1,1],\"nb\":[4,128,256,256],\"path\":\"k.bin\",\"byte_size\":256},\n"
+            "    {\"name\":\"Qcur-0\",\"kind\":\"q\",\"dtype\":\"f32\",\"ne\":[32,2,1,1],\"nb\":[4,128,256,256],\"path\":\"q.bin\",\"byte_size\":256},\n"
+            "    {\"name\":\"kq-0\",\"kind\":\"kq\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"kq.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-mask-0\",\"kind\":\"kq_mask\",\"dtype\":\"f32\",\"ne\":[1,2,1,1],\"nb\":[4,4,8,8],\"path\":\"mask.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-softmax-0\",\"kind\":\"kq_softmax\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"softmax.bin\",\"byte_size\":8,\n"
+            "     \"meta\":{\"src_k\":\"Kcur-0\",\"src_q\":\"Qcur-0\",\"src_kq\":\"kq-0\",\"src_mask\":\"kq-mask-0\",\"kq_scale\":\"1\",\"max_bias\":\"0\"}}\n"
+            "  ]\n"
+            "}\n");
+
+    const llama_expt::attention_replay_nvfp4_outlier_eval_report report =
+        llama_expt::evaluate_manifest_attention_replay_fp8_e4m3_e8m0(dir + "/manifest-attention.json");
+    if (!expect(report.records.size() == 1, "expected one FP8 attention replay record")) {
+        return false;
+    }
+    if (!expect(report.algorithm == "attention_replay_fp8_e4m3_e8m0", "expected FP8 report algorithm")) {
+        return false;
+    }
+    if (!expect(report.quant_round_algorithm == "fp8_e4m3_e8m0_32", "expected FP8 quant round algorithm")) {
+        return false;
+    }
+
+    const llama_expt::attention_replay_nvfp4_outlier_report & rr = report.records[0];
+    if (!expect(rr.softmax_metrics.n == softmax_data.size(), "expected FP8 softmax metric count")) {
+        return false;
+    }
+    if (!expect(rr.softmax_metrics.mse >= 0.0, "expected non-negative FP8 softmax MSE")) {
+        return false;
+    }
+    if (!expect(rr.softmax_nmse >= 0.0, "expected non-negative FP8 softmax NMSE")) {
+        return false;
+    }
+    if (!expect(rr.softmax_kld >= 0.0, "expected non-negative FP8 softmax KLD")) {
+        return false;
+    }
+    if (!expect(rr.k_quantization_mode == "fp8_e4m3_e8m0_32_k", "expected FP8 K mode")) {
+        return false;
+    }
+    if (!expect(rr.q_quantization_mode == "fp8_e4m3_e8m0_32_q", "expected FP8 Q mode")) {
+        return false;
+    }
+
+    const std::string json = llama_expt::format_attention_replay_nvfp4_outlier_eval_report_json(report);
+    if (!expect(json.find("\"algorithm\": \"attention_replay_fp8_e4m3_e8m0\"") != std::string::npos,
+            "expected FP8 algorithm in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"quant_round_algorithm\": \"fp8_e4m3_e8m0_32\"") != std::string::npos,
+            "expected FP8 quant round algorithm in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_mse\"") != std::string::npos,
+            "expected FP8 softmax MSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_nmse\"") != std::string::npos,
+            "expected FP8 softmax NMSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_kld\"") != std::string::npos,
+            "expected FP8 softmax KLD in JSON")) {
+        return false;
+    }
+
+    return true;
+}
+
 int main() {
     if (!test_metrics()) {
         return 1;
@@ -739,6 +856,9 @@ int main() {
         return 1;
     }
     if (!test_attention_replay_quant_round_accepts_custom_algo()) {
+        return 1;
+    }
+    if (!test_attention_replay_fp8_e4m3_e8m0_reports_metrics()) {
         return 1;
     }
 
