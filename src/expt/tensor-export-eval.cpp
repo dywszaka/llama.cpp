@@ -297,8 +297,8 @@ bool tensor_name_is_layer0_q(const char * name) {
     return tensor_name_is_layer0_attention(name, "Qcur-");
 }
 
-bool tensor_name_is_layer0_k(const char * name) {
-    return tensor_name_is_layer0_attention(name, "Kcur-");
+bool tensor_name_is_kcur(const char * name) {
+    return name && std::strncmp(name, "Kcur", std::strlen("Kcur")) == 0;
 }
 
 bool tensor_name_is_layer0_k_mask(const char * name) {
@@ -602,10 +602,11 @@ void tensor_export_pin_named_tensor(ggml_tensor * tensor) {
     }
 
     const char * name = ggml_get_name(tensor);
+    const bool pin_kcur = selected_kinds().count("k") != 0 && tensor_name_is_kcur(name);
     if (tensor_name_is_softmax_prob(name) ||
             tensor_name_is_presoftmax_kq(name) ||
             tensor_name_is_layer0_q(name) ||
-            tensor_name_is_layer0_k(name) ||
+            pin_kcur ||
             (name && std::strcmp(name, "k-attn-0") == 0) ||
             (name && std::strcmp(name, "q-attn-0") == 0)) {
         ggml_set_output(tensor);
