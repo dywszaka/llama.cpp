@@ -184,7 +184,10 @@ static bool test_export_dir_switch_enables_export() {
 static bool test_attention_export_pin_marks_output_tensors() {
     const char * old_dir = std::getenv("LLAMA_EXPT_TENSOR_EXPORT_DIR");
     const std::string old_dir_value = old_dir ? old_dir : "";
+    const char * old_kinds = std::getenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS");
+    const std::string old_kinds_value = old_kinds ? old_kinds : "";
     setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", "/tmp/llama-expt-export-pin-test", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS", "k", 1);
 
     struct ggml_init_params params = {
         /* .mem_size   = */ 1u * 1024u * 1024u,
@@ -196,33 +199,52 @@ static bool test_attention_export_pin_marks_output_tensors() {
         throw std::runtime_error("failed to init ggml context");
     }
 
-    ggml_tensor * kq = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
-    ggml_set_name(kq, "kq-0");
-    llama_expt::tensor_export_pin_named_tensor(kq);
+    const auto make_and_pin = [&](const char * name) {
+        ggml_tensor * tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+        ggml_set_name(tensor, name);
+        llama_expt::tensor_export_pin_named_tensor(tensor);
+        return tensor;
+    };
 
-    ggml_tensor * kcur = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
-    ggml_set_name(kcur, "Kcur-0");
-    llama_expt::tensor_export_pin_named_tensor(kcur);
+    ggml_tensor * kq = make_and_pin("kq-0");
+    ggml_tensor * kcur0 = make_and_pin("Kcur-0");
+    ggml_tensor * kcur1 = make_and_pin("Kcur-1");
+    ggml_tensor * kcur12 = make_and_pin("Kcur-12");
+    ggml_tensor * softmax = make_and_pin("kq-softmax-0");
+    ggml_tensor * other = make_and_pin("kq-1");
+    ggml_tensor * kcur_mm = make_and_pin("Kcur-mm-0");
+    ggml_tensor * kcur_scaled = make_and_pin("Kcur-scaled-0");
+    ggml_tensor * kcur_normed = make_and_pin("Kcur_normed-0");
+    ggml_tensor * kcur_post_rope = make_and_pin("Kcur-post-rope-0");
+    ggml_tensor * kcur_view = make_and_pin("Kcur-0-view");
 
-    ggml_tensor * softmax = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
-    ggml_set_name(softmax, "kq-softmax-0");
-    llama_expt::tensor_export_pin_named_tensor(softmax);
-
-    ggml_tensor * other = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
-    ggml_set_name(other, "kq-1");
-    llama_expt::tensor_export_pin_named_tensor(other);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS", "q", 1);
+    ggml_tensor * kcur_without_k_kind = make_and_pin("Kcur-7");
 
     const bool ok =
         expect((kq->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected kq-0 to be pinned as output") &&
-        expect((kcur->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-0 to be pinned as output") &&
+        expect((kcur0->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-0 to be pinned as output") &&
+        expect((kcur1->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-1 to be pinned as output") &&
+        expect((kcur12->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-12 to be pinned as output") &&
         expect((softmax->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected kq-softmax-0 to be pinned as output") &&
-        expect((other->flags & GGML_TENSOR_FLAG_OUTPUT) == 0, "expected non-layer0 tensor to remain unpinned");
+        expect((other->flags & GGML_TENSOR_FLAG_OUTPUT) == 0, "expected non-layer0 attention tensor to remain unpinned") &&
+        expect((kcur_mm->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-mm tensor to be pinned as output") &&
+        expect((kcur_scaled->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-scaled tensor to be pinned as output") &&
+        expect((kcur_normed->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur_normed tensor to be pinned as output") &&
+        expect((kcur_post_rope->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-post-rope tensor to be pinned as output") &&
+        expect((kcur_view->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur view tensor to be pinned as output") &&
+        expect((kcur_without_k_kind->flags & GGML_TENSOR_FLAG_OUTPUT) == 0, "expected Kcur tensor to remain unpinned when k export is disabled");
 
     ggml_free(ctx);
     if (old_dir) {
         setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", old_dir_value.c_str(), 1);
     } else {
         unsetenv("LLAMA_EXPT_TENSOR_EXPORT_DIR");
+    }
+    if (old_kinds) {
+        setenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS", old_kinds_value.c_str(), 1);
+    } else {
+        unsetenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS");
     }
     return ok;
 }
