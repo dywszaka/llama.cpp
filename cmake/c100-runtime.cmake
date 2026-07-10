@@ -54,6 +54,7 @@ set(C100_SIM_SPIKE_BUILD_DIR "${CMAKE_BINARY_DIR}/c100-spike")
 set(C100_SIM_SPIKE_INSTALL_DIR "${CMAKE_BINARY_DIR}/c100-spike-install")
 set(C100_SIM_FIRMWARE_BUILD_DIR "${CMAKE_BINARY_DIR}/c100-firmware")
 set(C100_RUNTIME_FIRMWARE_DIR "${CMAKE_BINARY_DIR}/firmware/llama.cpp")
+set(C100_SIM_SPIKE_CONFIGURE_INPUT "${CMAKE_BINARY_DIR}/c100-spike-configure-input.txt")
 
 file(MAKE_DIRECTORY
     "${C100_SIM_SPIKE_BUILD_DIR}"
@@ -211,8 +212,12 @@ set(C100_SIM_SPIKE_LIBS
     "${C100_SIM_SPIKE_BUILD_DIR}/libspike_main.a"
     "${C100_SIM_SPIKE_BUILD_DIR}/libfdt.a")
 
+configure_file("${CMAKE_CURRENT_LIST_DIR}/c100-spike-configure-input.in"
+    "${C100_SIM_SPIKE_CONFIGURE_INPUT}" @ONLY)
+
 add_custom_command(
     OUTPUT "${C100_SIM_SPIKE_BUILD_DIR}/c100-spike-configured.stamp"
+    COMMAND "${CMAKE_COMMAND}" -E remove_directory "${C100_SIM_SPIKE_BUILD_DIR}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${C100_SIM_SPIKE_BUILD_DIR}" "${C100_SIM_SPIKE_INSTALL_DIR}"
     COMMAND "${CMAKE_COMMAND}" -E chdir "${C100_SIM_SPIKE_BUILD_DIR}"
             "${CMAKE_COMMAND}" -E env
@@ -226,6 +231,7 @@ add_custom_command(
             "--with-boost-asio=no"
             "--with-boost-regex=no"
     COMMAND "${CMAKE_COMMAND}" -E touch "${C100_SIM_SPIKE_BUILD_DIR}/c100-spike-configured.stamp"
+    DEPENDS "${C100_SIM_SPIKE_CONFIGURE_INPUT}"
     COMMENT "Configuring C100 Spike simulator dependency")
 
 add_custom_command(

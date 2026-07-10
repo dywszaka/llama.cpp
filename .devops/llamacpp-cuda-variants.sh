@@ -22,10 +22,10 @@ Environment:
   LLAMA_CPP_ROOT        default: current repository root
   C100_SIM_ROOT         default: ${LLAMA_CPP_ROOT}/c100-sim
   CUDA_BUILD_DIR        default: $LLAMA_CPP_ROOT/build-cuda
-  CUDA_DEBUG_BUILD_DIR  default: $LLAMA_CPP_ROOT/build_cuda_debug
+  CUDA_DEBUG_BUILD_DIR  default: $LLAMA_CPP_ROOT/build-cuda-debug
   CUDA_C100_BUILD_DIR   default: $LLAMA_CPP_ROOT/build-cuda-c100
   CUDA_C100_DEBUG_BUILD_DIR
-                       default: $LLAMA_CPP_ROOT/build_cuda_c100_debug
+                       default: $LLAMA_CPP_ROOT/build-cuda-c100-debug
   BUILD_TARGET          default: llama-server
   BUILD_TYPE            default: Release
   CMAKE_GENERATOR       default: Ninja
@@ -297,11 +297,16 @@ configure_and_build_cuda_c100() {
 }
 
 configure_and_build_cuda_c100_debug() {
+    CUDA_C100_DEVICE_DEBUG="${CUDA_C100_DEVICE_DEBUG:-0}"
     local -a debug_extra=(
-        "-DCMAKE_CUDA_FLAGS_DEBUG=-G -g -lineinfo"
+        "-DCMAKE_CUDA_FLAGS_DEBUG=-g -lineinfo"
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
     )
     local -a user_debug_extra=()
+
+    if [[ "${CUDA_C100_DEVICE_DEBUG}" == "1" ]]; then
+        debug_extra[0]="-DCMAKE_CUDA_FLAGS_DEBUG=-G -g -lineinfo"
+    fi
 
     if [[ -n "${C100_DEBUG_CMAKE_EXTRA_ARGS:-}" ]]; then
         read -r -a user_debug_extra <<< "${C100_DEBUG_CMAKE_EXTRA_ARGS}"
@@ -323,7 +328,7 @@ main() {
     CUDA_BUILD_DIR="${CUDA_BUILD_DIR:-/workspace/llama.cpp/build-cuda}"
     CUDA_DEBUG_BUILD_DIR="${CUDA_DEBUG_BUILD_DIR:-/workspace/llama.cpp/build_cuda_debug}"
     CUDA_C100_BUILD_DIR="${CUDA_C100_BUILD_DIR:-/workspace/llama.cpp/build-cuda-c100}"
-    CUDA_C100_DEBUG_BUILD_DIR="${CUDA_C100_DEBUG_BUILD_DIR:-/workspace/llama.cpp/build_cuda_c100_debug}"
+    CUDA_C100_DEBUG_BUILD_DIR="${CUDA_C100_DEBUG_BUILD_DIR:-/workspace/llama.cpp/build-cuda-c100-debug}"
     BUILD_TARGET="${BUILD_TARGET:-llama-server}"
     BUILD_TYPE="${BUILD_TYPE:-Release}"
     CMAKE_GENERATOR="${CMAKE_GENERATOR:-Ninja}"
