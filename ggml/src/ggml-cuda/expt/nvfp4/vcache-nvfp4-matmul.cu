@@ -1,5 +1,6 @@
 #include "vcache-nvfp4-matmul.cuh"
 
+#include "nvfp4-fp4mulmat.cuh"
 #include "nvfp4-log.cuh"
 #include "nvfp4-quantize-core.cuh"
 
@@ -230,19 +231,10 @@ static __global__ void k_vcache_nvfp4_matmul_fp4_p_4d(
         const block_nvfp4 * v_block_ptr = (const block_nvfp4 *) (v_base + block * v_nb0);
         const block_nvfp4 vb = *v_block_ptr;
         const block_nvfp4 pb = p_row_q[block];
-        const float v_d = scale_is_global ?
-            (v_global_scale > 0.0f ? ggml_cuda_e4m3_to_fp32_half(vb.e) / v_global_scale : 0.0f) :
-            ggml_cuda_e4m3_to_fp32_half(vb.e) * (*(const float *) (scale_base + block * scale_nb0));
-        const float p_d = ggml_cuda_e4m3_to_fp32_half(pb.e) * p_row_scale;
-        const float d = v_d * p_d;
-
-#pragma unroll
-        for (int i = 0; i < QK_NVFP4 / 2; ++i) {
-            const uint8_t v_packed = vb.qs[i];
-            const uint8_t p_packed = pb.qs[i];
-            thread_sum += d * (float) kvalues_nvfp4[v_packed & 0x0F] * (float) kvalues_nvfp4[p_packed & 0x0F];
-            thread_sum += d * (float) kvalues_nvfp4[v_packed >> 4]    * (float) kvalues_nvfp4[p_packed >> 4];
-        }
+        const float v_external_scale = scale_is_global ?
+            (v_global_scale > 0.0f ? 1.0f / v_global_scale : 0.0f) :
+            (*(const float *) (scale_base + block * scale_nb0));
+        thread_sum += ggml_cuda_nvfp4_fp4mulmat_block_dot_f32(vb, pb) * v_external_scale * p_row_scale;
     }
 
     __shared__ float sum[256];
@@ -704,8 +696,13 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
             src1->nb[3]);
     CUDA_CHECK(cudaGetLastError());
 
+    const bool force_fp4mulmat = ggml_cuda_nvfp4_fp4mulmat_enabled();
+    if (force_fp4mulmat) {
+        ggml_cuda_nvfp4_log_vcache_fp4mulmat_forced_once();
+    }
+
 #if GGML_CUDA_HAS_CUBLASLT
-    if (ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
+    if (!force_fp4mulmat && ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
                 ctx,
                 (const block_nvfp4 *) src0->data,
                 (const float *) scale->data,
@@ -742,7 +739,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     while (fp4_block_threads < n_blocks && fp4_block_threads < 256) {
         fp4_block_threads *= 2;
     }
-    ggml_cuda_nvfp4_log_vcache_matmul_path_once("custom-cuda-fp4");
+    ggml_cuda_nvfp4_log_vcache_matmul_path_once(force_fp4mulmat ? "fp4_mulmat-derived-custom-cuda-fp4" : "custom-cuda-fp4");
     k_vcache_nvfp4_matmul_fp4_p_4d<<<grid, dim3((uint32_t) fp4_block_threads, 1, 1), 0, ctx.stream()>>>(
             (const block_nvfp4 *) src0->data,
             (const float *) scale->data,

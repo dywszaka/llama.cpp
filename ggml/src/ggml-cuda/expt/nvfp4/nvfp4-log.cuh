@@ -62,6 +62,7 @@ void ggml_cuda_nvfp4_log_kcache_outlier_fingerprint(
 void ggml_cuda_nvfp4_log_vcache_fast_update_once(bool enabled);
 void ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
 void ggml_cuda_nvfp4_log_vcache_matmul_path_once(const char * path);
+void ggml_cuda_nvfp4_log_vcache_fp4mulmat_forced_once();
 void ggml_cuda_nvfp4_log_vcache_lt_failure_once(const char * stage, int status, const char * status_str);
 void ggml_cuda_nvfp4_log_vcache_lt_active_once(
         int64_t rows,
@@ -135,6 +136,15 @@ void ggml_cuda_nvfp4_log_native_repack_debug(
         bool linear_scale_layout,
         bool used_dynamic_scale,
         cudaStream_t stream);
+
+void ggml_cuda_nvfp4_log_fp4mulmat_native_path(
+        const char * caller,
+        const ggml_tensor * dst,
+        int64_t ne01,
+        int64_t ne11,
+        int64_t ne10,
+        bool used_dynamic_scale,
+        bool verbose);
 
 void ggml_cuda_nvfp4_log_validate_sampled_row(
         const ggml_tensor * dst,

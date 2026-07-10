@@ -366,6 +366,17 @@ void ggml_cuda_nvfp4_log_vcache_matmul_path_once(const char * path) {
     GGML_LOG_INFO("%s: CUDA NVFP4 V-cache p*v matmul path=%s\n", __func__, path);
 }
 
+void ggml_cuda_nvfp4_log_vcache_fp4mulmat_forced_once() {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_WARN(
+            "%s: GGML_CUDA_NVFP4_FP4MULMAT enabled; forcing CUDA NVFP4 V-cache p*v matmul path=fp4_mulmat-derived custom-cuda-fp4 and skipping cuBLASLt FP4\n",
+            __func__);
+}
+
 void ggml_cuda_nvfp4_log_vcache_lt_failure_once(const char * stage, int status, const char * status_str) {
     static std::atomic<bool> logged(false);
     if (logged.exchange(true)) {
@@ -407,6 +418,31 @@ void ggml_cuda_nvfp4_log_vcache_lt_scale_attrs_unavailable_once() {
     }
 
     GGML_LOG_WARN("%s: cuBLASLt FP4 scale-channel attrs unavailable; falling back to custom CUDA kernel\n", __func__);
+}
+
+void ggml_cuda_nvfp4_log_fp4mulmat_native_path(
+        const char * caller,
+        const ggml_tensor * dst,
+        int64_t ne01,
+        int64_t ne11,
+        int64_t ne10,
+        bool used_dynamic_scale,
+        bool verbose) {
+    static std::atomic<int> log_count(0);
+    const int seen = log_count.fetch_add(1);
+    const bool should_log = verbose ? (seen < 16) : (seen == 0);
+    if (!should_log) {
+        return;
+    }
+
+    GGML_LOG_WARN(
+            "%s: fp4_mulmat-derived NVFP4 kernel active for %s ne01=%lld ne11=%lld ne10=%lld dynamic_scale=%d\n",
+            caller,
+            ggml_get_name(dst),
+            (long long) ne01,
+            (long long) ne11,
+            (long long) ne10,
+            used_dynamic_scale ? 1 : 0);
 }
 
 void ggml_cuda_nvfp4_log_fattn_tensor_brief_once(

@@ -79,6 +79,11 @@ static bool expect_lt_reference_for_kv_size(int64_t kv_size) {
     return TEST_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS && (kv_size <= 512 || kv_size % 512 == 0);
 }
 
+static bool fp4mulmat_enabled() {
+    const char * env = std::getenv("GGML_CUDA_NVFP4_FP4MULMAT");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
 static void dequantize_v_blocks_like_lt(
         const std::vector<block_nvfp4> & v_q,
         const std::vector<float> & v_s,
@@ -493,12 +498,12 @@ static bool run_real_vcache_view_case(int64_t kv_size, bool scalar_global_scale 
                 float ref = 0.0f;
                 for (int64_t i = 0; i < kv_size; ++i) {
                     const size_t p_off = (size_t) h * (size_t) cols * (size_t) kv_size + (size_t) c * (size_t) kv_size + (size_t) i;
-                    const std::vector<float> & v_ref_deq = expect_lt_reference_for_kv_size(kv_size) ? v_deq_lt : v_deq;
+                    const std::vector<float> & v_ref_deq = (!fp4mulmat_enabled() && expect_lt_reference_for_kv_size(kv_size)) ? v_deq_lt : v_deq;
                     ref += v_ref_deq[(size_t) row * (size_t) kv_size + (size_t) i] * p_ref[p_off];
                 }
                 const size_t out_off = (size_t) h * (size_t) cols * (size_t) head_dim + (size_t) c * (size_t) head_dim + (size_t) d;
                 const float got = out_host[out_off];
-                const float tol = 0.5f;
+                const float tol = fp4mulmat_enabled() ? 1.25f : 0.5f;
                 if (fabsf(got - ref) > tol) {
                     std::fprintf(stderr, "real vcache matmul mismatch scalar=%d kv_size=%lld h=%lld d=%lld c=%lld got=%g ref=%g\n",
                             scalar_global_scale ? 1 : 0, (long long) kv_size, (long long) h, (long long) d, (long long) c, got, ref);
@@ -669,7 +674,7 @@ static bool run_set_rows_then_matmul_case(bool scalar_global_scale) {
     std::vector<float> v_deq((size_t) n_embd * (size_t) kv_size);
     ggml_backend_tensor_get(v_cache, v_q.data(), 0, v_q.size() * sizeof(block_nvfp4));
     if (scalar_global_scale) {
-        if (expect_lt_reference_for_kv_size(kv_size)) {
+        if (!fp4mulmat_enabled() && expect_lt_reference_for_kv_size(kv_size)) {
             dequantize_v_blocks_scalar_like_lt(v_q, fixed_global, v_deq, n_embd, kv_size, blocks);
         } else {
             for (int64_t row = 0; row < n_embd; ++row) {
@@ -679,7 +684,7 @@ static bool run_set_rows_then_matmul_case(bool scalar_global_scale) {
         }
     } else {
         ggml_backend_tensor_get(v_scale_base, v_s.data(), 0, v_s.size() * sizeof(float));
-        if (expect_lt_reference_for_kv_size(kv_size)) {
+        if (!fp4mulmat_enabled() && expect_lt_reference_for_kv_size(kv_size)) {
             dequantize_v_blocks_like_lt(v_q, v_s, v_deq, n_embd, kv_size, blocks);
         } else {
             for (int64_t row = 0; row < n_embd; ++row) {
@@ -709,7 +714,8 @@ static bool run_set_rows_then_matmul_case(bool scalar_global_scale) {
                 }
                 const size_t out_off = (size_t) h * (size_t) cols * (size_t) head_dim + (size_t) c * (size_t) head_dim + (size_t) d;
                 const float got = out_host[out_off];
-                if (fabsf(got - ref) > 0.5f) {
+                const float tol = fp4mulmat_enabled() ? 1.25f : 0.5f;
+                if (fabsf(got - ref) > tol) {
                     std::fprintf(stderr, "set_rows matmul mismatch scalar=%d h=%lld d=%lld c=%lld got=%g ref=%g\n",
                             scalar_global_scale ? 1 : 0, (long long) h, (long long) d, (long long) c, got, ref);
                     ggml_backend_buffer_free(buf);

@@ -119,8 +119,12 @@ Default: unset/off.
 When enabled, the native CUDA NVFP4 matmul path still quantizes F32 RHS
 activations through the current NVFP4 activation quantizer, then evaluates the
 NVFP4 block dot product with the experimental FP4 accumulator model instead of
-cuBLASLt. This is intended for hardware-model comparison and correctness
-experiments, not performance measurement.
+cuBLASLt. The same switch also forces the CUDA NVFP4 V-cache P*V matmul path to
+skip the preferred cuBLASLt FP4 implementation and use the fp4_mulmat-derived
+custom CUDA kernel. V-cache keeps its existing external V scale and dynamic P
+row scale semantics while using the shared FP4 block accumulator model. This is
+intended for hardware-model comparison and correctness experiments, not
+performance measurement.
 
 The path logs once when selected. Combine with
 `GGML_CUDA_NVFP4_FP4MULMAT_LOG=1` to log the first several selections during a
