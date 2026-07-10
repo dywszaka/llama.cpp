@@ -34,6 +34,8 @@ struct tensor_error_metrics {
 struct eval_record_report {
     tensor_record record;
     tensor_error_metrics metrics;
+    double nmse = 0.0;
+    double max_abs_err = 0.0;
 };
 
 struct eval_report {
@@ -51,6 +53,7 @@ struct attention_replay_report {
     tensor_error_metrics softmax_metrics;
     double max_abs_err_kq = 0.0;
     double max_abs_err_softmax = 0.0;
+    double kq_nmse = 0.0;
     double softmax_nmse = 0.0;
     float kq_scale = 1.0f;
     float max_bias = 0.0f;
@@ -88,35 +91,6 @@ struct attention_replay_nvfp4_outlier_eval_report {
     std::vector<attention_replay_nvfp4_outlier_report> records;
 };
 
-enum class k_channel_sort_basis {
-    FIRST_ROW_ABS,
-    ABS_MEAN,
-};
-
-struct k_channel_sort_eval_record_report {
-    tensor_record record;
-    tensor_error_metrics baseline_metrics;
-    tensor_error_metrics sorted_metrics;
-    tensor_error_metrics delta_metrics;
-    std::vector<size_t> channel_order;
-    std::string sort_basis;
-    size_t channel_count = 0;
-    size_t row_count = 0;
-};
-
-struct k_channel_sort_eval_aggregate_report {
-    tensor_error_metrics baseline_metrics;
-    tensor_error_metrics sorted_metrics;
-    tensor_error_metrics delta_metrics;
-};
-
-struct k_channel_sort_eval_report {
-    std::vector<k_channel_sort_eval_record_report> records;
-    std::map<std::string, k_channel_sort_eval_aggregate_report> by_kind;
-    k_channel_sort_basis sort_basis = k_channel_sort_basis::FIRST_ROW_ABS;
-    float global_scale = 1.0f;
-};
-
 bool tensor_export_enabled();
 bool tensor_export_maybe_log_config();
 void tensor_export_pin_named_tensor(ggml_tensor * tensor);
@@ -124,8 +98,6 @@ bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf);
 
 tensor_error_metrics compute_error_metrics(const std::vector<float> & reference, const std::vector<float> & actual);
 double compute_nmse(const std::vector<float> & reference, const std::vector<float> & actual);
-std::vector<size_t> make_k_channel_order_from_first_row(const std::vector<float> & values, size_t row_size);
-std::vector<size_t> make_k_channel_order_from_abs_mean(const std::vector<float> & values, size_t row_size);
 std::vector<tensor_record> load_manifest_records(const std::string & manifest_path);
 eval_report evaluate_manifest(const std::string & manifest_path, float global_scale = 1.0f);
 attention_replay_eval_report evaluate_manifest_attention_replay(const std::string & manifest_path);
@@ -134,13 +106,8 @@ attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_fp
 attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_quant_round(
         const std::string & manifest_path,
         const attention_quant_round_algo & quant_round_algo);
-k_channel_sort_eval_report evaluate_manifest_k_channel_sort(
-        const std::string & manifest_path,
-        k_channel_sort_basis sort_basis = k_channel_sort_basis::FIRST_ROW_ABS,
-        float global_scale = 1.0f);
 std::string format_eval_report_json(const eval_report & report);
 std::string format_attention_replay_eval_report_json(const attention_replay_eval_report & report);
 std::string format_attention_replay_nvfp4_outlier_eval_report_json(const attention_replay_nvfp4_outlier_eval_report & report);
-std::string format_k_channel_sort_eval_report_json(const k_channel_sort_eval_report & report);
 
 } // namespace llama_expt

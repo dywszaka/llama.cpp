@@ -474,53 +474,6 @@ double compute_kld_reference_distribution(
     return out;
 }
 
-tensor_error_metrics metric_delta(const tensor_error_metrics & sorted, const tensor_error_metrics & baseline) {
-    tensor_error_metrics out;
-    out.mae  = sorted.mae  - baseline.mae;
-    out.mse  = sorted.mse  - baseline.mse;
-    out.rmse = sorted.rmse - baseline.rmse;
-    out.n    = sorted.n;
-    return out;
-}
-
-std::vector<float> apply_channel_order_by_row(const std::vector<float> & values, size_t row_size, const std::vector<size_t> & order) {
-    if (row_size == 0 || values.size() % row_size != 0) {
-        throw std::runtime_error("K channel sort requires non-empty contiguous rows");
-    }
-    if (order.size() != row_size) {
-        throw std::runtime_error("K channel sort order size does not match row size");
-    }
-
-    std::vector<float> out(values.size());
-    const size_t rows = values.size() / row_size;
-    for (size_t row = 0; row < rows; ++row) {
-        const size_t offset = row * row_size;
-        for (size_t j = 0; j < row_size; ++j) {
-            out[offset + j] = values[offset + order[j]];
-        }
-    }
-    return out;
-}
-
-std::vector<float> restore_channel_order_by_row(const std::vector<float> & values, size_t row_size, const std::vector<size_t> & order) {
-    if (row_size == 0 || values.size() % row_size != 0) {
-        throw std::runtime_error("K channel sort requires non-empty contiguous rows");
-    }
-    if (order.size() != row_size) {
-        throw std::runtime_error("K channel sort order size does not match row size");
-    }
-
-    std::vector<float> out(values.size());
-    const size_t rows = values.size() / row_size;
-    for (size_t row = 0; row < rows; ++row) {
-        const size_t offset = row * row_size;
-        for (size_t j = 0; j < row_size; ++j) {
-            out[offset + order[j]] = values[offset + j];
-        }
-    }
-    return out;
-}
-
 void accumulate_metrics(
         std::map<std::string, double> & sum_abs,
         std::map<std::string, double> & sum_sq,
@@ -546,26 +499,6 @@ std::map<std::string, tensor_error_metrics> make_aggregate_metrics(
         out[kv.first] = metrics;
     }
     return out;
-}
-
-const char * k_channel_sort_basis_name(k_channel_sort_basis basis) {
-    switch (basis) {
-        case k_channel_sort_basis::FIRST_ROW_ABS:
-            return "first_row_abs";
-        case k_channel_sort_basis::ABS_MEAN:
-            return "abs_mean";
-    }
-    return "unknown";
-}
-
-const char * k_channel_sort_algorithm_name(k_channel_sort_basis basis) {
-    switch (basis) {
-        case k_channel_sort_basis::FIRST_ROW_ABS:
-            return "nvfp4_k_channel_sort";
-        case k_channel_sort_basis::ABS_MEAN:
-            return "nvfp4_k_channel_mean_sort";
-    }
-    return "unknown";
 }
 
 void write_manifest(const std::filesystem::path & dir, const std::vector<tensor_record> & records) {
@@ -857,60 +790,6 @@ double compute_nmse(const std::vector<float> & reference, const std::vector<floa
     return sum_sq_err / sum_sq_ref;
 }
 
-std::vector<size_t> make_k_channel_order_from_first_row(const std::vector<float> & values, size_t row_size) {
-    if (row_size == 0 || values.size() < row_size) {
-        throw std::runtime_error("K channel sort requires a non-empty first row");
-    }
-
-    std::vector<size_t> order(row_size);
-    for (size_t i = 0; i < row_size; ++i) {
-        order[i] = i;
-    }
-
-    std::stable_sort(order.begin(), order.end(), [&values](size_t lhs, size_t rhs) {
-        const float lhs_abs = std::fabs(values[lhs]);
-        const float rhs_abs = std::fabs(values[rhs]);
-        if (lhs_abs == rhs_abs) {
-            return lhs < rhs;
-        }
-        return lhs_abs > rhs_abs;
-    });
-    return order;
-}
-
-std::vector<size_t> make_k_channel_order_from_abs_mean(const std::vector<float> & values, size_t row_size) {
-    if (row_size == 0 || values.empty() || values.size() % row_size != 0) {
-        throw std::runtime_error("K channel mean sort requires non-empty contiguous rows");
-    }
-
-    const size_t rows = values.size() / row_size;
-    std::vector<double> means(row_size, 0.0);
-    for (size_t row = 0; row < rows; ++row) {
-        const size_t offset = row * row_size;
-        for (size_t channel = 0; channel < row_size; ++channel) {
-            means[channel] += (double) values[offset + channel];
-        }
-    }
-    for (double & mean : means) {
-        mean /= (double) rows;
-    }
-
-    std::vector<size_t> order(row_size);
-    for (size_t i = 0; i < row_size; ++i) {
-        order[i] = i;
-    }
-
-    std::stable_sort(order.begin(), order.end(), [&means](size_t lhs, size_t rhs) {
-        const double lhs_abs = std::fabs(means[lhs]);
-        const double rhs_abs = std::fabs(means[rhs]);
-        if (lhs_abs == rhs_abs) {
-            return lhs < rhs;
-        }
-        return lhs_abs > rhs_abs;
-    });
-    return order;
-}
-
 std::vector<tensor_record> load_manifest_records(const std::string & manifest_path) {
     std::ifstream in(manifest_path, std::ios::binary);
     if (!in) {
@@ -943,7 +822,12 @@ eval_report evaluate_manifest(const std::string & manifest_path, float global_sc
         std::vector<float> roundtrip = nvfp4_roundtrip(values, global_scale);
         tensor_error_metrics metrics = compute_error_metrics(values, roundtrip);
 
-        report.records.push_back({ rec, metrics });
+        eval_record_report rr;
+        rr.record = rec;
+        rr.metrics = metrics;
+        rr.nmse = compute_nmse(values, roundtrip);
+        rr.max_abs_err = compute_max_abs_err(values, roundtrip);
+        report.records.push_back(std::move(rr));
         accumulate_metrics(sum_abs, sum_sq, count, rec.kind, metrics);
     }
 
@@ -1010,6 +894,7 @@ attention_replay_eval_report evaluate_manifest_attention_replay(const std::strin
         rr.softmax_metrics = compute_error_metrics(softmax_values, replay_softmax);
         rr.max_abs_err_kq = compute_max_abs_err(kq_values, replay_kq);
         rr.max_abs_err_softmax = compute_max_abs_err(softmax_values, replay_softmax);
+        rr.kq_nmse = compute_nmse(kq_values, replay_kq);
         rr.softmax_nmse = compute_nmse(softmax_values, replay_softmax);
         rr.kq_scale = kq_scale;
         rr.max_bias = max_bias;
@@ -1092,6 +977,7 @@ attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_qu
         rr.kld_epsilon = KLD_EPSILON;
         rr.max_abs_err_kq = compute_max_abs_err(kq_values, replay_kq);
         rr.max_abs_err_softmax = compute_max_abs_err(softmax_values, replay_softmax);
+        rr.kq_nmse = compute_nmse(kq_values, replay_kq);
         rr.softmax_nmse = compute_nmse(softmax_values, replay_softmax);
         rr.kq_scale = kq_scale;
         rr.max_bias = max_bias;
@@ -1121,82 +1007,6 @@ attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_fp
     return report;
 }
 
-k_channel_sort_eval_report evaluate_manifest_k_channel_sort(
-        const std::string & manifest_path,
-        k_channel_sort_basis sort_basis,
-        float global_scale) {
-    k_channel_sort_eval_report report;
-    report.global_scale = global_scale;
-    report.sort_basis = sort_basis;
-    const std::filesystem::path base_dir = manifest_dir(manifest_path);
-    const std::vector<tensor_record> records = load_manifest_records(manifest_path);
-
-    std::map<std::string, double> baseline_sum_abs;
-    std::map<std::string, double> baseline_sum_sq;
-    std::map<std::string, size_t> baseline_count;
-    std::map<std::string, double> sorted_sum_abs;
-    std::map<std::string, double> sorted_sum_sq;
-    std::map<std::string, size_t> sorted_count;
-
-    for (const tensor_record & rec : records) {
-        if (rec.kind != "k") {
-            throw std::runtime_error("K channel sort requires kind 'k', got kind '" + rec.kind + "' for record '" + rec.name + "'");
-        }
-
-        std::vector<float> values = load_record_f32(base_dir, rec);
-        const size_t row_size = (size_t) rec.ne[0];
-        if (row_size == 0 || values.size() % row_size != 0) {
-            throw std::runtime_error("record '" + rec.name + "' has invalid K row layout");
-        }
-
-        std::vector<size_t> order;
-        switch (sort_basis) {
-            case k_channel_sort_basis::FIRST_ROW_ABS:
-                order = make_k_channel_order_from_first_row(values, row_size);
-                break;
-            case k_channel_sort_basis::ABS_MEAN:
-                order = make_k_channel_order_from_abs_mean(values, row_size);
-                break;
-        }
-
-        const std::vector<float> baseline_roundtrip = nvfp4_roundtrip(values, global_scale);
-        const tensor_error_metrics baseline_metrics = compute_error_metrics(values, baseline_roundtrip);
-
-        const std::vector<float> sorted_values = apply_channel_order_by_row(values, row_size, order);
-        const std::vector<float> sorted_roundtrip = nvfp4_roundtrip(sorted_values, global_scale);
-        const std::vector<float> restored_roundtrip = restore_channel_order_by_row(sorted_roundtrip, row_size, order);
-        const tensor_error_metrics sorted_metrics = compute_error_metrics(values, restored_roundtrip);
-
-        k_channel_sort_eval_record_report rr;
-        rr.record = rec;
-        rr.baseline_metrics = baseline_metrics;
-        rr.sorted_metrics = sorted_metrics;
-        rr.delta_metrics = metric_delta(sorted_metrics, baseline_metrics);
-        rr.channel_order = order;
-        rr.sort_basis = k_channel_sort_basis_name(sort_basis);
-        rr.channel_count = row_size;
-        rr.row_count = values.size() / row_size;
-        report.records.push_back(std::move(rr));
-
-        accumulate_metrics(baseline_sum_abs, baseline_sum_sq, baseline_count, rec.kind, baseline_metrics);
-        accumulate_metrics(sorted_sum_abs, sorted_sum_sq, sorted_count, rec.kind, sorted_metrics);
-    }
-
-    const std::map<std::string, tensor_error_metrics> baseline_by_kind =
-        make_aggregate_metrics(baseline_sum_abs, baseline_sum_sq, baseline_count);
-    const std::map<std::string, tensor_error_metrics> sorted_by_kind =
-        make_aggregate_metrics(sorted_sum_abs, sorted_sum_sq, sorted_count);
-    for (const auto & kv : baseline_by_kind) {
-        k_channel_sort_eval_aggregate_report aggregate;
-        aggregate.baseline_metrics = kv.second;
-        aggregate.sorted_metrics = sorted_by_kind.at(kv.first);
-        aggregate.delta_metrics = metric_delta(aggregate.sorted_metrics, aggregate.baseline_metrics);
-        report.by_kind[kv.first] = aggregate;
-    }
-
-    return report;
-}
-
 std::string format_eval_report_json(const eval_report & report) {
     json root;
     root["algorithm"] = "nvfp4_ref";
@@ -1205,6 +1015,8 @@ std::string format_eval_report_json(const eval_report & report) {
     for (const eval_record_report & rr : report.records) {
         json item = record_to_json(rr.record);
         item["metrics"] = metrics_to_json(rr.metrics);
+        item["nmse"] = rr.nmse;
+        item["max_abs_err"] = rr.max_abs_err;
         root["records"].push_back(item);
     }
 
@@ -1229,6 +1041,9 @@ std::string format_attention_replay_eval_report_json(const attention_replay_eval
         item["max_bias"] = rr.max_bias;
         item["kq_metrics"] = metrics_to_json(rr.kq_metrics);
         item["softmax_metrics"] = metrics_to_json(rr.softmax_metrics);
+        item["kq_mse"] = rr.kq_metrics.mse;
+        item["kq_nmse"] = rr.kq_nmse;
+        item["kq_max_abs_err"] = rr.max_abs_err_kq;
         item["softmax_nmse"] = rr.softmax_nmse;
         item["max_abs_err_kq"] = rr.max_abs_err_kq;
         item["max_abs_err_softmax"] = rr.max_abs_err_softmax;
@@ -1262,6 +1077,9 @@ std::string format_attention_replay_nvfp4_outlier_eval_report_json(const attenti
         item["q_quant_metrics"] = metrics_to_json(rr.q_quant_metrics);
         item["kq_metrics"] = metrics_to_json(rr.kq_metrics);
         item["softmax_metrics"] = metrics_to_json(rr.softmax_metrics);
+        item["kq_mse"] = rr.kq_metrics.mse;
+        item["kq_nmse"] = rr.kq_nmse;
+        item["kq_max_abs_err"] = rr.max_abs_err_kq;
         item["softmax_mse"] = rr.softmax_metrics.mse;
         item["softmax_nmse"] = rr.softmax_nmse;
         item["softmax_kld"] = rr.softmax_kld;
@@ -1269,35 +1087,6 @@ std::string format_attention_replay_nvfp4_outlier_eval_report_json(const attenti
         item["max_abs_err_kq"] = rr.max_abs_err_kq;
         item["max_abs_err_softmax"] = rr.max_abs_err_softmax;
         root["records"].push_back(std::move(item));
-    }
-    return root.dump(2);
-}
-
-std::string format_k_channel_sort_eval_report_json(const k_channel_sort_eval_report & report) {
-    json root;
-    root["algorithm"] = k_channel_sort_algorithm_name(report.sort_basis);
-    root["global_scale"] = report.global_scale;
-    root["sort_basis"] = k_channel_sort_basis_name(report.sort_basis);
-    root["records"] = json::array();
-    for (const k_channel_sort_eval_record_report & rr : report.records) {
-        json item = record_to_json(rr.record);
-        item["channel_count"] = rr.channel_count;
-        item["row_count"] = rr.row_count;
-        item["sort_basis"] = rr.sort_basis;
-        item["channel_order"] = rr.channel_order;
-        item["baseline_metrics"] = metrics_to_json(rr.baseline_metrics);
-        item["sorted_metrics"] = metrics_to_json(rr.sorted_metrics);
-        item["delta_metrics"] = metrics_to_json(rr.delta_metrics);
-        root["records"].push_back(item);
-    }
-
-    root["aggregate_by_kind"] = json::object();
-    for (const auto & kv : report.by_kind) {
-        root["aggregate_by_kind"][kv.first] = {
-            { "baseline_metrics", metrics_to_json(kv.second.baseline_metrics) },
-            { "sorted_metrics", metrics_to_json(kv.second.sorted_metrics) },
-            { "delta_metrics", metrics_to_json(kv.second.delta_metrics) },
-        };
     }
     return root.dump(2);
 }

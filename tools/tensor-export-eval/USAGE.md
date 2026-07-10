@@ -56,10 +56,17 @@ manifest.json
 ./build-default/bin/llama-tensor-export-eval \
   --manifest /path/to/export/manifest.json \
   --algorithm attention_replay \
+  --csv /path/to/metrics.csv \
   > /path/to/result.json
 ```
 
 The tool writes diagnostics to stderr and the JSON report to stdout.
+When `--csv` is provided, summary metric rows are appended to that CSV file.
+If the file is empty or does not exist, the header is written first:
+
+```text
+algorithm,record,target,mse,nmse,max_abs_err,kld
+```
 
 ## Supported Algorithms
 
@@ -78,6 +85,9 @@ compares replayed KQ and softmax against the exported runtime tensors.
 Important output fields:
 
 - `records[].kq_metrics`
+- `records[].kq_mse`
+- `records[].kq_nmse`
+- `records[].kq_max_abs_err`
 - `records[].softmax_metrics`
 - `records[].softmax_nmse`
 - `records[].max_abs_err_kq`
@@ -105,6 +115,9 @@ Important output fields:
 - `records[].softmax_mse`
 - `records[].softmax_nmse`
 - `records[].softmax_kld`
+- `records[].kq_mse`
+- `records[].kq_nmse`
+- `records[].kq_max_abs_err`
 
 ### `attention_replay_fp8_e4m3_e8m0`
 
@@ -139,49 +152,6 @@ Runs NVFP4 reference quantize/dequantize on records from a manifest. Use
   > nvfp4-ref.json
 ```
 
-### `nvfp4_k_channel_sort`
-
-Sorts K channels by first-row absolute value before NVFP4 roundtrip, restores the
-original channel order, and compares error against the baseline roundtrip.
-
-```bash
-./build-default/bin/llama-tensor-export-eval \
-  --manifest /path/to/k-only-manifest.json \
-  --algorithm nvfp4_k_channel_sort \
-  --global-scale 1.0 \
-  > nvfp4-k-channel-sort.json
-```
-
-Shortcut:
-
-```bash
-./build-default/bin/llama-tensor-export-eval \
-  --manifest /path/to/k-only-manifest.json \
-  --k-channel-sort \
-  > nvfp4-k-channel-sort.json
-```
-
-### `nvfp4_k_channel_mean_sort`
-
-Sorts K channels by absolute mean across rows before NVFP4 roundtrip.
-
-```bash
-./build-default/bin/llama-tensor-export-eval \
-  --manifest /path/to/k-only-manifest.json \
-  --algorithm nvfp4_k_channel_mean_sort \
-  --global-scale 1.0 \
-  > nvfp4-k-channel-mean-sort.json
-```
-
-Shortcut:
-
-```bash
-./build-default/bin/llama-tensor-export-eval \
-  --manifest /path/to/k-only-manifest.json \
-  --k-channel-mean-sort \
-  > nvfp4-k-channel-mean-sort.json
-```
-
 ## Example Batch Script
 
 This matches the common attention replay workflow:
@@ -200,17 +170,65 @@ mkdir -p "$OUT_DIR"
 "$BIN" \
   --manifest "$EXPORT_DIR/manifest.json" \
   --algorithm attention_replay \
+  --csv "$OUT_DIR/metrics.csv" \
   > "$OUT_DIR/attention-replay.json"
 
 "$BIN" \
   --manifest "$EXPORT_DIR/manifest.json" \
   --algorithm attention_replay_nvfp4_outlier \
+  --csv "$OUT_DIR/metrics.csv" \
   > "$OUT_DIR/attention-replay-nvfp4-outlier.json"
 
 "$BIN" \
   --manifest "$EXPORT_DIR/manifest.json" \
   --algorithm attention_replay_fp8_e4m3_e8m0 \
+  --csv "$OUT_DIR/metrics.csv" \
   > "$OUT_DIR/attention-replay-fp8-e4m3-e8m0.json"
+```
+
+## KQ Eval Helper
+
+`tools/tensor-export-eval/run-kq-eval.sh` runs one KQ attention replay
+algorithm and appends its metrics to a CSV. The first argument is the algorithm:
+
+```bash
+tools/tensor-export-eval/run-kq-eval.sh attention_replay
+tools/tensor-export-eval/run-kq-eval.sh attention_replay_nvfp4_outlier
+tools/tensor-export-eval/run-kq-eval.sh attention_replay_fp8_e4m3_e8m0
+```
+
+By default, it reads the existing layer 0 attention export manifest at:
+
+```text
+experiments/20260708T080134Z-layer0-attn-softmax-export/export/manifest.json
+```
+
+By default, outputs are written under:
+
+```text
+experiments/kq-eval/
+```
+
+The default CSV path is:
+
+```text
+experiments/kq-eval/metrics.csv
+```
+
+Pass a second argument to override the CSV path:
+
+```bash
+tools/tensor-export-eval/run-kq-eval.sh \
+  attention_replay_fp8_e4m3_e8m0 \
+  experiments/my-kq-eval/metrics.csv
+```
+
+Useful environment overrides:
+
+```bash
+MANIFEST=/path/to/export/manifest.json \
+OUT_DIR=experiments/my-kq-eval \
+tools/tensor-export-eval/run-kq-eval.sh attention_replay_nvfp4_outlier
 ```
 
 ## Notes

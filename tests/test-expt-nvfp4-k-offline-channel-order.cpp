@@ -39,7 +39,7 @@ static bool test_loads_records_by_layer_name() {
     const std::string path = dir + "/order.json";
     write_file(path,
             "{\n"
-            "  \"algorithm\": \"nvfp4_k_channel_mean_sort\",\n"
+            "  \"algorithm\": \"offline_channel_order\",\n"
             "  \"records\": [\n"
             "    {\"name\":\"Kcur-1\",\"sort_basis\":\"abs_mean\",\"channel_order\":[2,0,1,3]},\n"
             "    {\"name\":\"Kcur-0\",\"sort_basis\":\"abs_mean\",\"channel_order\":[3,1,0,2]}\n"

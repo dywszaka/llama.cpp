@@ -368,101 +368,6 @@ static bool test_manifest_eval_and_rejection() {
     return true;
 }
 
-static bool test_k_channel_mean_sort_order_uses_abs_mean_desc() {
-    const std::vector<float> values = {
-        // channel means over 2 rows:
-        // c0= 0.0, c1=-3.0, c2= 3.0, c3= 2.0, c4=-2.0, c5=1.0, c6=-1.0, c7=0.0,
-        // c8= 0.5, c9=-0.5, c10=0.25, c11=-0.25, c12=0.0, c13=0.0, c14=0.0, c15=0.0
-         1.0f, -4.0f,  2.0f,  4.0f, -3.0f,  0.0f, -2.0f,  1.0f,
-         0.0f, -1.0f,  0.5f, -0.5f,  3.0f, -3.0f,  0.0f,  0.0f,
-        -1.0f, -2.0f,  4.0f,  0.0f, -1.0f,  2.0f,  0.0f, -1.0f,
-         1.0f,  0.0f,  0.0f,  0.0f, -3.0f,  3.0f,  0.0f,  0.0f,
-    };
-
-    const std::vector<size_t> order = llama_expt::make_k_channel_order_from_abs_mean(values, 16);
-    const std::vector<size_t> expected = {
-        1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 0, 7, 12, 13, 14, 15,
-    };
-    if (!expect(order == expected, "expected abs-mean-desc channel order with index tie-break")) {
-        return false;
-    }
-
-    bool rejected = false;
-    try {
-        (void) llama_expt::make_k_channel_order_from_abs_mean(values, 0);
-    } catch (const std::exception & e) {
-        rejected = std::string(e.what()).find("row") != std::string::npos;
-    }
-    return expect(rejected, "expected invalid row size rejection");
-}
-
-static bool test_k_channel_mean_sort_manifest_eval_reports_basis_and_deltas() {
-    const std::string dir = temp_dir();
-    std::filesystem::remove_all(dir);
-    std::filesystem::create_directories(dir);
-
-    std::vector<float> k_data(32);
-    for (size_t i = 0; i < k_data.size(); ++i) {
-        k_data[i] = ((int) i - 15) * 0.1875f;
-    }
-    k_data[1]  = -7.0f;
-    k_data[2]  =  9.0f;
-    k_data[17] = -5.0f;
-    k_data[18] =  7.0f;
-
-    write_f32(dir + "/k-mean-sort.bin", k_data);
-    write_file(dir + "/manifest-k-mean-sort.json",
-            "{\n"
-            "  \"records\": [\n"
-            "    {\"name\":\"Kcur-0\",\"kind\":\"k\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"k-mean-sort.bin\",\"byte_size\":128}\n"
-            "  ]\n"
-            "}\n");
-
-    const llama_expt::k_channel_sort_eval_report report =
-        llama_expt::evaluate_manifest_k_channel_sort(
-                dir + "/manifest-k-mean-sort.json",
-                llama_expt::k_channel_sort_basis::ABS_MEAN,
-                1.0f);
-    if (!expect(report.records.size() == 1, "expected one mean-sort record")) {
-        return false;
-    }
-
-    const llama_expt::k_channel_sort_eval_record_report & rr = report.records[0];
-    if (!expect(rr.channel_count == 16, "expected channel count from ne0")) {
-        return false;
-    }
-    if (!expect(rr.row_count == 2, "expected row count from remaining dimensions")) {
-        return false;
-    }
-    if (!expect(rr.sort_basis == "abs_mean", "expected abs_mean sort basis")) {
-        return false;
-    }
-    if (!expect(rr.channel_order[0] == 2 && rr.channel_order[1] == 1,
-            "expected mean order prefix from all rows")) {
-        return false;
-    }
-    if (!expect_close(rr.delta_metrics.mae, rr.sorted_metrics.mae - rr.baseline_metrics.mae, 1e-12,
-            "mean-sort MAE delta mismatch")) {
-        return false;
-    }
-
-    const std::string json = llama_expt::format_k_channel_sort_eval_report_json(report);
-    if (!expect(json.find("\"algorithm\": \"nvfp4_k_channel_mean_sort\"") != std::string::npos,
-            "expected mean-sort algorithm in JSON")) {
-        return false;
-    }
-    if (!expect(json.find("\"sort_basis\": \"abs_mean\"") != std::string::npos,
-            "expected abs_mean sort basis in JSON")) {
-        return false;
-    }
-    if (!expect(json.find("\"channel_order\"") != std::string::npos,
-            "expected channel order in JSON")) {
-        return false;
-    }
-
-    return true;
-}
-
 static bool test_attention_replay_manifest_eval_reports_small_error() {
     const std::string dir = temp_dir();
     std::filesystem::remove_all(dir);
@@ -528,6 +433,9 @@ static bool test_attention_replay_manifest_eval_reports_small_error() {
     if (!expect_close(rr.softmax_nmse, 0.0, 1e-12, "expected exact softmax NMSE")) {
         return false;
     }
+    if (!expect_close(rr.kq_nmse, 0.0, 1e-12, "expected exact KQ NMSE")) {
+        return false;
+    }
 
     const std::string json = llama_expt::format_attention_replay_eval_report_json(report);
     if (!expect(json.find("\"algorithm\": \"attention_replay\"") != std::string::npos,
@@ -541,6 +449,18 @@ static bool test_attention_replay_manifest_eval_reports_small_error() {
     }
     if (!expect(json.find("\"softmax_nmse\"") != std::string::npos,
             "expected softmax NMSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_mse\"") != std::string::npos,
+            "expected KQ MSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_nmse\"") != std::string::npos,
+            "expected KQ NMSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_max_abs_err\"") != std::string::npos,
+            "expected KQ max_abs_err in JSON")) {
         return false;
     }
 
@@ -619,6 +539,9 @@ static bool test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics() 
     if (!expect(rr.softmax_nmse >= 0.0, "expected non-negative softmax NMSE")) {
         return false;
     }
+    if (!expect(rr.kq_nmse >= 0.0, "expected non-negative KQ NMSE")) {
+        return false;
+    }
     if (!expect_close(rr.kld_epsilon, 1e-12, 0.0, "expected KLD epsilon")) {
         return false;
     }
@@ -650,6 +573,18 @@ static bool test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics() 
     }
     if (!expect(json.find("\"softmax_kld\"") != std::string::npos,
             "expected softmax KLD in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_mse\"") != std::string::npos,
+            "expected KQ MSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_nmse\"") != std::string::npos,
+            "expected KQ NMSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_max_abs_err\"") != std::string::npos,
+            "expected KQ max_abs_err in JSON")) {
         return false;
     }
     if (!expect(json.find("\"kld_reference_distribution\": \"exported_softmax\"") != std::string::npos,
@@ -863,12 +798,6 @@ int main() {
         return 1;
     }
     if (!test_manifest_eval_and_rejection()) {
-        return 1;
-    }
-    if (!test_k_channel_mean_sort_order_uses_abs_mean_desc()) {
-        return 1;
-    }
-    if (!test_k_channel_mean_sort_manifest_eval_reports_basis_and_deltas()) {
         return 1;
     }
     if (!test_attention_replay_manifest_eval_reports_small_error()) {

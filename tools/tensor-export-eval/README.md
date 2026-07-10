@@ -6,8 +6,6 @@
 
 - `nvfp4_ref`
 - `attention_replay`
-- `nvfp4_k_channel_sort`
-- `nvfp4_k_channel_mean_sort`
 
 本 README 重点说明 layer 0 attention softmax 的导出和离线评测。
 
