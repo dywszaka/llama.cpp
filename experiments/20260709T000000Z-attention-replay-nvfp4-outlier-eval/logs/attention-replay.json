@@ -1,0 +1,107 @@
+{
+  "algorithm": "attention_replay",
+  "records": [
+    {
+      "k_record": {
+        "name": "k-attn-0",
+        "kind": "k_attn",
+        "dtype": "f32",
+        "ne": [
+          128,
+          8,
+          16,
+          1
+        ],
+        "nb": [
+          4,
+          512,
+          4096,
+          65536
+        ],
+        "path": "13-k-attn-0.bin",
+        "byte_size": 65536
+      },
+      "q_record": {
+        "name": "q-attn-0",
+        "kind": "q_attn",
+        "dtype": "f32",
+        "ne": [
+          128,
+          32,
+          9,
+          1
+        ],
+        "nb": [
+          4,
+          512,
+          16384,
+          147456
+        ],
+        "path": "11-q-attn-0.bin",
+        "byte_size": 147456
+      },
+      "kq_record": {
+        "name": "kq-0",
+        "kind": "kq",
+        "dtype": "f32",
+        "ne": [
+          16,
+          9,
+          32,
+          1
+        ],
+        "nb": [
+          4,
+          64,
+          576,
+          18432
+        ],
+        "path": "15-kq-0.bin",
+        "byte_size": 18432
+      },
+      "softmax_record": {
+        "name": "kq-softmax-0",
+        "kind": "kq_softmax",
+        "dtype": "f32",
+        "ne": [
+          16,
+          9,
+          32,
+          1
+        ],
+        "nb": [
+          4,
+          64,
+          576,
+          18432
+        ],
+        "path": "16-kq-softmax-0.bin",
+        "byte_size": 18432,
+        "meta": {
+          "kq_scale": "0.0883883461",
+          "max_bias": "0",
+          "src_k": "k-attn-0",
+          "src_kq": "kq-0",
+          "src_mask": "kq-mask-0",
+          "src_q": "q-attn-0"
+        }
+      },
+      "kq_scale": 0.0883883461356163,
+      "max_bias": 0.0,
+      "kq_metrics": {
+        "mae": 0.0,
+        "mse": 0.0,
+        "rmse": 0.0,
+        "n": 4608
+      },
+      "softmax_metrics": {
+        "mae": 0.0,
+        "mse": 0.0,
+        "rmse": 0.0,
+        "n": 4608
+      },
+      "max_abs_err_kq": 0.0,
+      "max_abs_err_softmax": 0.0
+    }
+  ]
+}

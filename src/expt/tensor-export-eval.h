@@ -11,6 +11,8 @@
 
 namespace llama_expt {
 
+class attention_quant_round_algo;
+
 struct tensor_record {
     std::string name;
     std::string kind;
@@ -57,6 +59,34 @@ struct attention_replay_eval_report {
     std::vector<attention_replay_report> records;
 };
 
+struct quant_round_tensor_metadata {
+    std::string mode;
+    std::map<std::string, std::string> string_fields;
+    std::map<std::string, double> number_fields;
+    std::map<std::string, uint64_t> integer_fields;
+};
+
+struct attention_replay_nvfp4_outlier_report : attention_replay_report {
+    tensor_error_metrics k_quant_metrics;
+    tensor_error_metrics q_quant_metrics;
+    double softmax_kld = 0.0;
+    double kld_epsilon = 0.0;
+    float k_threshold = 0.0f;
+    float k_global_scale = 0.0f;
+    size_t k_outlier_count = 0;
+    std::string k_quantization_mode;
+    std::string q_quantization_mode;
+    std::string quant_round_algorithm;
+    quant_round_tensor_metadata k_quant_round;
+    quant_round_tensor_metadata q_quant_round;
+};
+
+struct attention_replay_nvfp4_outlier_eval_report {
+    std::string algorithm = "attention_replay_nvfp4_outlier";
+    std::string quant_round_algorithm;
+    std::vector<attention_replay_nvfp4_outlier_report> records;
+};
+
 enum class k_channel_sort_basis {
     FIRST_ROW_ABS,
     ABS_MEAN,
@@ -97,12 +127,17 @@ std::vector<size_t> make_k_channel_order_from_abs_mean(const std::vector<float> 
 std::vector<tensor_record> load_manifest_records(const std::string & manifest_path);
 eval_report evaluate_manifest(const std::string & manifest_path, float global_scale = 1.0f);
 attention_replay_eval_report evaluate_manifest_attention_replay(const std::string & manifest_path);
+attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_nvfp4_outlier(const std::string & manifest_path);
+attention_replay_nvfp4_outlier_eval_report evaluate_manifest_attention_replay_quant_round(
+        const std::string & manifest_path,
+        const attention_quant_round_algo & quant_round_algo);
 k_channel_sort_eval_report evaluate_manifest_k_channel_sort(
         const std::string & manifest_path,
         k_channel_sort_basis sort_basis = k_channel_sort_basis::FIRST_ROW_ABS,
         float global_scale = 1.0f);
 std::string format_eval_report_json(const eval_report & report);
 std::string format_attention_replay_eval_report_json(const attention_replay_eval_report & report);
+std::string format_attention_replay_nvfp4_outlier_eval_report_json(const attention_replay_nvfp4_outlier_eval_report & report);
 std::string format_k_channel_sort_eval_report_json(const k_channel_sort_eval_report & report);
 
 } // namespace llama_expt
