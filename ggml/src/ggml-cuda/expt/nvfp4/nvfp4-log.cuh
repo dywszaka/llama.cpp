@@ -146,6 +146,14 @@ void ggml_cuda_nvfp4_log_fp4mulmat_native_path(
         bool used_dynamic_scale,
         bool verbose);
 
+void ggml_cuda_nvfp4_log_fp4mulmat_vcache_kernel_once(
+        const char * kernel,
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_size,
+        int64_t q_heads,
+        int64_t q_streams);
+
 void ggml_cuda_nvfp4_log_validate_sampled_row(
         const ggml_tensor * dst,
         const char * samples,

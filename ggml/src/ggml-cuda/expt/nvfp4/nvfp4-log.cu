@@ -445,6 +445,29 @@ void ggml_cuda_nvfp4_log_fp4mulmat_native_path(
             used_dynamic_scale ? 1 : 0);
 }
 
+void ggml_cuda_nvfp4_log_fp4mulmat_vcache_kernel_once(
+        const char * kernel,
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_size,
+        int64_t q_heads,
+        int64_t q_streams) {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_WARN(
+            "%s: ggml_cuda_nvfp4_fp4mulmat_kernel family active for V-cache P*V; kernel=%s rows=%lld cols=%lld kv_size=%lld q_heads=%lld q_streams=%lld\n",
+            __func__,
+            kernel,
+            (long long) rows,
+            (long long) cols,
+            (long long) kv_size,
+            (long long) q_heads,
+            (long long) q_streams);
+}
+
 void ggml_cuda_nvfp4_log_fattn_tensor_brief_once(
         const char * label,
         const ggml_tensor * a,
