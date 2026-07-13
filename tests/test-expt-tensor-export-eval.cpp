@@ -1,4 +1,5 @@
 #include "../src/expt/tensor-export-eval.h"
+#include "../src/expt/quant_algo/attention-quant-round.h"
 
 #include <cmath>
 #include <cstdio>
@@ -48,6 +49,25 @@ static void write_f32(const std::string & path, const std::vector<float> & value
     }
     out.write(reinterpret_cast<const char *>(values.data()), (std::streamsize) (values.size() * sizeof(float)));
 }
+
+class test_identity_attention_quant_round_algo : public llama_expt::attention_quant_round_algo {
+public:
+    std::string name() const override {
+        return "test_identity";
+    }
+
+    llama_expt::attention_quant_round_result quant_round(
+            const llama_expt::attention_quant_round_input & input) const override {
+        llama_expt::attention_quant_round_result result;
+        result.k.values = input.k_values;
+        result.k.metadata.mode = "identity_k";
+        result.k.metadata.integer_fields["layer"] = input.layer;
+        result.q.values = input.q_values;
+        result.q.metadata.mode = "identity_q";
+        result.q.metadata.string_fields["global_scale"] = "none";
+        return result;
+    }
+};
 
 static void compute_attention_reference(
         const std::vector<float> & k_data,
@@ -140,6 +160,7 @@ static bool test_metrics() {
     return expect_close(m.mae, 1.5, 1e-12, "MAE mismatch") &&
            expect_close(m.mse, 3.5, 1e-12, "MSE mismatch") &&
            expect_close(m.rmse, std::sqrt(3.5), 1e-12, "RMSE mismatch") &&
+           expect_close(llama_expt::compute_nmse(a, b), 14.0 / 22.0, 1e-12, "NMSE mismatch") &&
            expect(m.n == 4, "metric count mismatch");
 }
 
@@ -163,7 +184,10 @@ static bool test_export_dir_switch_enables_export() {
 static bool test_attention_export_pin_marks_output_tensors() {
     const char * old_dir = std::getenv("LLAMA_EXPT_TENSOR_EXPORT_DIR");
     const std::string old_dir_value = old_dir ? old_dir : "";
+    const char * old_kinds = std::getenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS");
+    const std::string old_kinds_value = old_kinds ? old_kinds : "";
     setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", "/tmp/llama-expt-export-pin-test", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS", "k", 1);
 
     struct ggml_init_params params = {
         /* .mem_size   = */ 1u * 1024u * 1024u,
@@ -175,33 +199,52 @@ static bool test_attention_export_pin_marks_output_tensors() {
         throw std::runtime_error("failed to init ggml context");
     }
 
-    ggml_tensor * kq = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
-    ggml_set_name(kq, "kq-0");
-    llama_expt::tensor_export_pin_named_tensor(kq);
+    const auto make_and_pin = [&](const char * name) {
+        ggml_tensor * tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+        ggml_set_name(tensor, name);
+        llama_expt::tensor_export_pin_named_tensor(tensor);
+        return tensor;
+    };
 
-    ggml_tensor * kcur = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
-    ggml_set_name(kcur, "Kcur-0");
-    llama_expt::tensor_export_pin_named_tensor(kcur);
+    ggml_tensor * kq = make_and_pin("kq-0");
+    ggml_tensor * kcur0 = make_and_pin("Kcur-0");
+    ggml_tensor * kcur1 = make_and_pin("Kcur-1");
+    ggml_tensor * kcur12 = make_and_pin("Kcur-12");
+    ggml_tensor * softmax = make_and_pin("kq-softmax-0");
+    ggml_tensor * other = make_and_pin("kq-1");
+    ggml_tensor * kcur_mm = make_and_pin("Kcur-mm-0");
+    ggml_tensor * kcur_scaled = make_and_pin("Kcur-scaled-0");
+    ggml_tensor * kcur_normed = make_and_pin("Kcur_normed-0");
+    ggml_tensor * kcur_post_rope = make_and_pin("Kcur-post-rope-0");
+    ggml_tensor * kcur_view = make_and_pin("Kcur-0-view");
 
-    ggml_tensor * softmax = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
-    ggml_set_name(softmax, "kq-softmax-0");
-    llama_expt::tensor_export_pin_named_tensor(softmax);
-
-    ggml_tensor * other = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
-    ggml_set_name(other, "kq-1");
-    llama_expt::tensor_export_pin_named_tensor(other);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS", "q", 1);
+    ggml_tensor * kcur_without_k_kind = make_and_pin("Kcur-7");
 
     const bool ok =
         expect((kq->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected kq-0 to be pinned as output") &&
-        expect((kcur->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-0 to be pinned as output") &&
+        expect((kcur0->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-0 to be pinned as output") &&
+        expect((kcur1->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-1 to be pinned as output") &&
+        expect((kcur12->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-12 to be pinned as output") &&
         expect((softmax->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected kq-softmax-0 to be pinned as output") &&
-        expect((other->flags & GGML_TENSOR_FLAG_OUTPUT) == 0, "expected non-layer0 tensor to remain unpinned");
+        expect((other->flags & GGML_TENSOR_FLAG_OUTPUT) == 0, "expected non-layer0 attention tensor to remain unpinned") &&
+        expect((kcur_mm->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-mm tensor to be pinned as output") &&
+        expect((kcur_scaled->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-scaled tensor to be pinned as output") &&
+        expect((kcur_normed->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur_normed tensor to be pinned as output") &&
+        expect((kcur_post_rope->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur-post-rope tensor to be pinned as output") &&
+        expect((kcur_view->flags & GGML_TENSOR_FLAG_OUTPUT) != 0, "expected Kcur view tensor to be pinned as output") &&
+        expect((kcur_without_k_kind->flags & GGML_TENSOR_FLAG_OUTPUT) == 0, "expected Kcur tensor to remain unpinned when k export is disabled");
 
     ggml_free(ctx);
     if (old_dir) {
         setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", old_dir_value.c_str(), 1);
     } else {
         unsetenv("LLAMA_EXPT_TENSOR_EXPORT_DIR");
+    }
+    if (old_kinds) {
+        setenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS", old_kinds_value.c_str(), 1);
+    } else {
+        unsetenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS");
     }
     return ok;
 }
@@ -325,101 +368,6 @@ static bool test_manifest_eval_and_rejection() {
     return true;
 }
 
-static bool test_k_channel_mean_sort_order_uses_abs_mean_desc() {
-    const std::vector<float> values = {
-        // channel means over 2 rows:
-        // c0= 0.0, c1=-3.0, c2= 3.0, c3= 2.0, c4=-2.0, c5=1.0, c6=-1.0, c7=0.0,
-        // c8= 0.5, c9=-0.5, c10=0.25, c11=-0.25, c12=0.0, c13=0.0, c14=0.0, c15=0.0
-         1.0f, -4.0f,  2.0f,  4.0f, -3.0f,  0.0f, -2.0f,  1.0f,
-         0.0f, -1.0f,  0.5f, -0.5f,  3.0f, -3.0f,  0.0f,  0.0f,
-        -1.0f, -2.0f,  4.0f,  0.0f, -1.0f,  2.0f,  0.0f, -1.0f,
-         1.0f,  0.0f,  0.0f,  0.0f, -3.0f,  3.0f,  0.0f,  0.0f,
-    };
-
-    const std::vector<size_t> order = llama_expt::make_k_channel_order_from_abs_mean(values, 16);
-    const std::vector<size_t> expected = {
-        1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 0, 7, 12, 13, 14, 15,
-    };
-    if (!expect(order == expected, "expected abs-mean-desc channel order with index tie-break")) {
-        return false;
-    }
-
-    bool rejected = false;
-    try {
-        (void) llama_expt::make_k_channel_order_from_abs_mean(values, 0);
-    } catch (const std::exception & e) {
-        rejected = std::string(e.what()).find("row") != std::string::npos;
-    }
-    return expect(rejected, "expected invalid row size rejection");
-}
-
-static bool test_k_channel_mean_sort_manifest_eval_reports_basis_and_deltas() {
-    const std::string dir = temp_dir();
-    std::filesystem::remove_all(dir);
-    std::filesystem::create_directories(dir);
-
-    std::vector<float> k_data(32);
-    for (size_t i = 0; i < k_data.size(); ++i) {
-        k_data[i] = ((int) i - 15) * 0.1875f;
-    }
-    k_data[1]  = -7.0f;
-    k_data[2]  =  9.0f;
-    k_data[17] = -5.0f;
-    k_data[18] =  7.0f;
-
-    write_f32(dir + "/k-mean-sort.bin", k_data);
-    write_file(dir + "/manifest-k-mean-sort.json",
-            "{\n"
-            "  \"records\": [\n"
-            "    {\"name\":\"Kcur-0\",\"kind\":\"k\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"k-mean-sort.bin\",\"byte_size\":128}\n"
-            "  ]\n"
-            "}\n");
-
-    const llama_expt::k_channel_sort_eval_report report =
-        llama_expt::evaluate_manifest_k_channel_sort(
-                dir + "/manifest-k-mean-sort.json",
-                llama_expt::k_channel_sort_basis::ABS_MEAN,
-                1.0f);
-    if (!expect(report.records.size() == 1, "expected one mean-sort record")) {
-        return false;
-    }
-
-    const llama_expt::k_channel_sort_eval_record_report & rr = report.records[0];
-    if (!expect(rr.channel_count == 16, "expected channel count from ne0")) {
-        return false;
-    }
-    if (!expect(rr.row_count == 2, "expected row count from remaining dimensions")) {
-        return false;
-    }
-    if (!expect(rr.sort_basis == "abs_mean", "expected abs_mean sort basis")) {
-        return false;
-    }
-    if (!expect(rr.channel_order[0] == 2 && rr.channel_order[1] == 1,
-            "expected mean order prefix from all rows")) {
-        return false;
-    }
-    if (!expect_close(rr.delta_metrics.mae, rr.sorted_metrics.mae - rr.baseline_metrics.mae, 1e-12,
-            "mean-sort MAE delta mismatch")) {
-        return false;
-    }
-
-    const std::string json = llama_expt::format_k_channel_sort_eval_report_json(report);
-    if (!expect(json.find("\"algorithm\": \"nvfp4_k_channel_mean_sort\"") != std::string::npos,
-            "expected mean-sort algorithm in JSON")) {
-        return false;
-    }
-    if (!expect(json.find("\"sort_basis\": \"abs_mean\"") != std::string::npos,
-            "expected abs_mean sort basis in JSON")) {
-        return false;
-    }
-    if (!expect(json.find("\"channel_order\"") != std::string::npos,
-            "expected channel order in JSON")) {
-        return false;
-    }
-
-    return true;
-}
-
 static bool test_attention_replay_manifest_eval_reports_small_error() {
     const std::string dir = temp_dir();
     std::filesystem::remove_all(dir);
@@ -482,6 +430,12 @@ static bool test_attention_replay_manifest_eval_reports_small_error() {
     if (!expect(rr.softmax_metrics.n == softmax_data.size(), "expected softmax metric count")) {
         return false;
     }
+    if (!expect_close(rr.softmax_nmse, 0.0, 1e-12, "expected exact softmax NMSE")) {
+        return false;
+    }
+    if (!expect_close(rr.kq_nmse, 0.0, 1e-12, "expected exact KQ NMSE")) {
+        return false;
+    }
 
     const std::string json = llama_expt::format_attention_replay_eval_report_json(report);
     if (!expect(json.find("\"algorithm\": \"attention_replay\"") != std::string::npos,
@@ -491,6 +445,342 @@ static bool test_attention_replay_manifest_eval_reports_small_error() {
     if (!expect(json.find("\"max_abs_err_softmax\": 0.0") != std::string::npos ||
                 json.find("\"max_abs_err_softmax\": 0") != std::string::npos,
             "expected softmax max_abs_err in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_nmse\"") != std::string::npos,
+            "expected softmax NMSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_mse\"") != std::string::npos,
+            "expected KQ MSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_nmse\"") != std::string::npos,
+            "expected KQ NMSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_max_abs_err\"") != std::string::npos,
+            "expected KQ max_abs_err in JSON")) {
+        return false;
+    }
+
+    return true;
+}
+
+static bool test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics() {
+    const std::string dir = temp_dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    std::vector<float> k_data(32);
+    std::vector<float> q_data(32);
+    for (size_t i = 0; i < 16; ++i) {
+        k_data[i] = (float) i * 0.125f - 0.75f;
+        k_data[16 + i] = (float) i * -0.0625f + 0.5f;
+        q_data[i] = (float) i * 0.03125f + 0.125f;
+        q_data[16 + i] = (float) i * -0.046875f + 0.25f;
+    }
+    k_data[3] = 300.0f;
+    k_data[22] = -320.0f;
+
+    const std::vector<float> mask_data = {
+         0.0f,
+        -INFINITY,
+    };
+    std::vector<float> kq_data;
+    std::vector<float> softmax_data;
+    compute_attention_reference(
+            k_data, q_data, mask_data,
+            16, 2, 1, 1,
+            16, 2, 1, 1,
+            1, 2, 1, 1,
+            kq_data, softmax_data);
+
+    write_f32(dir + "/k.bin", k_data);
+    write_f32(dir + "/q.bin", q_data);
+    write_f32(dir + "/mask.bin", mask_data);
+    write_f32(dir + "/kq.bin", kq_data);
+    write_f32(dir + "/softmax.bin", softmax_data);
+
+    write_file(dir + "/manifest-attention.json",
+            "{\n"
+            "  \"records\": [\n"
+            "    {\"name\":\"Kcur-0\",\"kind\":\"k\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"k.bin\",\"byte_size\":128},\n"
+            "    {\"name\":\"Qcur-0\",\"kind\":\"q\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"q.bin\",\"byte_size\":128},\n"
+            "    {\"name\":\"kq-0\",\"kind\":\"kq\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"kq.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-mask-0\",\"kind\":\"kq_mask\",\"dtype\":\"f32\",\"ne\":[1,2,1,1],\"nb\":[4,4,8,8],\"path\":\"mask.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-softmax-0\",\"kind\":\"kq_softmax\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"softmax.bin\",\"byte_size\":8,\n"
+            "     \"meta\":{\"src_k\":\"Kcur-0\",\"src_q\":\"Qcur-0\",\"src_kq\":\"kq-0\",\"src_mask\":\"kq-mask-0\",\"kq_scale\":\"1\",\"max_bias\":\"0\"}}\n"
+            "  ]\n"
+            "}\n");
+
+    const llama_expt::attention_replay_nvfp4_outlier_eval_report report =
+        llama_expt::evaluate_manifest_attention_replay_nvfp4_outlier(dir + "/manifest-attention.json");
+    if (!expect(report.records.size() == 1, "expected one NVFP4 outlier attention replay record")) {
+        return false;
+    }
+
+    const llama_expt::attention_replay_nvfp4_outlier_report & rr = report.records[0];
+    if (!expect(rr.softmax_metrics.n == softmax_data.size(), "expected softmax metric count")) {
+        return false;
+    }
+    if (!expect(rr.k_outlier_count == 2, "expected K outliers above layer threshold")) {
+        return false;
+    }
+    if (!expect(rr.k_threshold > 0.0f, "expected K threshold metadata")) {
+        return false;
+    }
+    if (!expect(rr.k_global_scale > 0.0f, "expected K global scale metadata")) {
+        return false;
+    }
+    if (!expect(rr.softmax_kld >= 0.0, "expected non-negative softmax KLD")) {
+        return false;
+    }
+    if (!expect(rr.softmax_nmse >= 0.0, "expected non-negative softmax NMSE")) {
+        return false;
+    }
+    if (!expect(rr.kq_nmse >= 0.0, "expected non-negative KQ NMSE")) {
+        return false;
+    }
+    if (!expect_close(rr.kld_epsilon, 1e-12, 0.0, "expected KLD epsilon")) {
+        return false;
+    }
+
+    const std::string json = llama_expt::format_attention_replay_nvfp4_outlier_eval_report_json(report);
+    if (!expect(json.find("\"algorithm\": \"attention_replay_nvfp4_outlier\"") != std::string::npos,
+            "expected NVFP4 outlier attention replay algorithm in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"mode\": \"nvfp4_outlier_threshold_layer0\"") != std::string::npos,
+            "expected K quantization mode in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"mode\": \"nvfp4_dynamic_row_amax\"") != std::string::npos,
+            "expected Q quantization mode in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"threshold\"") != std::string::npos,
+            "expected threshold in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_mse\"") != std::string::npos,
+            "expected softmax MSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_nmse\"") != std::string::npos,
+            "expected softmax NMSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_kld\"") != std::string::npos,
+            "expected softmax KLD in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_mse\"") != std::string::npos,
+            "expected KQ MSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_nmse\"") != std::string::npos,
+            "expected KQ NMSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kq_max_abs_err\"") != std::string::npos,
+            "expected KQ max_abs_err in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"kld_reference_distribution\": \"exported_softmax\"") != std::string::npos,
+            "expected KLD reference distribution in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("clamp reference and actual probabilities to epsilon") != std::string::npos,
+            "expected KLD epsilon clamp documentation in JSON")) {
+        return false;
+    }
+
+    return true;
+}
+
+static bool test_attention_replay_quant_round_accepts_custom_algo() {
+    const std::string dir = temp_dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    std::vector<float> k_data(32);
+    std::vector<float> q_data(32);
+    for (size_t i = 0; i < 16; ++i) {
+        k_data[i] = (float) i * 0.125f - 0.75f;
+        k_data[16 + i] = (float) i * -0.0625f + 0.5f;
+        q_data[i] = (float) i * 0.03125f + 0.125f;
+        q_data[16 + i] = (float) i * -0.046875f + 0.25f;
+    }
+
+    const std::vector<float> mask_data = {
+         0.0f,
+        -INFINITY,
+    };
+    std::vector<float> kq_data;
+    std::vector<float> softmax_data;
+    compute_attention_reference(
+            k_data, q_data, mask_data,
+            16, 2, 1, 1,
+            16, 2, 1, 1,
+            1, 2, 1, 1,
+            kq_data, softmax_data);
+
+    write_f32(dir + "/k.bin", k_data);
+    write_f32(dir + "/q.bin", q_data);
+    write_f32(dir + "/mask.bin", mask_data);
+    write_f32(dir + "/kq.bin", kq_data);
+    write_f32(dir + "/softmax.bin", softmax_data);
+
+    write_file(dir + "/manifest-attention.json",
+            "{\n"
+            "  \"records\": [\n"
+            "    {\"name\":\"Kcur-0\",\"kind\":\"k\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"k.bin\",\"byte_size\":128},\n"
+            "    {\"name\":\"Qcur-0\",\"kind\":\"q\",\"dtype\":\"f32\",\"ne\":[16,2,1,1],\"nb\":[4,64,128,128],\"path\":\"q.bin\",\"byte_size\":128},\n"
+            "    {\"name\":\"kq-0\",\"kind\":\"kq\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"kq.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-mask-0\",\"kind\":\"kq_mask\",\"dtype\":\"f32\",\"ne\":[1,2,1,1],\"nb\":[4,4,8,8],\"path\":\"mask.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-softmax-0\",\"kind\":\"kq_softmax\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"softmax.bin\",\"byte_size\":8,\n"
+            "     \"meta\":{\"src_k\":\"Kcur-0\",\"src_q\":\"Qcur-0\",\"src_kq\":\"kq-0\",\"src_mask\":\"kq-mask-0\",\"kq_scale\":\"1\",\"max_bias\":\"0\"}}\n"
+            "  ]\n"
+            "}\n");
+
+    const test_identity_attention_quant_round_algo algo;
+    const llama_expt::attention_replay_nvfp4_outlier_eval_report report =
+        llama_expt::evaluate_manifest_attention_replay_quant_round(dir + "/manifest-attention.json", algo);
+    if (!expect(report.records.size() == 1, "expected one custom quant round attention replay record")) {
+        return false;
+    }
+    if (!expect(report.quant_round_algorithm == "test_identity", "expected custom quant round algorithm name")) {
+        return false;
+    }
+
+    const llama_expt::attention_replay_nvfp4_outlier_report & rr = report.records[0];
+    if (!expect_close(rr.max_abs_err_kq, 0.0, 1e-6, "expected exact custom KQ replay")) {
+        return false;
+    }
+    if (!expect_close(rr.max_abs_err_softmax, 0.0, 1e-6, "expected exact custom softmax replay")) {
+        return false;
+    }
+    if (!expect(rr.k_quantization_mode == "identity_k", "expected custom K mode")) {
+        return false;
+    }
+    if (!expect(rr.q_quantization_mode == "identity_q", "expected custom Q mode")) {
+        return false;
+    }
+
+    const std::string json = llama_expt::format_attention_replay_nvfp4_outlier_eval_report_json(report);
+    if (!expect(json.find("\"quant_round_algorithm\": \"test_identity\"") != std::string::npos,
+            "expected custom quant round algorithm in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"k_quant_round\"") != std::string::npos,
+            "expected K quant round metadata in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"mode\": \"identity_q\"") != std::string::npos,
+            "expected custom Q mode in JSON")) {
+        return false;
+    }
+
+    return true;
+}
+
+static bool test_attention_replay_fp8_e4m3_e8m0_reports_metrics() {
+    const std::string dir = temp_dir();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    std::vector<float> k_data(64);
+    std::vector<float> q_data(64);
+    for (size_t i = 0; i < 32; ++i) {
+        k_data[i] = (float) i * 0.0625f - 1.0f;
+        k_data[32 + i] = (float) i * -0.03125f + 0.75f;
+        q_data[i] = (float) i * 0.046875f + 0.0625f;
+        q_data[32 + i] = (float) i * -0.0390625f + 0.5f;
+    }
+
+    const std::vector<float> mask_data = {
+         0.0f,
+        -INFINITY,
+    };
+    std::vector<float> kq_data;
+    std::vector<float> softmax_data;
+    compute_attention_reference(
+            k_data, q_data, mask_data,
+            32, 2, 1, 1,
+            32, 2, 1, 1,
+            1, 2, 1, 1,
+            kq_data, softmax_data);
+
+    write_f32(dir + "/k.bin", k_data);
+    write_f32(dir + "/q.bin", q_data);
+    write_f32(dir + "/mask.bin", mask_data);
+    write_f32(dir + "/kq.bin", kq_data);
+    write_f32(dir + "/softmax.bin", softmax_data);
+
+    write_file(dir + "/manifest-attention.json",
+            "{\n"
+            "  \"records\": [\n"
+            "    {\"name\":\"Kcur-0\",\"kind\":\"k\",\"dtype\":\"f32\",\"ne\":[32,2,1,1],\"nb\":[4,128,256,256],\"path\":\"k.bin\",\"byte_size\":256},\n"
+            "    {\"name\":\"Qcur-0\",\"kind\":\"q\",\"dtype\":\"f32\",\"ne\":[32,2,1,1],\"nb\":[4,128,256,256],\"path\":\"q.bin\",\"byte_size\":256},\n"
+            "    {\"name\":\"kq-0\",\"kind\":\"kq\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"kq.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-mask-0\",\"kind\":\"kq_mask\",\"dtype\":\"f32\",\"ne\":[1,2,1,1],\"nb\":[4,4,8,8],\"path\":\"mask.bin\",\"byte_size\":8},\n"
+            "    {\"name\":\"kq-softmax-0\",\"kind\":\"kq_softmax\",\"dtype\":\"f32\",\"ne\":[1,1,2,1],\"nb\":[4,4,4,8],\"path\":\"softmax.bin\",\"byte_size\":8,\n"
+            "     \"meta\":{\"src_k\":\"Kcur-0\",\"src_q\":\"Qcur-0\",\"src_kq\":\"kq-0\",\"src_mask\":\"kq-mask-0\",\"kq_scale\":\"1\",\"max_bias\":\"0\"}}\n"
+            "  ]\n"
+            "}\n");
+
+    const llama_expt::attention_replay_nvfp4_outlier_eval_report report =
+        llama_expt::evaluate_manifest_attention_replay_fp8_e4m3_e8m0(dir + "/manifest-attention.json");
+    if (!expect(report.records.size() == 1, "expected one FP8 attention replay record")) {
+        return false;
+    }
+    if (!expect(report.algorithm == "attention_replay_fp8_e4m3_e8m0", "expected FP8 report algorithm")) {
+        return false;
+    }
+    if (!expect(report.quant_round_algorithm == "fp8_e4m3_e8m0_32", "expected FP8 quant round algorithm")) {
+        return false;
+    }
+
+    const llama_expt::attention_replay_nvfp4_outlier_report & rr = report.records[0];
+    if (!expect(rr.softmax_metrics.n == softmax_data.size(), "expected FP8 softmax metric count")) {
+        return false;
+    }
+    if (!expect(rr.softmax_metrics.mse >= 0.0, "expected non-negative FP8 softmax MSE")) {
+        return false;
+    }
+    if (!expect(rr.softmax_nmse >= 0.0, "expected non-negative FP8 softmax NMSE")) {
+        return false;
+    }
+    if (!expect(rr.softmax_kld >= 0.0, "expected non-negative FP8 softmax KLD")) {
+        return false;
+    }
+    if (!expect(rr.k_quantization_mode == "fp8_e4m3_e8m0_32_k", "expected FP8 K mode")) {
+        return false;
+    }
+    if (!expect(rr.q_quantization_mode == "fp8_e4m3_e8m0_32_q", "expected FP8 Q mode")) {
+        return false;
+    }
+
+    const std::string json = llama_expt::format_attention_replay_nvfp4_outlier_eval_report_json(report);
+    if (!expect(json.find("\"algorithm\": \"attention_replay_fp8_e4m3_e8m0\"") != std::string::npos,
+            "expected FP8 algorithm in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"quant_round_algorithm\": \"fp8_e4m3_e8m0_32\"") != std::string::npos,
+            "expected FP8 quant round algorithm in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_mse\"") != std::string::npos,
+            "expected FP8 softmax MSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_nmse\"") != std::string::npos,
+            "expected FP8 softmax NMSE in JSON")) {
+        return false;
+    }
+    if (!expect(json.find("\"softmax_kld\"") != std::string::npos,
+            "expected FP8 softmax KLD in JSON")) {
         return false;
     }
 
@@ -510,13 +800,16 @@ int main() {
     if (!test_manifest_eval_and_rejection()) {
         return 1;
     }
-    if (!test_k_channel_mean_sort_order_uses_abs_mean_desc()) {
-        return 1;
-    }
-    if (!test_k_channel_mean_sort_manifest_eval_reports_basis_and_deltas()) {
-        return 1;
-    }
     if (!test_attention_replay_manifest_eval_reports_small_error()) {
+        return 1;
+    }
+    if (!test_attention_replay_nvfp4_outlier_manifest_eval_reports_metrics()) {
+        return 1;
+    }
+    if (!test_attention_replay_quant_round_accepts_custom_algo()) {
+        return 1;
+    }
+    if (!test_attention_replay_fp8_e4m3_e8m0_reports_metrics()) {
         return 1;
     }
 
