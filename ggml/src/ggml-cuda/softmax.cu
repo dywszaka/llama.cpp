@@ -1,4 +1,5 @@
 #include "common.cuh"
+#include "expt/softmax-cim.cuh"
 #include "ggml.h"
 #include "softmax.cuh"
 #include <cstdint>
@@ -250,6 +251,43 @@ static void soft_max_back_f32_cuda(
     soft_max_back_f32<<<block_nums, block_dims, 0, stream>>>(grad, dstf, dst, ncols, scale);
 }
 
+static soft_max_params soft_max_params_from_cim(const ggml_cuda_soft_max_cim_params & params) {
+    soft_max_params p = {};
+    p.nheads = params.nheads;
+    p.n_head_log2 = params.n_head_log2;
+    p.ncols = params.ncols;
+    p.nrows_x = params.nrows_x;
+    p.nrows_y = params.nrows_y;
+    p.ne00 = params.ne00;
+    p.ne01 = params.ne01;
+    p.ne02 = params.ne02;
+    p.ne03 = params.ne03;
+    p.nb11 = params.nb11;
+    p.nb12 = params.nb12;
+    p.nb13 = params.nb13;
+    p.ne12 = params.ne12;
+    p.ne13 = params.ne13;
+    p.scale = params.scale;
+    p.max_bias = params.max_bias;
+    p.m0 = params.m0;
+    p.m1 = params.m1;
+    return p;
+}
+
+static void soft_max_f32_cuda_cim_launch(const ggml_cuda_soft_max_cim_params & params, cudaStream_t stream) {
+    const soft_max_params p = soft_max_params_from_cim(params);
+
+    switch (params.mask_type) {
+        case GGML_CUDA_SOFT_MAX_MASK_F16:
+            soft_max_f32_cuda(params.src0, (const half *) params.src1, params.src2, params.dst, p, stream);
+            break;
+        case GGML_CUDA_SOFT_MAX_MASK_F32:
+        case GGML_CUDA_SOFT_MAX_MASK_NONE:
+            soft_max_f32_cuda(params.src0, (const float *) params.src1, params.src2, params.dst, p, stream);
+            break;
+    }
+}
+
 void ggml_cuda_op_soft_max(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
@@ -313,6 +351,36 @@ void ggml_cuda_op_soft_max(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     params.max_bias = max_bias;
     params.m0 = m0;
     params.m1 = m1;
+
+    if (ggml_cuda_soft_max_cim_enabled()) {
+        ggml_cuda_soft_max_cim_params cim_params = {};
+        cim_params.src0 = src0_d;
+        cim_params.src1 = src1_d;
+        cim_params.src2 = (const float *) src2_d;
+        cim_params.dst = dst_d;
+        cim_params.mask_type = use_f16 ? GGML_CUDA_SOFT_MAX_MASK_F16 :
+                (src1 ? GGML_CUDA_SOFT_MAX_MASK_F32 : GGML_CUDA_SOFT_MAX_MASK_NONE);
+        cim_params.nheads = params.nheads;
+        cim_params.n_head_log2 = params.n_head_log2;
+        cim_params.ncols = params.ncols;
+        cim_params.nrows_x = params.nrows_x;
+        cim_params.nrows_y = params.nrows_y;
+        cim_params.ne00 = params.ne00;
+        cim_params.ne01 = params.ne01;
+        cim_params.ne02 = params.ne02;
+        cim_params.ne03 = params.ne03;
+        cim_params.nb11 = params.nb11;
+        cim_params.nb12 = params.nb12;
+        cim_params.nb13 = params.nb13;
+        cim_params.ne12 = params.ne12;
+        cim_params.ne13 = params.ne13;
+        cim_params.scale = params.scale;
+        cim_params.max_bias = params.max_bias;
+        cim_params.m0 = params.m0;
+        cim_params.m1 = params.m1;
+        ggml_cuda_soft_max_cim_run(ctx, dst, cim_params, soft_max_f32_cuda_cim_launch);
+        return;
+    }
 
     if (use_f16) {
         soft_max_f32_cuda(src0_d, (const half  *) src1_d, (const float *) src2_d, dst_d, params, stream);

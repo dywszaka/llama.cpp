@@ -24,6 +24,7 @@
 #include "ggml-cuda/fattn.cuh"
 #include "ggml-cuda/expt/fp8/fp8-e8m0-matmul.cuh"
 #include "ggml-cuda/expt/rms-norm-cim.cuh"
+#include "ggml-cuda/expt/softmax-cim.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"
@@ -2914,6 +2915,13 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             use_cuda_graph = false;
 #ifndef NDEBUG
             GGML_LOG_DEBUG("%s: disabling CUDA graphs for RMS_NORM CIM experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_SOFT_MAX && ggml_cuda_soft_max_cim_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for SOFT_MAX CIM experiment\n", __func__);
 #endif
         }
 
