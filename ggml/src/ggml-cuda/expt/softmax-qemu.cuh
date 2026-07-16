@@ -2,11 +2,11 @@
 
 #include "../common.cuh"
 
-enum ggml_cuda_soft_max_cim_mode {
-    GGML_CUDA_SOFT_MAX_CIM_MODE_CUDA = 0,
-    GGML_CUDA_SOFT_MAX_CIM_MODE_CIM,
-    GGML_CUDA_SOFT_MAX_CIM_MODE_COMPARE_CUDA,
-    GGML_CUDA_SOFT_MAX_CIM_MODE_COMPARE_CIM,
+enum ggml_cuda_soft_max_qemu_mode {
+    GGML_CUDA_SOFT_MAX_QEMU_MODE_CUDA = 0,
+    GGML_CUDA_SOFT_MAX_QEMU_MODE_QEMU,
+    GGML_CUDA_SOFT_MAX_QEMU_MODE_QEMU_CUDA,
+    GGML_CUDA_SOFT_MAX_QEMU_MODE_COMPARE,
 };
 
 enum ggml_cuda_soft_max_mask_type {
@@ -15,7 +15,7 @@ enum ggml_cuda_soft_max_mask_type {
     GGML_CUDA_SOFT_MAX_MASK_F32,
 };
 
-struct ggml_cuda_soft_max_cim_params {
+struct ggml_cuda_soft_max_qemu_params {
     const float * src0;
     const void * src1;
     const float * src2;
@@ -44,14 +44,14 @@ struct ggml_cuda_soft_max_cim_params {
 };
 
 using ggml_cuda_soft_max_launch_fn = void (*)(
-        const ggml_cuda_soft_max_cim_params & params,
+        const ggml_cuda_soft_max_qemu_params & params,
         cudaStream_t stream);
 
-ggml_cuda_soft_max_cim_mode ggml_cuda_soft_max_cim_get_mode();
-bool ggml_cuda_soft_max_cim_enabled();
+ggml_cuda_soft_max_qemu_mode ggml_cuda_soft_max_qemu_get_mode();
+bool ggml_cuda_soft_max_qemu_enabled();
 
-void ggml_cuda_soft_max_cim_run(
+void ggml_cuda_soft_max_qemu_run(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * dst_tensor,
-        const ggml_cuda_soft_max_cim_params & params,
+        const ggml_cuda_soft_max_qemu_params & params,
         ggml_cuda_soft_max_launch_fn cuda_launch);

@@ -1,10 +1,11 @@
 # Experiment Switch Environment Variables
 
-## CUDA SOFT_MAX CIM Comparison
+## CUDA SOFT_MAX QEMU Offload
 
-### `GGML_CUDA_SOFT_MAX_CIM_MODE`
+### `GGML_CUDA_SOFT_MAX_QEMU_MODE`
 
-Selects an experimental CUDA/CIM SOFT_MAX runtime mode. Default: unset or
+Selects the experimental CUDA/QEMU SOFT_MAX runtime mode. The build must use
+`-DGGML_CUDA_SOFTMAX_QEMU=ON`. Default: unset or
 `cuda`, preserving the existing CUDA-only path and producing no comparison
 artifact.
 
@@ -12,32 +13,69 @@ Supported values:
 
 - `cuda`: run only the existing CUDA SOFT_MAX implementation and use the CUDA
   result.
-- `cim`: run only the experimental CIM/RPC placeholder path and use the CIM
-  result.
-- `compare_cuda`: start CUDA SOFT_MAX and the CIM/RPC placeholder path
-  concurrently, wait for both, append an RMSE comparison artifact, and use the
-  CUDA result.
-- `compare_cim`: start CUDA SOFT_MAX and the CIM/RPC placeholder path
-  concurrently, wait for both, append an RMSE comparison artifact, and use the
-  CIM result.
+- `qemu`: apply scale, mask, and ALiBi on CUDA, round the effective logits to
+  BF16, run the deterministic BF16 softmax through the QEMU/RVV ZMQ daemon,
+  convert its BF16 output to F32 on CUDA, and use that result.
+- `qemu_cuda`: run the same deterministic BF16 softmax entirely on the existing
+  CUDA device tensors and use its F32-converted result. This mode does not
+  create a ZMQ socket and performs no D2H or H2D transfer.
+- `compare`: run the original llama.cpp CUDA softmax, QEMU/RVV BF16 softmax,
+  and qemu_cuda concurrently. The original llama.cpp CUDA result is used
+  downstream. The artifact records llama-vs-QEMU MSE/RMSE/max error and the
+  QEMU-vs-qemu_cuda BF16 bit mismatch count.
 
-The CIM entry currently stages the same SOFT_MAX input bytes, optional mask
-bytes, and optional sink bytes to host to model RPC/IO request behavior, waits
-for those transfers, and returns a zero-filled F32 response. It is a placeholder
-for a real external CIM implementation and is not numerically correct. Unknown
-values fall back to `cuda`.
+`compare_cuda` and `compare_qemu` are accepted as compatibility aliases for
+`compare`; both now keep the original llama.cpp CUDA result downstream.
+
+Unknown values fall back to `cuda`. Before deterministic BF16 softmax, the CUDA
+preprocess supports the complete forward protocol described in
+`docs/development/cuda-softmax-io-protocol.md`, including F16/F32 masks, mask
+strides, ALiBi, scale, and attention sinks. QEMU and qemu_cuda receive identical
+BF16 effective logits and BF16 sinks.
 
 Dual-run modes disable CUDA graph capture for graphs containing SOFT_MAX because
 the experiment performs host IO, synchronization, and artifact writes. Single
 run modes do not generate comparison artifacts.
 
-### `GGML_CUDA_SOFT_MAX_CIM_ARTIFACT`
+### `GGML_CUDA_SOFT_MAX_QEMU_ENDPOINT`
 
-Overrides the append-only JSONL artifact path used by `compare_cuda` and
-`compare_cim`. Default: `experiments/softmax-cim-compare.jsonl` relative to
+ZMQ endpoint for the QEMU daemon. Default: `tcp://127.0.0.1:15580`.
+
+### `GGML_CUDA_SOFT_MAX_QEMU_TIMEOUT_MS`
+
+ZMQ send/receive timeout in milliseconds. Default: `300000`.
+
+### `GGML_CUDA_SOFT_MAX_QEMU_ARTIFACT`
+
+Overrides the append-only JSONL artifact path used by `compare`. Default:
+`experiments/softmax-qemu-compare.jsonl` relative to
 the process working directory. Parent directories are created when possible.
-Each line records at least the destination tensor name (`dst`) and `rmse`, plus
-the ggml operator descriptor (`op`).
+Each line records llama-vs-QEMU `mse`, `rmse`, and `max_abs`, the
+QEMU-vs-qemu_cuda BF16 mismatch count, all three softmax timings, element count,
+request id, destination tensor name, and ggml operator descriptor.
+
+### `GGML_CUDA_SOFT_MAX_QEMU_MISMATCH_LOG`
+
+Overrides the separate append-only JSONL diagnostic used only when QEMU/RVV and
+qemu_cuda BF16 outputs are not bit-exact. Default:
+`experiments/softmax-qemu-cuda-mismatch.jsonl`. Each mismatch record contains
+the full effective BF16 input, optional BF16 sinks, both full BF16 outputs,
+shape, mismatch count, and first mismatch index. BF16 values are written as
+four-digit hexadecimal bit patterns.
+
+### `GGML_CUDA_SOFT_MAX_QEMU_TIMING`
+
+Enables per-call llama.cpp timing logs. Default: unset/off. The workspace
+`run.sh` enables it by default for `compare` and `qemu`. Pure `qemu_cuda` mode
+always suppresses per-call timing logs and does not create CUDA timing events.
+
+Each `RVV_SOFTMAX_TIMING` line records the request id, runtime mode, destination
+tensor, element count, CUDA D2H time, ZMQ round-trip time, daemon request time,
+result-copy time, and total offload time. Set it to `0`, `false`, or `off` to
+disable timing logs. `QEMU_CUDA_SOFTMAX_TIMING` records the device-only BF16
+preprocess, deterministic softmax, and BF16-to-F32 duration only in `compare`.
+In `compare`, `LLAMA_CUDA_SOFTMAX_TIMING` also records the original llama.cpp
+CUDA kernel time.
 
 ## CUDA RMS_NORM CIM Comparison
 

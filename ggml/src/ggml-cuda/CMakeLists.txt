@@ -71,6 +71,13 @@ if (CUDAToolkit_FOUND)
                              ${GGML_SOURCES_CUDA}
                             )
 
+    if (GGML_CUDA_SOFTMAX_QEMU)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(ZMQ REQUIRED IMPORTED_TARGET libzmq)
+        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_SOFTMAX_QEMU)
+        target_link_libraries(ggml-cuda PRIVATE PkgConfig::ZMQ)
+    endif()
+
     add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 
     if (GGML_CUDA_GRAPHS)

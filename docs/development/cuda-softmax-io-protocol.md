@@ -142,19 +142,28 @@ sum(output[row, 0:ncols]) + sink_probability ~= 1
 `output` stride，需要把对应 byte stride / element stride 明确加入协议；当前实现没有
 这部分协议。
 
-## 实验框架
+## QEMU/RVV 实验路径
 
-`ggml/src/ggml-cuda/expt/softmax-cim.cu` 提供了与 RMS_NORM CIM 比较路径一致的占位
-框架：
+构建时使用 `-DGGML_CUDA_SOFTMAX_QEMU=ON`，运行时由
+`GGML_CUDA_SOFT_MAX_QEMU_MODE` 选择路径：
 
-- `GGML_CUDA_SOFT_MAX_CIM_MODE=cuda`：默认 CUDA-only 路径。
-- `GGML_CUDA_SOFT_MAX_CIM_MODE=cim`：只运行外部/CIM 占位路径，并使用其结果。
-- `GGML_CUDA_SOFT_MAX_CIM_MODE=compare_cuda`：CUDA 与外部/CIM 占位路径双跑，记录
-  RMSE，并使用 CUDA 结果。
-- `GGML_CUDA_SOFT_MAX_CIM_MODE=compare_cim`：CUDA 与外部/CIM 占位路径双跑，记录
-  RMSE，并使用外部/CIM 结果。
+- `cuda`：默认 CUDA-only 路径。
+- `qemu`：先在 CUDA 上把 scale、mask 和 ALiBi 合并为 BF16 effective logits，随后
+  D2H 并通过 ZMQ 发送给 QEMU/RVV 确定性 BF16 softmax；返回 BF16 后在 CUDA 上转为
+  F32，使用 QEMU 结果。
+- `qemu_cuda`：使用与 QEMU/RVV 相同的确定性 BF16 算法，直接处理现有 CUDA device
+  tensor，不启动 ZMQ，不进行 D2H/H2D，输出在 device 上转为 F32 后继续下游计算。
+- `compare`：同时计算原 llama.cpp CUDA、QEMU/RVV 和 qemu_cuda 三路结果，始终使用
+  原 llama.cpp CUDA 结果下游；记录 llama.cpp 与 QEMU 的 MSE/RMSE/max error，并要求
+  QEMU 与 qemu_cuda 的 BF16 输出比特完全一致。
 
-后续接入真实实现时，优先替换 `ggml_cim_op_soft_max()` 内部逻辑。该函数当前已经接收
-完整 `ggml_cuda_soft_max_cim_params`、`dst_tensor`、输出元素数和 CUDA stream，并已把
-`src0`、可选 `src1`、可选 `src2` 按原 tensor 字节数 staging 到 host，用于模拟 RPC/IO
-请求边界。真实实现返回与 `output` 协议相同的 dense F32 row layout 即可。
+`compare_cuda` 和 `compare_qemu` 作为兼容别名映射到 `compare`。
+
+`ggml/src/ggml-cuda/expt/softmax-qemu-cuda.cu` 负责 effective logits 的 BF16 预处理、
+device-only 确定性 softmax 和 BF16-to-F32；`softmax-qemu.cu` 负责模式选择、QEMU
+D2H/H2D、ZMQ RPC、三路并发和比较 artifact。attention sinks 同样先转为 BF16，并在
+QEMU/RVV 与 qemu_cuda 的最大值和分母计算中保持相同语义。守护进程把请求 tensor 和
+规格写入四路交织的 globalram mailbox，常驻 RVV 固件从 globalram 读取 BF16 输入并
+把 dense BF16 输出写回。ZMQ endpoint 默认是
+`tcp://127.0.0.1:15580`，可由 `GGML_CUDA_SOFT_MAX_QEMU_ENDPOINT` 覆盖。帧布局、
+mailbox 状态和四 bank 地址映射见 `cuda-softmax-qemu-rpc.md`。

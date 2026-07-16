@@ -1,5 +1,5 @@
 #include "common.cuh"
-#include "expt/softmax-cim.cuh"
+#include "expt/softmax-qemu.cuh"
 #include "ggml.h"
 #include "softmax.cuh"
 #include <cstdint>
@@ -251,7 +251,7 @@ static void soft_max_back_f32_cuda(
     soft_max_back_f32<<<block_nums, block_dims, 0, stream>>>(grad, dstf, dst, ncols, scale);
 }
 
-static soft_max_params soft_max_params_from_cim(const ggml_cuda_soft_max_cim_params & params) {
+static soft_max_params soft_max_params_from_qemu(const ggml_cuda_soft_max_qemu_params & params) {
     soft_max_params p = {};
     p.nheads = params.nheads;
     p.n_head_log2 = params.n_head_log2;
@@ -274,8 +274,8 @@ static soft_max_params soft_max_params_from_cim(const ggml_cuda_soft_max_cim_par
     return p;
 }
 
-static void soft_max_f32_cuda_cim_launch(const ggml_cuda_soft_max_cim_params & params, cudaStream_t stream) {
-    const soft_max_params p = soft_max_params_from_cim(params);
+static void soft_max_f32_cuda_qemu_launch(const ggml_cuda_soft_max_qemu_params & params, cudaStream_t stream) {
+    const soft_max_params p = soft_max_params_from_qemu(params);
 
     switch (params.mask_type) {
         case GGML_CUDA_SOFT_MAX_MASK_F16:
@@ -352,33 +352,33 @@ void ggml_cuda_op_soft_max(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     params.m0 = m0;
     params.m1 = m1;
 
-    if (ggml_cuda_soft_max_cim_enabled()) {
-        ggml_cuda_soft_max_cim_params cim_params = {};
-        cim_params.src0 = src0_d;
-        cim_params.src1 = src1_d;
-        cim_params.src2 = (const float *) src2_d;
-        cim_params.dst = dst_d;
-        cim_params.mask_type = use_f16 ? GGML_CUDA_SOFT_MAX_MASK_F16 :
+    if (ggml_cuda_soft_max_qemu_enabled()) {
+        ggml_cuda_soft_max_qemu_params qemu_params = {};
+        qemu_params.src0 = src0_d;
+        qemu_params.src1 = src1_d;
+        qemu_params.src2 = (const float *) src2_d;
+        qemu_params.dst = dst_d;
+        qemu_params.mask_type = use_f16 ? GGML_CUDA_SOFT_MAX_MASK_F16 :
                 (src1 ? GGML_CUDA_SOFT_MAX_MASK_F32 : GGML_CUDA_SOFT_MAX_MASK_NONE);
-        cim_params.nheads = params.nheads;
-        cim_params.n_head_log2 = params.n_head_log2;
-        cim_params.ncols = params.ncols;
-        cim_params.nrows_x = params.nrows_x;
-        cim_params.nrows_y = params.nrows_y;
-        cim_params.ne00 = params.ne00;
-        cim_params.ne01 = params.ne01;
-        cim_params.ne02 = params.ne02;
-        cim_params.ne03 = params.ne03;
-        cim_params.nb11 = params.nb11;
-        cim_params.nb12 = params.nb12;
-        cim_params.nb13 = params.nb13;
-        cim_params.ne12 = params.ne12;
-        cim_params.ne13 = params.ne13;
-        cim_params.scale = params.scale;
-        cim_params.max_bias = params.max_bias;
-        cim_params.m0 = params.m0;
-        cim_params.m1 = params.m1;
-        ggml_cuda_soft_max_cim_run(ctx, dst, cim_params, soft_max_f32_cuda_cim_launch);
+        qemu_params.nheads = params.nheads;
+        qemu_params.n_head_log2 = params.n_head_log2;
+        qemu_params.ncols = params.ncols;
+        qemu_params.nrows_x = params.nrows_x;
+        qemu_params.nrows_y = params.nrows_y;
+        qemu_params.ne00 = params.ne00;
+        qemu_params.ne01 = params.ne01;
+        qemu_params.ne02 = params.ne02;
+        qemu_params.ne03 = params.ne03;
+        qemu_params.nb11 = params.nb11;
+        qemu_params.nb12 = params.nb12;
+        qemu_params.nb13 = params.nb13;
+        qemu_params.ne12 = params.ne12;
+        qemu_params.ne13 = params.ne13;
+        qemu_params.scale = params.scale;
+        qemu_params.max_bias = params.max_bias;
+        qemu_params.m0 = params.m0;
+        qemu_params.m1 = params.m1;
+        ggml_cuda_soft_max_qemu_run(ctx, dst, qemu_params, soft_max_f32_cuda_qemu_launch);
         return;
     }
 
