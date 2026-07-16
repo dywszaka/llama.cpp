@@ -8,11 +8,10 @@
 #
 # The build-cuda-c100 artifacts link against CUDA 13 runtime libs
 # (libcudart.so.13, libcublas.so.13, ...) that are not installed on this host.
-# Rather than baking artifacts/models/data into a custom image, this runner
-# executes the binary inside the stock `nvidia/cuda:13.0.0-runtime-ubuntu24.04`
-# image, mounting the repo (bin + model + data) and installing the small
-# runtime packages the stock image lacks at container startup. C100 softmax also
-# needs device-tree-compiler because the C100/Spike runtime invokes `dtc`.
+# This runner executes the binary inside the local C100 PPL runtime image from
+# c100-sim-scripts/c100-ppl-runtime.Dockerfile, mounting the repo (bin + model +
+# data). The image preinstalls libcurl4, libgomp1, and device-tree-compiler so
+# normal runs do not spend startup time in apt.
 #
 # Host/Docker path mapping:
 #   This host exposes the repo under a bind mount (HOST_MOUNT_PREFIX) that the
@@ -34,7 +33,7 @@ SIM_REL="c100-sim"
 HOST_MOUNT_PREFIX="${HOST_MOUNT_PREFIX:-/home/allen/host_workspace}"
 DOCKER_MOUNT_PREFIX="${DOCKER_MOUNT_PREFIX:-/home/anka.zhao}"
 CONTAINER_ROOT="${CONTAINER_ROOT:-/workspace/llama.cpp}"
-RUNTIME_IMAGE="${RUNTIME_IMAGE:-nvidia/cuda:13.0.0-runtime-ubuntu24.04}"
+RUNTIME_IMAGE="${RUNTIME_IMAGE:-local/llama.cpp:c100-ppl-runtime}"
 
 # --- Mode selection --------------------------------------------------------
 MODE="${1:-${LLAMA_PPL_MODE:-}}"
@@ -140,6 +139,8 @@ status=0
 
 (
   export CUDA_VISIBLE_DEVICES=0
+  # 在 compute_forward 计算时，把计算结果dst 中的 data 从 f32 round 到 bf16（仍然是 f32 表示）
+  #export GGML_CUDA_TRUNC_ENABLE=1
   export PROJECT_ROOT="${CONTAINER_ROOT}/build-cuda-c100"
   export LD_LIBRARY_PATH="${CONTAINER_ROOT}/build-cuda-c100/bin:/usr/local/cuda/lib64"
   export LLAMA_C100_REGISTER_DEVICE="${REGISTER_C100_DEVICE}"
@@ -164,7 +165,7 @@ status=0
       --batch-size 512 \
       --ubatch-size 512 \
       -t 32 \
-      -c 256 \
+      -c 512 \
       --kv-unified \
       --chunks 1
 ) 2>&1 | tee "${LOG}" || status="${PIPESTATUS[0]}"

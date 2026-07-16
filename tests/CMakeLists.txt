@@ -146,6 +146,13 @@ if (NOT WIN32)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-softmax-run-ppl-one-chunk.sh
     )
+
+    llama_test_cmd(
+        bash
+        NAME test-c100-ppl-runtime-image
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-ppl-runtime-image.sh
+    )
 endif()
 
 if (LLAMA_LLGUIDANCE)
