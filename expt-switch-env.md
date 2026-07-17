@@ -66,54 +66,71 @@ four-digit hexadecimal bit patterns.
 ### `GGML_CUDA_SOFT_MAX_QEMU_TIMING`
 
 Enables per-call llama.cpp timing logs. Default: unset/off. The workspace
-`run.sh` enables it by default for `compare` and `qemu`. Pure `qemu_cuda` mode
-always suppresses per-call timing logs and does not create CUDA timing events.
+`run.sh` enables it by default. In pure `qemu_cuda`, CUDA timing events are
+created only when this switch is enabled; enabling it synchronizes the timed
+call and therefore changes performance behavior.
 
 Each `RVV_SOFTMAX_TIMING` line records the request id, runtime mode, destination
 tensor, element count, CUDA D2H time, ZMQ round-trip time, daemon request time,
 result-copy time, and total offload time. Set it to `0`, `false`, or `off` to
 disable timing logs. `QEMU_CUDA_SOFTMAX_TIMING` records the device-only BF16
-preprocess, deterministic softmax, and BF16-to-F32 duration only in `compare`.
+preprocess, deterministic softmax, and BF16-to-F32 total duration in
+`qemu_cuda` and `compare`, together with cumulative call count and average
+duration.
 In `compare`, `LLAMA_CUDA_SOFTMAX_TIMING` also records the original llama.cpp
 CUDA kernel time.
 
-## CUDA RMS_NORM CIM Comparison
+## CUDA RMS_NORM QEMU Offload
 
-### `GGML_CUDA_RMS_NORM_CIM_MODE`
+### `GGML_CUDA_RMS_NORM_QEMU_MODE`
 
-Selects an experimental CUDA/CIM RMS_NORM runtime mode. Default: unset or
-`cuda`, preserving the existing CUDA-only path and producing no comparison
-artifact.
+Selects the experimental CUDA/QEMU RMS_NORM runtime mode. The build must use
+`-DGGML_CUDA_RMS_NORM_QEMU=ON` for modes that contact QEMU. Default: unset or
+`cuda`, preserving the existing CUDA implementation.
 
 Supported values:
 
-- `cuda`: run only the existing CUDA RMS_NORM implementation and use the CUDA
-  result.
-- `cim`: run only the experimental CIM/RPC placeholder path and use the CIM
-  result.
-- `compare_cuda`: start CUDA RMS_NORM and the CIM/RPC placeholder path
-  concurrently, wait for both, append an RMSE comparison artifact, and use the
-  CUDA result.
-- `compare_cim`: start CUDA RMS_NORM and the CIM/RPC placeholder path
-  concurrently, wait for both, append an RMSE comparison artifact, and use the
-  CIM result.
+- `cuda`: use the original F32 CUDA RMS_NORM.
+- `qemu`: pack the strided F32 input into dense BF16 on CUDA, send BF16 to the
+  QEMU/RVV daemon, convert returned BF16 to F32 on CUDA, and use that result.
+- `qemu_cuda`: perform F32-to-BF16 packing, the BF16 RMS_NORM model, and
+  BF16-to-F32 conversion entirely on the current CUDA device. This mode creates
+  no ZMQ socket and performs no D2H/H2D transfer.
+- `compare`: run original CUDA, QEMU/RVV, and qemu_cuda concurrently and keep
+  the original CUDA result downstream. Comparison artifacts include
+  llama-vs-QEMU errors and QEMU-vs-qemu_cuda numerical and BF16-bit metrics.
 
-The CIM entry currently stages the same RMS_NORM input bytes to host to model
-RPC/IO request behavior, waits for that transfer, and returns a zero-filled F32
-response. It is a placeholder for a real external CIM implementation and is not
-numerically correct. Unknown values fall back to `cuda`.
+`compare_cuda` and `compare_qemu` are accepted as aliases for `compare`.
+Unknown values fall back to `cuda`. All non-`cuda` modes disable RMS_NORM/MUL
+fusion and CUDA graph capture so the experimental hook cannot be bypassed.
 
-Dual-run modes disable CUDA graph capture for graphs containing RMS_NORM because
-the experiment performs host IO, synchronization, and artifact writes. Single
-run modes do not generate comparison artifacts.
+### `GGML_CUDA_RMS_NORM_QEMU_ENDPOINT`
 
-### `GGML_CUDA_RMS_NORM_CIM_ARTIFACT`
+ZMQ endpoint for the RMS_NORM daemon. Default: `tcp://127.0.0.1:15581`.
 
-Overrides the append-only JSONL artifact path used by `compare_cuda` and
-`compare_cim`. Default: `experiments/rms-norm-cim-compare.jsonl` relative to
-the process working directory. Parent directories are created when possible.
-Each line records at least the destination tensor name (`dst`) and `rmse`, plus
-the ggml operator descriptor (`op`).
+### `GGML_CUDA_RMS_NORM_QEMU_TIMEOUT_MS`
+
+ZMQ send/receive timeout in milliseconds. Default: `300000`.
+
+### `GGML_CUDA_RMS_NORM_QEMU_ARTIFACT`
+
+Overrides the append-only JSONL artifact used by `compare`. Default:
+`experiments/rms-norm-qemu-compare.jsonl`.
+
+### `GGML_CUDA_RMS_NORM_QEMU_MISMATCH_LOG`
+
+Overrides the QEMU/qemu_cuda BF16 mismatch JSONL. Default:
+`experiments/rms-norm-qemu-cuda-mismatch.jsonl`. Full BF16 input and both BF16
+outputs are written only when raw output bits differ.
+
+### `GGML_CUDA_RMS_NORM_QEMU_TIMING`
+
+Enables per-call timing logs. Default: unset/off. `RVV_RMS_NORM_TIMING` records
+D2H, RPC, daemon, return-copy, and total offload time. In `qemu_cuda`,
+`QEMU_CUDA_RMS_NORM_TIMING` records F32-to-BF16 preprocess, BF16 RMS_NORM,
+BF16-to-F32 conversion, total duration, cumulative call count, and average
+duration. Timing events are created only when enabled and synchronize the timed
+call. `LLAMA_CUDA_RMS_NORM_TIMING` records original CUDA time in `compare`.
 
 ## Tensor Export and Offline Quantization Evaluation
 

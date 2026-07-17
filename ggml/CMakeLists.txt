@@ -167,6 +167,7 @@ option(GGML_CUDA_FA                         "ggml: compile ggml FlashAttention C
 option(GGML_CUDA_FA_ALL_QUANTS              "ggml: compile all quants for FlashAttention"     OFF)
 option(GGML_CUDA_GRAPHS                     "ggml: use CUDA graphs (llama.cpp only)"          ${GGML_CUDA_GRAPHS_DEFAULT})
 option(GGML_CUDA_SOFTMAX_QEMU               "ggml: enable experimental CUDA softmax QEMU RPC" OFF)
+option(GGML_CUDA_RMS_NORM_QEMU              "ggml: enable experimental CUDA RMS_NORM QEMU RPC" OFF)
 set   (GGML_CUDA_COMPRESSION_MODE "size" CACHE STRING
                                             "ggml: cuda link binary compression mode; requires cuda 12.8+")
 set_property(CACHE GGML_CUDA_COMPRESSION_MODE PROPERTY STRINGS "none;speed;balance;size")

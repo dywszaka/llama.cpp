@@ -119,3 +119,29 @@ output[col] = input[col] * rsqrt(mean(input[0:ncols]^2) + eps)
 
 当前未融合实现不写额外输出参数，也不产生 side data。若未来支持非连续输出 stride，
 需要把输出 byte stride / element stride 明确加入协议；当前实现没有这部分输出协议。
+
+## QEMU / qemu_cuda canonical protocol
+
+实验路径由 `GGML_CUDA_RMS_NORM_QEMU_MODE` 控制，默认 `cuda` 时上述原始协议完全不变。
+启用 `qemu`、`qemu_cuda` 或 `compare` 后，CUDA preprocess 使用 `s1..s3` 读取原始
+strided F32 输入，并生成如下 canonical tensor：
+
+```text
+dtype  = BF16 bit pattern
+layout = dense [nsamples, nchannels, nrows, ncols]
+bytes  = ncols * nrows * nchannels * nsamples * sizeof(uint16_t)
+round  = F32-to-BF16 round-to-nearest-even
+```
+
+QEMU/RVV 和 qemu_cuda 消费完全相同的 canonical BF16 input，并产生同布局 BF16
+output。`eps` 仍作为 F32 标量传递，不做隐式 BF16 量化。返回 llama.cpp 下游前，CUDA
+在 device 上把 BF16 output 转换回 dense F32 `dst`。
+
+当前 BF16 RMS_NORM 数值模型参考 `decode/rms_norm/ybxkernel/eu_rms_norm.cl`：16 个
+归约 lane 跨列累计平方和，横向归约一次，计算 `1/sqrt(sum/ncols + eps)`，然后二次遍历
+缩放输入。llama.cpp 的未融合 `GGML_OP_RMS_NORM` 不包含 weight 乘法，因此 canonical
+RPC 不传 weight。
+
+`qemu_cuda` 纯路径只使用 device buffer 和调用方 CUDA stream，不创建 ZMQ socket，也
+不执行 D2H/H2D。显式启用 `GGML_CUDA_RMS_NORM_QEMU_TIMING` 时会创建 CUDA event 并
+同步当前调用，以记录 preprocess、BF16 operator、BF16-to-F32 和 total 时间。
