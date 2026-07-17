@@ -2638,6 +2638,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_op_silu_back(ctx, dst);
             break;
         case GGML_OP_RMS_NORM:
+            if (dst->src[0]->type == GGML_TYPE_F32) {
+                ggml_cuda_truncate_tensor_f32(ctx, dst->src[0]);
+            }
             ggml_cuda_op_rms_norm(ctx, dst);
             break;
         case GGML_OP_RMS_NORM_BACK:
