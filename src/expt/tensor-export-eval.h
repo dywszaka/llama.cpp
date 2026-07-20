@@ -70,7 +70,7 @@ struct k_channel_sort_eval_report {
 
 bool tensor_export_enabled();
 bool tensor_export_maybe_log_config();
-bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf);
+bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf, bool is_prefill);
 
 tensor_error_metrics compute_error_metrics(const std::vector<float> & reference, const std::vector<float> & actual);
 std::vector<size_t> make_k_channel_order_from_first_row(const std::vector<float> & values, size_t row_size);

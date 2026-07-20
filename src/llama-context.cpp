@@ -802,7 +802,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         llama_log::debug_nvfp4_norm_weights(model);
     }
 
-    llama_expt::tensor_export_graph(sched.get(), res->get_gf());
+    const bool is_prefill = ubatch.n_seq_tokens > 1 ||
+            (ubatch.pos && ubatch.n_tokens > 0 && ubatch.pos[0] == 0);
+    llama_expt::tensor_export_graph(sched.get(), res->get_gf(), is_prefill);
 
     return res;
 }

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +27,9 @@ using json = nlohmann::ordered_json;
 
 constexpr const char * ENV_DIR    = "LLAMA_EXPT_TENSOR_EXPORT_DIR";
 constexpr const char * ENV_KINDS  = "LLAMA_EXPT_TENSOR_EXPORT_KINDS";
+constexpr const char * ENV_OP     = "LLAMA_EXPT_TENSOR_EXPORT_OP";
+constexpr const char * ENV_TYPE   = "LLAMA_EXPT_TENSOR_EXPORT_TYPE";
+constexpr const char * ENV_LAYER  = "LLAMA_EXPT_TENSOR_EXPORT_LAYER";
 
 std::string env_str(const char * name) {
     const char * value = std::getenv(name);
@@ -46,6 +50,111 @@ std::string sanitize_filename(std::string name) {
         return "tensor";
     }
     return name;
+}
+
+std::string normalize_op_name(std::string name) {
+    name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    }), name.end());
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) {
+        if (c == '-') {
+            return '_';
+        }
+        return (char) std::toupper(c);
+    });
+    constexpr const char * prefix = "GGML_OP_";
+    const size_t prefix_len = std::strlen(prefix);
+    if (name.size() >= prefix_len && name.compare(0, prefix_len, prefix) == 0) {
+        name.erase(0, prefix_len);
+    }
+    return name;
+}
+
+std::string selected_export_type() {
+    std::string type = env_str(ENV_TYPE);
+    type.erase(std::remove_if(type.begin(), type.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    }), type.end());
+    std::transform(type.begin(), type.end(), type.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+    return type.empty() ? "decode" : type;
+}
+
+bool export_type_matches(bool is_prefill, const std::string & type) {
+    return (type == "prefill" && is_prefill) || (type == "decode" && !is_prefill);
+}
+
+int selected_export_layer() {
+    const std::string raw = env_str(ENV_LAYER);
+    if (raw.empty()) {
+        return -1;
+    }
+
+    char * end = nullptr;
+    errno = 0;
+    const long value = std::strtol(raw.c_str(), &end, 10);
+    if (errno != 0 || end == raw.c_str() || *end != '\0' || value < 0 || value > INT_MAX) {
+        return -2;
+    }
+    return (int) value;
+}
+
+int parse_layer_number(const std::string & name, size_t start) {
+    if (start >= name.size() || !std::isdigit((unsigned char) name[start])) {
+        return -1;
+    }
+    size_t end = start;
+    long value = 0;
+    while (end < name.size() && std::isdigit((unsigned char) name[end])) {
+        value = value * 10 + (name[end] - '0');
+        if (value > INT_MAX) {
+            return -1;
+        }
+        ++end;
+    }
+    if (end != name.size() && name[end] != ' ' && name[end] != '(' && name[end] != '[' && name[end] != '.') {
+        return -1;
+    }
+    return (int) value;
+}
+
+int tensor_name_layer(const ggml_tensor * tensor) {
+    if (!tensor) {
+        return -1;
+    }
+    const std::string name = ggml_get_name(tensor);
+    for (size_t pos = 0; pos < name.size(); ++pos) {
+        if (name[pos] == '-') {
+            const int layer = parse_layer_number(name, pos + 1);
+            if (layer >= 0) {
+                return layer;
+            }
+        }
+        if (name.compare(pos, 4, "blk.") == 0) {
+            const int layer = parse_layer_number(name, pos + 4);
+            if (layer >= 0) {
+                return layer;
+            }
+        }
+        if (name.compare(pos, 2, "_l") == 0) {
+            const int layer = parse_layer_number(name, pos + 2);
+            if (layer >= 0) {
+                return layer;
+            }
+        }
+    }
+    return -1;
+}
+
+bool op_node_matches_layer(const ggml_tensor * dst, int layer) {
+    if (layer < 0) {
+        return true;
+    }
+    const int dst_layer = tensor_name_layer(dst);
+    if (dst_layer >= 0) {
+        return dst_layer == layer;
+    }
+    return tensor_name_layer(dst->src[0]) == layer ||
+           tensor_name_layer(dst->src[1]) == layer;
 }
 
 bool has_prefix(const std::string & text, const char * prefix) {
@@ -319,6 +428,139 @@ void write_manifest(const std::filesystem::path & dir, const std::vector<tensor_
     out << manifest.dump(2) << "\n";
 }
 
+bool write_op_tensor(
+        const std::filesystem::path & dir,
+        const ggml_tensor * tensor,
+        int node_index,
+        const std::string & op,
+        const char * role,
+        size_t record_index,
+        json & records) {
+    if (!tensor) {
+        return false;
+    }
+
+    const ggml_backend_buffer_t buffer = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+    if (!buffer || !tensor->data) {
+        LLAMA_LOG_WARN("%s: skipping node=%d op=%s role=%s tensor='%s' because it has no backend storage\n",
+                __func__, node_index, op.c_str(), role, ggml_get_name(tensor));
+        return false;
+    }
+
+    const size_t byte_size = ggml_nbytes(tensor);
+    std::vector<uint8_t> bytes(byte_size);
+    ggml_backend_tensor_get(tensor, bytes.data(), 0, byte_size);
+
+    const std::string name = ggml_get_name(tensor);
+    const std::string path = std::to_string(record_index) + "-node" + std::to_string(node_index) + "-" +
+            role + "-" + sanitize_filename(name) + ".bin";
+    std::ofstream out(dir / path, std::ios::binary);
+    if (!out) {
+        LLAMA_LOG_ERROR("%s: failed to write node=%d op=%s role=%s tensor='%s'\n",
+                __func__, node_index, op.c_str(), role, name.c_str());
+        return false;
+    }
+    out.write(reinterpret_cast<const char *>(bytes.data()), (std::streamsize) bytes.size());
+    if (!out) {
+        LLAMA_LOG_ERROR("%s: failed while writing node=%d op=%s role=%s tensor='%s'\n",
+                __func__, node_index, op.c_str(), role, name.c_str());
+        return false;
+    }
+
+    json rec;
+    rec["node_index"] = node_index;
+    rec["op"] = op;
+    rec["role"] = role;
+    rec["name"] = name;
+    rec["dtype"] = ggml_type_name(tensor->type);
+    rec["ne"] = { tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3] };
+    rec["nb"] = { tensor->nb[0], tensor->nb[1], tensor->nb[2], tensor->nb[3] };
+    rec["path"] = path;
+    rec["byte_size"] = byte_size;
+    rec["contiguous"] = ggml_is_contiguous(tensor);
+    rec["view_offset"] = tensor->view_offs;
+    records.push_back(std::move(rec));
+    return true;
+}
+
+bool export_op_graph(
+        ggml_backend_sched_t sched,
+        ggml_cgraph * gf,
+        bool is_prefill,
+        const std::filesystem::path & dir) {
+    const std::string op = normalize_op_name(env_str(ENV_OP));
+    const std::string type = selected_export_type();
+    const int layer = selected_export_layer();
+    if (op.empty()) {
+        return false;
+    }
+    if (type != "decode" && type != "prefill") {
+        LLAMA_LOG_ERROR("%s: invalid %s='%s'; expected decode or prefill\n", __func__, ENV_TYPE, type.c_str());
+        return false;
+    }
+    if (layer == -2) {
+        LLAMA_LOG_ERROR("%s: invalid %s='%s'; expected a non-negative integer\n",
+                __func__, ENV_LAYER, env_str(ENV_LAYER).c_str());
+        return false;
+    }
+    if (!export_type_matches(is_prefill, type)) {
+        return false;
+    }
+
+    static std::unordered_set<std::string> completed_exports;
+    const std::string export_key = dir.lexically_normal().string() + "\n" + type + "\n" + op + "\n" +
+            std::to_string(layer);
+    if (!completed_exports.insert(export_key).second) {
+        return false;
+    }
+
+    ggml_backend_sched_synchronize(sched);
+
+    json manifest;
+    manifest["format"] = "llama_expt_op_tensor_export_v1";
+    manifest["type"] = type;
+    manifest["op"] = op;
+    manifest["layer"] = layer;
+    manifest["records"] = json::array();
+
+    size_t record_index = 0;
+    size_t matched_nodes = 0;
+    const int n_nodes = ggml_graph_n_nodes(gf);
+    for (int i = 0; i < n_nodes; ++i) {
+        ggml_tensor * dst = ggml_graph_node(gf, i);
+        if (!dst || normalize_op_name(ggml_op_name(dst->op)) != op ||
+                !op_node_matches_layer(dst, layer)) {
+            continue;
+        }
+        ++matched_nodes;
+        if (write_op_tensor(dir, dst, i, op, "dst", record_index, manifest["records"])) {
+            ++record_index;
+        }
+        if (write_op_tensor(dir, dst->src[0], i, op, "src0", record_index, manifest["records"])) {
+            ++record_index;
+        }
+        if (write_op_tensor(dir, dst->src[1], i, op, "src1", record_index, manifest["records"])) {
+            ++record_index;
+        }
+    }
+    manifest["matched_nodes"] = matched_nodes;
+
+    std::ofstream out(dir / "manifest.json", std::ios::binary);
+    if (!out) {
+        LLAMA_LOG_ERROR("%s: failed to open op export manifest in '%s'\n", __func__, dir.string().c_str());
+        return false;
+    }
+    out << manifest.dump(2) << "\n";
+    if (!out) {
+        LLAMA_LOG_ERROR("%s: failed to write op export manifest in '%s'\n", __func__, dir.string().c_str());
+        return false;
+    }
+
+    LLAMA_LOG_INFO("%s: exported type=%s op=%s layer=%d matched_nodes=%zu tensor_records=%zu to '%s'\n",
+            __func__, type.c_str(), op.c_str(), layer, matched_nodes, record_index, dir.string().c_str());
+    return true;
+}
+
 } // namespace
 
 bool tensor_export_enabled() {
@@ -334,15 +576,17 @@ bool tensor_export_maybe_log_config() {
 
     const bool enabled = tensor_export_enabled();
     if (enabled) {
-        LLAMA_LOG_INFO("%s: enabled %s='%s' %s='%s'\n",
-                __func__, ENV_DIR, env_str(ENV_DIR).c_str(), ENV_KINDS, env_str(ENV_KINDS).c_str());
+        LLAMA_LOG_INFO("%s: enabled %s='%s' %s='%s' %s='%s' %s='%s' %s='%s'\n",
+                __func__, ENV_DIR, env_str(ENV_DIR).c_str(), ENV_KINDS, env_str(ENV_KINDS).c_str(),
+                ENV_OP, env_str(ENV_OP).c_str(), ENV_TYPE, env_str(ENV_TYPE).c_str(),
+                ENV_LAYER, env_str(ENV_LAYER).c_str());
     } else {
         LLAMA_LOG_INFO("%s: disabled; %s is unset\n", __func__, ENV_DIR);
     }
     return enabled;
 }
 
-bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf) {
+bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf, bool is_prefill) {
     if (!tensor_export_maybe_log_config()) {
         return false;
     }
@@ -356,6 +600,10 @@ bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf) {
     if (ec) {
         LLAMA_LOG_ERROR("%s: failed to create export dir '%s': %s\n", __func__, dir.string().c_str(), ec.message().c_str());
         return false;
+    }
+
+    if (!env_str(ENV_OP).empty()) {
+        return export_op_graph(sched, gf, is_prefill, dir);
     }
 
     const auto kinds = selected_kinds();

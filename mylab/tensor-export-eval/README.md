@@ -14,3 +14,8 @@ locations:
 - `src/expt/tensor-export-eval.{h,cpp}`
 - `tools/tensor-export-eval/`
 - `tests/test-expt-tensor-export-eval.cpp`
+
+The runtime exporter also supports an op-oriented mode for capturing every
+matching node's `dst`, `dst->src[0]`, and `dst->src[1]` from the first selected
+prefill or decode graph. Edit and run `export.sh` in this directory to launch
+the export and record its artifacts under `experiments/`.

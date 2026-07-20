@@ -173,6 +173,38 @@ Supported values are `k`, `q`, `v`, `kq`, and `kqv`. This switch only filters
 which recognized graph tensor names are exported; it does not enable export
 without `LLAMA_EXPT_TENSOR_EXPORT_DIR`.
 
+### `LLAMA_EXPT_TENSOR_EXPORT_OP`
+
+Selects op-oriented tensor export mode. Default: unset/off.
+
+When set together with `LLAMA_EXPT_TENSOR_EXPORT_DIR`, the export pass matches
+all graph nodes whose `ggml_op_name()` equals this value, ignoring case and an
+optional `GGML_OP_` prefix. For the first graph selected by
+`LLAMA_EXPT_TENSOR_EXPORT_TYPE`, it writes each matching node's `dst`,
+`dst->src[0]`, and `dst->src[1]` as raw binary spans and records their role,
+dtype, shape, strides, contiguity, and view offset in `manifest.json`. This mode
+does not use `LLAMA_EXPT_TENSOR_EXPORT_KINDS`.
+
+### `LLAMA_EXPT_TENSOR_EXPORT_TYPE`
+
+Selects which first graph is captured by op-oriented export. Default: `decode`.
+
+Supported values are `decode` and `prefill`. `decode` captures the first
+single-token-per-sequence graph after the initial prompt. `prefill` captures the
+first prompt graph, including a one-token prompt at position zero. This switch
+has an effect only when
+`LLAMA_EXPT_TENSOR_EXPORT_OP` and `LLAMA_EXPT_TENSOR_EXPORT_DIR` are both set.
+
+### `LLAMA_EXPT_TENSOR_EXPORT_LAYER`
+
+Restricts op-oriented export to a zero-based model layer. Default: unset, which
+keeps all matching op nodes.
+
+The exporter matches the layer suffixes used by graph tensor names, including
+forms such as `norm-0`, `blk.0.*`, and `cache_k_l0`. This switch has an effect
+only in op-oriented export mode. The selected layer is recorded in the op
+manifest.
+
 ## FP8 E4M3 E8M0 32 K-Cache
 
 ### `--cache-type-k fp8_e4m3_e8m0_32`
