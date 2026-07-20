@@ -106,15 +106,6 @@ static bool ggml_cuda_nvfp4_native_debug_enabled() {
     return cached != 0;
 }
 
-static bool ggml_cuda_nvfp4_native_no_fallback_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK");
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
 static bool ggml_cuda_nvfp4_scale_linear_layout_enabled() {
     static int cached = -1;
     if (cached < 0) {
@@ -269,7 +260,8 @@ static void ggml_cuda_nvfp4_split_blocks_cuda(
         const block_nvfp4 * in,
         uint8_t * out_data,
         uint8_t * out_scale,
-        int64_t ne_k,
+        int64_t ne_k_valid,
+        int64_t ne_k_alloc,
         int64_t n_outer_valid,
         int64_t n_outer_alloc,
         int64_t * scale_inner_padded,
@@ -278,12 +270,14 @@ static void ggml_cuda_nvfp4_split_blocks_cuda(
         size_t * scale_nbytes,
         bool linear_scale_layout,
         cudaStream_t stream) {
-    GGML_ASSERT(ne_k % QK_NVFP4 == 0);
+    GGML_ASSERT(ne_k_valid % QK_NVFP4 == 0);
+    GGML_ASSERT(ne_k_alloc % QK_NVFP4 == 0);
+    GGML_ASSERT(ne_k_alloc >= ne_k_valid);
     GGML_ASSERT(n_outer_valid >= 0 && n_outer_alloc >= n_outer_valid);
 
-    const int64_t nblk_k = ne_k / QK_NVFP4;
-    const int64_t row_data_bytes = ne_k / 2;
-    const int64_t inner_padded = ggml_cuda_nvfp4_pad_i64(nblk_k, 4);
+    const int64_t nblk_k = ne_k_valid / QK_NVFP4;
+    const int64_t row_data_bytes = ne_k_alloc / 2;
+    const int64_t inner_padded = ggml_cuda_nvfp4_pad_i64(ne_k_alloc / QK_NVFP4, 4);
     const int64_t outer_padded = ggml_cuda_nvfp4_pad_i64(n_outer_alloc, 128);
 
     const size_t dn = (size_t) n_outer_alloc * (size_t) row_data_bytes;
@@ -336,6 +330,7 @@ static bool ggml_cuda_nvfp4_cache_key_match(
 static bool ggml_cuda_nvfp4_get_repacked_src0(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,
+        int64_t ne_k_alloc,
         bool linear_scale_layout,
         cudaStream_t stream,
         ggml_cuda_pool_alloc<uint8_t> & transient_data,
@@ -362,12 +357,13 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
 
     const int64_t ne_k = src0->ne[0];
     const int64_t n_outer = src0->ne[1];
-    if (ne_k % QK_NVFP4 != 0) {
+    if (ne_k % QK_NVFP4 != 0 || ne_k_alloc < ne_k || ne_k_alloc % QK_NVFP4 != 0) {
         return false;
     }
 
-    const size_t data_nbytes = (size_t) n_outer * (size_t) ne_k / 2;
-    const size_t scale_nbytes = (size_t) ggml_cuda_nvfp4_pad_i64(n_outer, 128) * (size_t) ggml_cuda_nvfp4_pad_i64(ne_k / QK_NVFP4, 4);
+    const size_t data_nbytes = (size_t) n_outer * (size_t) ne_k_alloc / 2;
+    const size_t scale_nbytes = (size_t) ggml_cuda_nvfp4_pad_i64(n_outer, 128) *
+            (size_t) ggml_cuda_nvfp4_pad_i64(ne_k_alloc / QK_NVFP4, 4);
 
     void * data_repacked = nullptr;
     void * scale_repacked = nullptr;
@@ -407,6 +403,7 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
             (uint8_t *) data_repacked,
             (uint8_t *) scale_repacked,
             ne_k,
+            ne_k_alloc,
             n_outer,
             n_outer,
             &scale_inner_padded,
@@ -525,12 +522,33 @@ static void ggml_cuda_nvfp4_apply_kcache_outlier_correction(
 
 } // namespace
 
+bool ggml_cuda_nvfp4_native_no_fallback_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+bool ggml_cuda_nvfp4_native_pad_k_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_PAD_K");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+        ggml_cuda_nvfp4_log_native_pad_k_once(env, cached != 0);
+    }
+    return cached != 0;
+}
+
 static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,
         const ggml_tensor * src1,
         ggml_tensor * dst,
-        bool apply_outlier_correction) {
+        bool apply_outlier_correction,
+        const float * device_weight_scale = nullptr,
+        bool reciprocal_device_weight_scale = false) {
 #if GGML_CUDA_HAS_CUBLASLT && GGML_CUDA_HAS_FP4 && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     GGML_ASSERT(src0 != nullptr);
     GGML_ASSERT(src1 != nullptr);
@@ -662,10 +680,17 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     }
 #endif
 
-    // cuBLASLt native FP4 matmul is restrictive on GEMM dimensions.
-    // Keep static matrix dimensions (M/K) aligned and pad dynamic token dimension (N) when needed.
+    const bool use_fp4mulmat = ggml_cuda_nvfp4_fp4mulmat_enabled();
+
+    // Native FP4 matmul is restrictive on GEMM dimensions. The experimental fp4mulmat kernel accepts K in
+    // 16-value blocks, while cuBLASLt requires K to be a multiple of 32.
     if ((ne01 % 16) != 0 || (ne10 % 16) != 0) {
         log_skip("native FP4 requires M/K to be multiples of 16");
+        return false;
+    }
+    const bool pad_k = !use_fp4mulmat && ggml_cuda_nvfp4_native_pad_k_enabled();
+    if (!use_fp4mulmat && !pad_k && (ne10 % 32) != 0) {
+        log_skip("cuBLASLt native FP4 requires K multiple of 32");
         return false;
     }
     const bool row_split_mode = ggml_cuda_nvfp4_native_row_split_enabled() && ne11 > 1;
@@ -680,7 +705,8 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
 
     cudaStream_t stream = ctx.stream();
     const int64_t nblk_k = ne10 / QK_NVFP4;
-    const int64_t scale_inner_padded = ggml_cuda_nvfp4_pad_i64(nblk_k, 4);
+    const int64_t lt_k = pad_k ? ggml_cuda_nvfp4_pad_i64(ne10, 32) : ne10;
+    const int64_t scale_inner_padded = ggml_cuda_nvfp4_pad_i64(lt_k / QK_NVFP4, 4);
     const int64_t scale_outer_padded_b = ggml_cuda_nvfp4_pad_i64(ne11_padded, 128);
 
     float out_scale = 1.0f;
@@ -692,14 +718,17 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     }
 
     ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4(ctx.pool(), (size_t) nblk_k * (size_t) ne11);
-    ggml_cuda_pool_alloc<uint8_t> src1_repacked_data(ctx.pool(), (size_t) ne11_padded * (size_t) ne10 / 2);
+    ggml_cuda_pool_alloc<uint8_t> src1_repacked_data(ctx.pool(), (size_t) ne11_padded * (size_t) lt_k / 2);
     ggml_cuda_pool_alloc<uint8_t> src1_repacked_scale(ctx.pool(), (size_t) scale_outer_padded_b * (size_t) scale_inner_padded);
     ggml_cuda_pool_alloc<float> dynamic_amax_rows(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
     ggml_cuda_pool_alloc<float> dynamic_input_scales(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
 
     bool used_dynamic_scale = ggml_mul_mat_get_nvfp4_input_scale(dst) == nullptr;
     float global_scale = ggml_cuda_nvfp4_input_global_scale(dst, &used_dynamic_scale);
-    const bool use_fp4mulmat = ggml_cuda_nvfp4_fp4mulmat_enabled();
+    if (device_weight_scale != nullptr && !used_dynamic_scale) {
+        log_skip("device weight scale requires dynamic RHS scale");
+        return false;
+    }
     const bool use_outlier_q_tensor_scale =
             used_dynamic_scale &&
             ggml_tensor_get_nvfp4_kcache_outlier_counts(src0) != nullptr &&
@@ -733,13 +762,24 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             CUDA_CHECK(cudaGetLastError());
         }
 
-        ggml_cuda_nvfp4_prepare_dynamic_input_scales(
-                dynamic_amax_rows.get(),
-                dynamic_input_scales.get(),
-                ne11,
-                out_scale,
-                use_outlier_q_tensor_scale,
-                stream);
+        if (device_weight_scale != nullptr) {
+            ggml_cuda_nvfp4_prepare_dynamic_input_scales_device_weight(
+                    dynamic_amax_rows.get(),
+                    dynamic_input_scales.get(),
+                    ne11,
+                    device_weight_scale,
+                    reciprocal_device_weight_scale,
+                    use_outlier_q_tensor_scale,
+                    stream);
+        } else {
+            ggml_cuda_nvfp4_prepare_dynamic_input_scales(
+                    dynamic_amax_rows.get(),
+                    dynamic_input_scales.get(),
+                    ne11,
+                    out_scale,
+                    use_outlier_q_tensor_scale,
+                    stream);
+        }
         CUDA_CHECK(cudaGetLastError());
         if (use_fp4mulmat) {
             const int block_size = 256;
@@ -811,6 +851,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             src1_repacked_data.get(),
             src1_repacked_scale.get(),
             ne10,
+            lt_k,
             ne11,
             ne11_padded,
             nullptr,
@@ -824,7 +865,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     ggml_cuda_pool_alloc<uint8_t> src0_repacked_data_tmp(ctx.pool());
     ggml_cuda_pool_alloc<uint8_t> src0_repacked_scale_tmp(ctx.pool());
     if (!ggml_cuda_nvfp4_get_repacked_src0(
-                ctx, src0, linear_scale_layout, stream,
+                ctx, src0, lt_k, linear_scale_layout, stream,
                 src0_repacked_data_tmp, src0_repacked_scale_tmp,
                 src0_repacked)) {
         static std::atomic<bool> logged(false);
@@ -847,7 +888,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                 src0_repacked.scale_inner_padded,
                 (const void *) src1_repacked_data.get(),
                 (const void *) src1_repacked_scale.get(),
-                (size_t) ne11_padded * (size_t) ne10 / 2,
+                (size_t) ne11_padded * (size_t) lt_k / 2,
                 (size_t) scale_outer_padded_b * (size_t) scale_inner_padded,
                 scale_outer_padded_b,
                 scale_inner_padded,
@@ -943,7 +984,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
 
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_a";
-        st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne01, (int64_t) ne10);
+        st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) lt_k, (uint64_t) ne01, (int64_t) lt_k);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
@@ -952,7 +993,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_b";
-        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) lt_n, (int64_t) ne10);
+        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) lt_k, (uint64_t) lt_n, (int64_t) lt_k);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
@@ -1000,7 +1041,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                     strcmp(dst_name, "Qcur-scaled-0") == 0 &&
                     ne11 > 14) {
                 const int64_t saved_row = 14;
-                const int64_t row_data_bytes = ne10 / 2;
+                const int64_t row_data_bytes = lt_k / 2;
                 saved_full_scale_row.resize((size_t) nblk_k);
                 saved_full_data_row.resize((size_t) nblk_k * (QK_NVFP4 / 2));
                 for (int64_t inner = 0; inner < nblk_k; ++inner) {
@@ -1030,6 +1071,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                         src1_repacked_data.get(),
                         src1_repacked_scale.get(),
                         ne10,
+                        lt_k,
                         1,
                         lt_n,
                         nullptr,
@@ -1407,7 +1449,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
 
             auto load_src0_repacked_col = [&](int64_t out_col, scale_probe_mode mode, std::vector<block_nvfp4> & out_blocks) {
                 out_blocks.resize((size_t) nblk);
-                const int64_t row_data_bytes = ne10 / 2;
+                const int64_t row_data_bytes = lt_k / 2;
                 const int64_t transposed_inner_padded = ggml_cuda_nvfp4_pad_i64(ne01, 4);
                 for (int64_t inner = 0; inner < nblk; ++inner) {
                     int64_t scale_idx = 0;
@@ -2490,8 +2532,8 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             GGML_LOG_WARN(
                 "%s: cublasLt NVFP4 matmul failed for %s stage=%s status=%d (%s) cuda_err=%d (%s) "
                 "device=%d cc=%d runtime=%d driver=%d stream=%p "
-                "A=[k=%lld,n=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
-                "B=[k=%lld,m=%lld(padded=%lld),ld=%lld,type=CUDA_R_4F_E2M1] "
+                "A=[k=%lld(logical=%lld),n=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
+                "B=[k=%lld(logical=%lld),m=%lld(padded=%lld),ld=%lld,type=CUDA_R_4F_E2M1] "
                 "C/D=[n=%lld,m=%lld(padded=%lld),ld=%lld,type=CUDA_R_32F] alpha=%g beta=0 "
                 "global_scale=%g src0_type=%s src1_type=%s dst_type=%s "
                 "in_scale_tensor=%p in_scale_type=%s out_scale_tensor=%p out_scale_type=%s "
@@ -2510,8 +2552,8 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                 runtime_version,
                 driver_version,
                 (void *) stream,
-                (long long) ne10, (long long) ne01, (long long) ne10,
-                (long long) ne10, (long long) ne11, (long long) ne11_padded, (long long) ne10,
+                (long long) lt_k, (long long) ne10, (long long) ne01, (long long) lt_k,
+                (long long) lt_k, (long long) ne10, (long long) ne11, (long long) ne11_padded, (long long) lt_k,
                 (long long) ne01, (long long) ne11, (long long) ne11_padded, (long long) ne01,
                 (double) out_scale,
                 (double) global_scale,
@@ -2533,7 +2575,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                 dst_align16,
                 src0_repacked.data_nbytes,
                 src0_repacked.scale_nbytes,
-                (size_t) ne11_padded * (size_t) ne10 / 2,
+                (size_t) ne11_padded * (size_t) lt_k / 2,
                 (size_t) scale_outer_padded_b * (size_t) scale_inner_padded,
                 src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
                 src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3],
@@ -2548,11 +2590,12 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             if (st == CUBLAS_STATUS_INVALID_VALUE) {
                 GGML_LOG_WARN(
                         "%s: hint: CUBLAS_STATUS_INVALID_VALUE is commonly caused by unsupported FP4 dimension constraints "
-                        "or layout limits. Check M=%lld N=%lld (padded=%lld) K=%lld.\n",
+                        "or layout limits. Check M=%lld N=%lld (padded=%lld) K=%lld (logical=%lld).\n",
                         __func__,
                         (long long) ne01,
                         (long long) ne11,
                         (long long) ne11_padded,
+                        (long long) lt_k,
                         (long long) ne10);
             }
         }
@@ -2566,6 +2609,8 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     GGML_UNUSED(src1);
     GGML_UNUSED(dst);
     GGML_UNUSED(apply_outlier_correction);
+    GGML_UNUSED(device_weight_scale);
+    GGML_UNUSED(reciprocal_device_weight_scale);
     return false;
 #endif
 }
@@ -2576,4 +2621,15 @@ bool ggml_cuda_mul_mat_nvfp4_native(
         const ggml_tensor * src1,
         ggml_tensor * dst) {
     return ggml_cuda_mul_mat_nvfp4_native_impl(ctx, src0, src1, dst, true);
+}
+
+bool ggml_cuda_mul_mat_nvfp4_native_device_weight_scale(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst,
+        const float * device_weight_scale,
+        bool reciprocal_weight_scale) {
+    return ggml_cuda_mul_mat_nvfp4_native_impl(
+            ctx, src0, src1, dst, true, device_weight_scale, reciprocal_weight_scale);
 }

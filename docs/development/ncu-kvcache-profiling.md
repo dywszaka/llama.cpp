@@ -116,13 +116,12 @@ Expected evidence:
 
 - `server.log` contains:
   - `LLAMA_EXPERIMENT_NVFP4_VCACHE=1 -> enabled`;
-  - `ggml_cuda_vcache_nvfp4_log_fp4_pv_once: CUDA NVFP4 V-cache p*v quantizes
-    P to dynamic NVFP4 by default`.
+  - `ggml_cuda_vcache_nvfp4_log_fp4_pv_once: CUDA NVFP4 V-cache p*v uses
+    native-slice dynamic P for global-scale V, with cuBLASLt FP4 as fallback`.
 - `server.log` shows `type_v = nvfp4`.
-- `ncu` includes V-cache NVFP4 store kernels and P quantization kernels.
-- If cuBLASLt FP4 is unavailable for the shape or toolkit, expect custom CUDA
-  kernels from `vcache-nvfp4-matmul.cu`; this still proves P is dynamically
-  quantized to FP4 before dotting with NVFP4 V.
+- `ncu` includes V-cache NVFP4 store kernels and either native NVFP4 matmul
+  kernels for global-scale V or cuBLASLt FP4 fallback staging/quantization
+  kernels.
 
 ### 4. V-cache NVFP4 cuBLASLt FP4 P*V
 
@@ -140,8 +139,8 @@ Expected evidence:
 
 - `LLAMA_EXPERIMENT_NVFP4_VCACHE=1 -> enabled` appears in `server.log`.
 - A one-shot active log from `vcache-nvfp4-matmul.cu` indicates successful
-  cuBLASLt FP4 P*V use. If Lt is unavailable or returns unsupported, the code can
-  fall back to the custom CUDA dot path, so check logs before trusting only a
+  cuBLASLt FP4 P*V fallback use. If Lt is unavailable or returns unsupported,
+  the V-cache-specific path returns false, so check logs before trusting only a
   kernel name.
 - `ncu` should show staging/quantization kernels plus cuBLASLt GEMM kernels.
   cuBLASLt kernel names are driver/toolkit dependent; use the source logs and

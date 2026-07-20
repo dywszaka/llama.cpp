@@ -84,6 +84,39 @@ flash attention is not supported, and KQ/V offload must be enabled.
 
 ## NVFP4 CUDA Native Matmul
 
+### `GGML_CUDA_NVFP4_NATIVE_PAD_K`
+
+Enables experimental zero-padding of the cuBLASLt NVFP4 reduction dimension K
+to the next multiple of 32. Default: unset/off.
+
+The logical NVFP4 and F32 inputs are still quantized and scaled using their
+original K. Before cuBLASLt execution, the split FP4 data and UE4M3 scale
+channels allocate the padded K extent and leave the added FP4 values and scale
+entries as zero. The cuBLASLt A/B descriptors use the padded K and leading
+dimension; output dimensions and post-matmul scale compensation are unchanged.
+The experimental `GGML_CUDA_NVFP4_FP4MULMAT` path does not use this padding.
+
+### `GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK`
+
+Validation switch for native CUDA NVFP4 matmul. Default: unset/off.
+
+When enabled, an NVFP4 model matmul that cannot complete through the selected
+native implementation aborts instead of continuing to the general quantized
+fallback. Recognized NVFP4 V-cache P*V operations are covered as well: failure
+of the global-scale native-slice path aborts before the V-cache-specific
+cuBLASLt or custom CUDA fallback can run. Use this switch to prove native path
+coverage, not for normal service operation.
+
+### `GGML_CUDA_NVFP4_VCACHE_CUBLASLT_TRACE`
+
+Diagnostic switch for NVFP4 V-cache P*V validation. Default: unset/off.
+
+When enabled, logs one record after every complete V-cache native-slice P*V
+operation, including logical K, padded cuBLASLt K, query columns, and head
+counts. This is intentionally high-volume and should only be used for focused
+validation runs. It does not select the native path by itself and does not log
+the separate `GGML_CUDA_NVFP4_FP4MULMAT` implementation.
+
 ### `GGML_CUDA_NVFP4_BF16_QUANT`
 
 Parent switch for the experimental BF16 trunc-NN NVFP4 RHS activation quantizer
@@ -119,12 +152,10 @@ Default: unset/off.
 When enabled, the native CUDA NVFP4 matmul path still quantizes F32 RHS
 activations through the current NVFP4 activation quantizer, then evaluates the
 NVFP4 block dot product with the experimental FP4 accumulator model instead of
-cuBLASLt. The same switch also forces the CUDA NVFP4 V-cache P*V matmul path to
-skip the preferred cuBLASLt FP4 implementation and use the fp4_mulmat-derived
-custom CUDA kernel. V-cache keeps its existing external V scale and dynamic P
-row scale semantics while using the shared FP4 block accumulator model. This is
-intended for hardware-model comparison and correctness experiments, not
-performance measurement.
+cuBLASLt. The CUDA NVFP4 V-cache native-slice path also honors this switch after
+folding V-cache scale compensation into dynamic RHS scales. This is intended for
+hardware-model comparison and correctness experiments, not performance
+measurement.
 
 The path logs once when selected. Combine with
 `GGML_CUDA_NVFP4_FP4MULMAT_LOG=1` to log the first several selections during a

@@ -2,10 +2,23 @@
 
 #include "nvfp4-fp4mulmat.cuh"
 #include "nvfp4-log.cuh"
+#include "nvfp4-matmul.cuh"
 #include "nvfp4-quantize-core.cuh"
+
+#include <cstdlib>
 
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_P_AMAX_PREPASS_MIN_KV = 2048;
 static constexpr int64_t GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K = 512;
+
+static bool ggml_cuda_nvfp4_vcache_cublaslt_trace_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_VCACHE_CUBLASLT_TRACE");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+        ggml_cuda_nvfp4_log_vcache_cublaslt_trace_switch_once(env, cached != 0);
+    }
+    return cached != 0;
+}
 
 #if defined(CUBLAS_VERSION)
 #define GGML_CUDA_VCACHE_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
@@ -78,6 +91,63 @@ static bool ggml_cuda_match_vcache_nvfp4_scale_layout(
     }
 
     return false;
+}
+
+static ggml_tensor ggml_cuda_vcache_nvfp4_make_temp_tensor_2d(
+        ggml_type type,
+        void * data,
+        int64_t ne0,
+        int64_t ne1) {
+    ggml_tensor t = {};
+    t.type = type;
+    t.op = GGML_OP_NONE;
+    t.ne[0] = ne0;
+    t.ne[1] = ne1;
+    t.ne[2] = 1;
+    t.ne[3] = 1;
+    t.nb[0] = ggml_type_size(type);
+    t.nb[1] = ggml_row_size(type, ne0);
+    t.nb[2] = t.nb[1] * ne1;
+    t.nb[3] = t.nb[2];
+    t.data = data;
+    t.buffer = nullptr;
+    return t;
+}
+
+static ggml_tensor ggml_cuda_vcache_nvfp4_make_temp_mul_mat_dst(
+        float * data,
+        int64_t ne0,
+        int64_t ne1) {
+    ggml_tensor t = ggml_cuda_vcache_nvfp4_make_temp_tensor_2d(GGML_TYPE_F32, data, ne0, ne1);
+    t.op = GGML_OP_MUL_MAT;
+    return t;
+}
+
+static void ggml_cuda_vcache_nvfp4_materialize_v_slice(
+        ggml_backend_cuda_context & ctx,
+        const void * src,
+        int64_t src_row_stride,
+        int64_t row_bytes,
+        int64_t rows,
+        ggml_cuda_pool_alloc<char> & storage,
+        cudaStream_t stream,
+        void *& out) {
+    if (src_row_stride == row_bytes) {
+        out = const_cast<void *>(src);
+        return;
+    }
+
+    storage.alloc(ctx.pool(), (size_t) row_bytes * (size_t) rows);
+    CUDA_CHECK(cudaMemcpy2DAsync(
+            storage.get(),
+            (size_t) row_bytes,
+            src,
+            (size_t) src_row_stride,
+            (size_t) row_bytes,
+            (size_t) rows,
+            cudaMemcpyDeviceToDevice,
+            stream));
+    out = storage.get();
 }
 
 static __global__ void k_p_rows_abs_max_f32(
@@ -331,7 +401,9 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
 
     cudaStream_t stream = ctx.stream();
     const int64_t n_blocks = kv_size / QK_NVFP4;
-    const int64_t lt_k = std::max(kv_size, GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K);
+    const int64_t lt_k = ggml_cuda_nvfp4_pad_i64(
+            std::max(kv_size, GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K),
+            GGML_CUDA_VCACHE_NVFP4_FP4_PV_LT_PAD_K);
     const int64_t lt_blocks = lt_k / QK_NVFP4;
     const int64_t lt_cols = (cols + 15) & ~15LL;
     const int64_t row_data_bytes = lt_k / 2;
@@ -518,6 +590,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
     GGML_UNUSED(scale_row_nb);
     GGML_UNUSED(scale_head_nb);
     GGML_UNUSED(scale_stream_nb);
+    GGML_UNUSED(scale_is_global);
     GGML_UNUSED(dst_nb1);
     GGML_UNUSED(dst_nb2);
     GGML_UNUSED(dst_nb3);
@@ -528,6 +601,92 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
 #endif
 }
 #endif
+
+static bool ggml_cuda_vcache_nvfp4_matmul_global_native_slices(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst,
+        const ggml_tensor * scale,
+        int64_t kv_size,
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_heads,
+        int64_t q_heads,
+        int64_t kv_streams,
+        int64_t q_streams,
+        int64_t scale_stream_nb,
+        int64_t r2,
+        int64_t r3) {
+    if (kv_size <= 0 || kv_size % QK_NVFP4 != 0 || rows <= 0 || cols <= 0 ||
+            kv_heads <= 0 || q_heads <= 0 || kv_streams <= 0 || q_streams <= 0) {
+        return false;
+    }
+
+    const int64_t v_row_bytes = (kv_size / QK_NVFP4) * (int64_t) sizeof(block_nvfp4);
+    if ((int64_t) src0->nb[0] != (int64_t) sizeof(block_nvfp4) ||
+            (int64_t) src0->nb[1] < v_row_bytes ||
+            (int64_t) src1->nb[0] != (int64_t) sizeof(float) ||
+            (int64_t) src1->nb[1] != kv_size * (int64_t) sizeof(float) ||
+            (int64_t) dst->nb[0] != (int64_t) sizeof(float) ||
+            (int64_t) dst->nb[1] != rows * (int64_t) sizeof(float)) {
+        return false;
+    }
+
+    if (scale->data == nullptr) {
+        return false;
+    }
+
+    for (int64_t q_stream = 0; q_stream < q_streams; ++q_stream) {
+        const int64_t kv_stream = q_stream / r3;
+        if (kv_stream >= kv_streams) {
+            return false;
+        }
+
+        for (int64_t q_head = 0; q_head < q_heads; ++q_head) {
+            const int64_t kv_head = q_head / r2;
+            if (kv_head >= kv_heads) {
+                return false;
+            }
+
+            void * v_ptr = (char *) src0->data + kv_head * src0->nb[2] + kv_stream * src0->nb[3];
+            void * p_ptr = (char *) src1->data + q_head * src1->nb[2] + q_stream * src1->nb[3];
+            float * dst_ptr = (float *) ((char *) dst->data + q_head * dst->nb[2] + q_stream * dst->nb[3]);
+            ggml_cuda_pool_alloc<char> v_contig(ctx.pool());
+            void * v_slice_ptr = nullptr;
+            ggml_cuda_vcache_nvfp4_materialize_v_slice(
+                    ctx,
+                    v_ptr,
+                    (int64_t) src0->nb[1],
+                    v_row_bytes,
+                    rows,
+                    v_contig,
+                    ctx.stream(),
+                    v_slice_ptr);
+
+            ggml_tensor v_slice = ggml_cuda_vcache_nvfp4_make_temp_tensor_2d(GGML_TYPE_NVFP4, v_slice_ptr, kv_size, rows);
+            ggml_tensor p_slice = ggml_cuda_vcache_nvfp4_make_temp_tensor_2d(GGML_TYPE_F32, p_ptr, kv_size, cols);
+            ggml_tensor out_slice = ggml_cuda_vcache_nvfp4_make_temp_mul_mat_dst(dst_ptr, rows, cols);
+            ggml_set_name(&v_slice, "nvfp4-vcache-native-v");
+            ggml_set_name(&p_slice, "nvfp4-vcache-native-p");
+            ggml_set_name(&out_slice, "nvfp4-vcache-native-pv");
+
+            const float * scale_ptr = (const float *) ((const char *) scale->data + kv_stream * scale_stream_nb);
+            if (!ggml_cuda_mul_mat_nvfp4_native_device_weight_scale(
+                        ctx, &v_slice, &p_slice, &out_slice, scale_ptr, true)) {
+                return false;
+            }
+        }
+    }
+
+    ggml_cuda_nvfp4_log_vcache_native_slice_active_once(rows, cols, kv_size, q_heads, q_streams);
+    if (!ggml_cuda_nvfp4_fp4mulmat_enabled() && ggml_cuda_nvfp4_vcache_cublaslt_trace_enabled()) {
+        const int64_t lt_k = ggml_cuda_nvfp4_native_pad_k_enabled() ?
+                ggml_cuda_nvfp4_pad_i64(kv_size, 32) : kv_size;
+        ggml_cuda_nvfp4_log_vcache_cublaslt_trace(rows, cols, kv_size, lt_k, q_heads, q_streams);
+    }
+    return true;
+}
 
 bool ggml_cuda_mul_mat_vcache_nvfp4(
         ggml_backend_cuda_context & ctx,
@@ -584,6 +743,41 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     const int64_t r3 = q_streams / kv_streams;
     ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
 
+    if (scale_is_global &&
+            ggml_cuda_vcache_nvfp4_matmul_global_native_slices(
+                    ctx,
+                    src0,
+                    src1,
+                    dst,
+                    scale,
+                    kv_size,
+                    rows,
+                    cols,
+                    kv_heads,
+                    q_heads,
+                    kv_streams,
+                    q_streams,
+                    scale_stream_nb,
+                    r2,
+                    r3)) {
+        ggml_cuda_nvfp4_log_vcache_matmul_path_once("native-slice-dynamic-p-global-scale");
+        return true;
+    }
+
+    if (ggml_cuda_nvfp4_native_no_fallback_enabled()) {
+        GGML_ABORT(
+                "%s: NVFP4 V-cache native-slice cuBLASLt path failed and "
+                "GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK=1 | scale_is_global=%d "
+                "kv_size=%lld rows=%lld cols=%lld kv_heads=%lld q_heads=%lld",
+                __func__,
+                scale_is_global ? 1 : 0,
+                (long long) kv_size,
+                (long long) rows,
+                (long long) cols,
+                (long long) kv_heads,
+                (long long) q_heads);
+    }
+
     const int64_t n_blocks = kv_size / QK_NVFP4;
     const int64_t p_rows = cols * q_heads * q_streams;
     ggml_cuda_pool_alloc<block_nvfp4> p_q(ctx.pool(), (size_t) p_rows * (size_t) n_blocks);
@@ -621,13 +815,8 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
             src1->nb[3]);
     CUDA_CHECK(cudaGetLastError());
 
-    const bool force_fp4mulmat = ggml_cuda_nvfp4_fp4mulmat_enabled();
-    if (force_fp4mulmat) {
-        ggml_cuda_nvfp4_log_vcache_fp4mulmat_forced_once();
-    }
-
 #if GGML_CUDA_HAS_CUBLASLT
-    if (!force_fp4mulmat && ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
+    if (ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
                 ctx,
                 (const block_nvfp4 *) src0->data,
                 (const float *) scale->data,
@@ -660,34 +849,5 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     }
 #endif
 
-    ggml_cuda_nvfp4_log_vcache_matmul_path_once(force_fp4mulmat ? "fp4_mulmat-derived-custom-cuda-fp4" : "custom-cuda-fp4");
-    ggml_cuda_nvfp4_fp4mulmat_vcache_cuda(
-            (const block_nvfp4 *) src0->data,
-            (const float *) scale->data,
-            p_q.get(),
-            p_scale.get(),
-            (float *) dst->data,
-            kv_size,
-            rows,
-            cols,
-            kv_heads,
-            q_heads,
-            kv_streams,
-            q_streams,
-            src0->nb[0],
-            src0->nb[1],
-            src0->nb[2],
-            src0->nb[3],
-            scale->nb[0],
-            scale_row_nb,
-            scale_head_nb,
-            scale_stream_nb,
-            scale_is_global,
-            dst->nb[1],
-            dst->nb[2],
-            dst->nb[3],
-            r2,
-            r3,
-            ctx.stream());
-    return true;
+    return false;
 }

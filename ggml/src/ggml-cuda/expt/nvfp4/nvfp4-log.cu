@@ -58,6 +58,24 @@ void ggml_cuda_nvfp4_log_trunc_bf16_input_once(const char * env, bool enabled) {
                     : "disabled, FP32 nearest-neighbor NVFP4 quantization uses full FP32 activations");
 }
 
+void ggml_cuda_nvfp4_log_native_pad_k_once(const char * env, bool enabled) {
+    GGML_LOG_INFO(
+            "%s: GGML_CUDA_NVFP4_NATIVE_PAD_K=%s -> %s\n",
+            __func__,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, cuBLASLt NVFP4 K is zero-padded to a multiple of 32"
+                    : "disabled, cuBLASLt NVFP4 requires the logical K to be a multiple of 32");
+}
+
+void ggml_cuda_nvfp4_log_vcache_cublaslt_trace_switch_once(const char * env, bool enabled) {
+    GGML_LOG_INFO(
+            "%s: GGML_CUDA_NVFP4_VCACHE_CUBLASLT_TRACE=%s -> %s\n",
+            __func__,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, logging each completed native-slice V-cache cuBLASLt P*V call"
+                    : "disabled");
+}
+
 void ggml_cuda_nvfp4_log_kcache_outlier_counts(
         const char * caller,
         const char * target,
@@ -353,28 +371,70 @@ void ggml_cuda_nvfp4_log_vcache_fp4_pv_once() {
     }
 
     GGML_LOG_INFO(
-            "%s: CUDA NVFP4 V-cache p*v quantizes P to dynamic NVFP4 by default; using cuBLASLt FP4 when available, otherwise custom CUDA dot kernel\n",
+            "%s: CUDA NVFP4 V-cache p*v uses native-slice dynamic P for global-scale V, with cuBLASLt FP4 as fallback\n",
             __func__);
 }
 
-void ggml_cuda_nvfp4_log_vcache_matmul_path_once(const char * path) {
+void ggml_cuda_nvfp4_log_vcache_native_slice_active_once(
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_size,
+        int64_t q_heads,
+        int64_t q_streams) {
     static std::atomic<bool> logged(false);
     if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_INFO(
+            "%s: native-slice V-cache P*V active rows=%lld cols=%lld kv_size=%lld q_heads=%lld q_streams=%lld P=F32 at wrapper boundary dynamic_P_quantization=native-matmul V_scale_compensation=native_weight_scale_1_over_global_scale\n",
+            __func__,
+            (long long) rows,
+            (long long) cols,
+            (long long) kv_size,
+            (long long) q_heads,
+            (long long) q_streams);
+}
+
+void ggml_cuda_nvfp4_log_vcache_cublaslt_trace(
+        int64_t rows,
+        int64_t cols,
+        int64_t logical_k,
+        int64_t lt_k,
+        int64_t q_heads,
+        int64_t q_streams) {
+    static std::atomic<uint64_t> call_id(0);
+    const uint64_t id = call_id.fetch_add(1) + 1;
+    GGML_LOG_INFO(
+            "%s: call=%llu path=native-slice-cublasLt rows=%lld cols=%lld logical_k=%lld lt_k=%lld "
+            "q_heads=%lld q_streams=%lld\n",
+            __func__,
+            (unsigned long long) id,
+            (long long) rows,
+            (long long) cols,
+            (long long) logical_k,
+            (long long) lt_k,
+            (long long) q_heads,
+            (long long) q_streams);
+}
+
+void ggml_cuda_nvfp4_log_vcache_matmul_path_once(const char * path) {
+    static std::atomic<bool> logged_native_slice(false);
+    static std::atomic<bool> logged_cublaslt(false);
+    static std::atomic<bool> logged_other(false);
+
+    std::atomic<bool> * logged = &logged_other;
+    if (path != nullptr && strcmp(path, "native-slice-dynamic-p-global-scale") == 0) {
+        logged = &logged_native_slice;
+    } else if (path != nullptr && strcmp(path, "cublasLt-fp4") == 0) {
+        logged = &logged_cublaslt;
+    }
+
+    if (logged->exchange(true)) {
         return;
     }
 
     GGML_LOG_INFO("%s: CUDA NVFP4 V-cache p*v matmul path=%s\n", __func__, path);
-}
-
-void ggml_cuda_nvfp4_log_vcache_fp4mulmat_forced_once() {
-    static std::atomic<bool> logged(false);
-    if (logged.exchange(true)) {
-        return;
-    }
-
-    GGML_LOG_WARN(
-            "%s: GGML_CUDA_NVFP4_FP4MULMAT enabled; forcing CUDA NVFP4 V-cache p*v matmul path=fp4_mulmat-derived custom-cuda-fp4 and skipping cuBLASLt FP4\n",
-            __func__);
 }
 
 void ggml_cuda_nvfp4_log_vcache_lt_failure_once(const char * stage, int status, const char * status_str) {
@@ -384,7 +444,7 @@ void ggml_cuda_nvfp4_log_vcache_lt_failure_once(const char * stage, int status, 
     }
 
     GGML_LOG_WARN(
-            "%s: cuBLASLt FP4 P*V path failed at %s status=%d (%s); falling back to custom CUDA kernel\n",
+            "%s: cuBLASLt FP4 P*V fallback failed at %s status=%d (%s)\n",
             __func__, stage, status, status_str);
 }
 
@@ -417,7 +477,7 @@ void ggml_cuda_nvfp4_log_vcache_lt_scale_attrs_unavailable_once() {
         return;
     }
 
-    GGML_LOG_WARN("%s: cuBLASLt FP4 scale-channel attrs unavailable; falling back to custom CUDA kernel\n", __func__);
+    GGML_LOG_WARN("%s: cuBLASLt FP4 scale-channel attrs unavailable for V-cache P*V fallback\n", __func__);
 }
 
 void ggml_cuda_nvfp4_log_fp4mulmat_native_path(
