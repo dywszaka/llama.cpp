@@ -760,7 +760,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
                     scale_stream_nb,
                     r2,
                     r3)) {
-        ggml_cuda_nvfp4_log_vcache_matmul_path_once("native-slice-dynamic-p-global-scale");
+        ggml_cuda_nvfp4_log_vcache_matmul_path_once("unified path for nvfp4 matmul, native-slice-dynamic-p-global-scale");
         return true;
     }
 
@@ -844,7 +844,7 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
                 dst->nb[3],
                 r2,
                 r3)) {
-        ggml_cuda_nvfp4_log_vcache_matmul_path_once("cublasLt-fp4");
+        ggml_cuda_nvfp4_log_vcache_matmul_path_once("fallback cublasLt-fp4");
         return true;
     }
 #endif
