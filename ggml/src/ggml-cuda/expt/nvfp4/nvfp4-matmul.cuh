@@ -4,7 +4,6 @@
 #include "nvfp4-common.cuh"
 
 bool ggml_cuda_nvfp4_native_no_fallback_enabled();
-bool ggml_cuda_nvfp4_native_pad_k_enabled();
 
 bool ggml_cuda_mul_mat_nvfp4_native(
         ggml_backend_cuda_context & ctx,

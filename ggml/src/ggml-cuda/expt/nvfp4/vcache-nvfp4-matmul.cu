@@ -681,8 +681,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_global_native_slices(
 
     ggml_cuda_nvfp4_log_vcache_native_slice_active_once(rows, cols, kv_size, q_heads, q_streams);
     if (!ggml_cuda_nvfp4_fp4mulmat_enabled() && ggml_cuda_nvfp4_vcache_cublaslt_trace_enabled()) {
-        const int64_t lt_k = ggml_cuda_nvfp4_native_pad_k_enabled() ?
-                ggml_cuda_nvfp4_pad_i64(kv_size, 32) : kv_size;
+        const int64_t lt_k = ggml_cuda_nvfp4_pad_i64(kv_size, 32);
         ggml_cuda_nvfp4_log_vcache_cublaslt_trace(rows, cols, kv_size, lt_k, q_heads, q_streams);
     }
     return true;

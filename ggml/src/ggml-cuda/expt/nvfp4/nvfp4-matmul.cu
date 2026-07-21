@@ -531,16 +531,6 @@ bool ggml_cuda_nvfp4_native_no_fallback_enabled() {
     return cached != 0;
 }
 
-bool ggml_cuda_nvfp4_native_pad_k_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_PAD_K");
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-        ggml_cuda_nvfp4_log_native_pad_k_once(env, cached != 0);
-    }
-    return cached != 0;
-}
-
 static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,
@@ -683,16 +673,12 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     const bool use_fp4mulmat = ggml_cuda_nvfp4_fp4mulmat_enabled();
 
     // Native FP4 matmul is restrictive on GEMM dimensions. The experimental fp4mulmat kernel accepts K in
-    // 16-value blocks, while cuBLASLt requires K to be a multiple of 32.
+    // 16-value blocks, while the cuBLASLt path zero-pads K to a multiple of 32.
     if ((ne01 % 16) != 0 || (ne10 % 16) != 0) {
         log_skip("native FP4 requires M/K to be multiples of 16");
         return false;
     }
-    const bool pad_k = !use_fp4mulmat && ggml_cuda_nvfp4_native_pad_k_enabled();
-    if (!use_fp4mulmat && !pad_k && (ne10 % 32) != 0) {
-        log_skip("cuBLASLt native FP4 requires K multiple of 32");
-        return false;
-    }
+    const bool pad_k = !use_fp4mulmat && (ne10 % 32) != 0;
     const bool row_split_mode = ggml_cuda_nvfp4_native_row_split_enabled() && ne11 > 1;
     const int64_t ne11_padded = (ne11 + 15) & ~15LL;
     const int64_t lt_n = row_split_mode ? 16 : ne11_padded;
@@ -706,6 +692,9 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     cudaStream_t stream = ctx.stream();
     const int64_t nblk_k = ne10 / QK_NVFP4;
     const int64_t lt_k = pad_k ? ggml_cuda_nvfp4_pad_i64(ne10, 32) : ne10;
+    if (pad_k) {
+        ggml_cuda_nvfp4_log_native_k_padding_once(ne10, lt_k);
+    }
     const int64_t scale_inner_padded = ggml_cuda_nvfp4_pad_i64(lt_k / QK_NVFP4, 4);
     const int64_t scale_outer_padded_b = ggml_cuda_nvfp4_pad_i64(ne11_padded, 128);
 

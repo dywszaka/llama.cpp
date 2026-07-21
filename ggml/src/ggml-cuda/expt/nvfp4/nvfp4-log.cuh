@@ -9,7 +9,7 @@ void ggml_cuda_nvfp4_log_bf16_quant_trunc_nn_once(const char * env, bool enabled
 void ggml_cuda_nvfp4_log_bf16_quant_bf16_internal_once(const char * env, bool enabled);
 void ggml_cuda_nvfp4_log_bf16_quant_bf16_block_scale_once(const char * env, bool enabled);
 void ggml_cuda_nvfp4_log_trunc_bf16_input_once(const char * env, bool enabled);
-void ggml_cuda_nvfp4_log_native_pad_k_once(const char * env, bool enabled);
+void ggml_cuda_nvfp4_log_native_k_padding_once(int64_t logical_k, int64_t padded_k);
 void ggml_cuda_nvfp4_log_vcache_cublaslt_trace_switch_once(const char * env, bool enabled);
 
 void ggml_cuda_nvfp4_log_kcache_outlier_counts(

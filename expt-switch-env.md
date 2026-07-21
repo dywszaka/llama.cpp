@@ -84,18 +84,6 @@ flash attention is not supported, and KQ/V offload must be enabled.
 
 ## NVFP4 CUDA Native Matmul
 
-### `GGML_CUDA_NVFP4_NATIVE_PAD_K`
-
-Enables experimental zero-padding of the cuBLASLt NVFP4 reduction dimension K
-to the next multiple of 32. Default: unset/off.
-
-The logical NVFP4 and F32 inputs are still quantized and scaled using their
-original K. Before cuBLASLt execution, the split FP4 data and UE4M3 scale
-channels allocate the padded K extent and leave the added FP4 values and scale
-entries as zero. The cuBLASLt A/B descriptors use the padded K and leading
-dimension; output dimensions and post-matmul scale compensation are unchanged.
-The experimental `GGML_CUDA_NVFP4_FP4MULMAT` path does not use this padding.
-
 ### `GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK`
 
 Validation switch for native CUDA NVFP4 matmul. Default: unset/off.

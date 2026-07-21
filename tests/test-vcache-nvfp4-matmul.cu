@@ -889,12 +889,10 @@ int main(int argc, char ** argv) {
 
     if (argc > 1 && std::strcmp(argv[1], "--native-pad-k-only") == 0) {
 #if defined(_WIN32)
-        _putenv_s("GGML_CUDA_NVFP4_NATIVE_PAD_K", "1");
         _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
         _putenv_s("GGML_CUDA_NVFP4_VCACHE_CUBLASLT_TRACE", "1");
         _putenv_s("GGML_CUDA_NVFP4_FP4MULMAT", "0");
 #else
-        setenv("GGML_CUDA_NVFP4_NATIVE_PAD_K", "1", 1);
         setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
         setenv("GGML_CUDA_NVFP4_VCACHE_CUBLASLT_TRACE", "1", 1);
         setenv("GGML_CUDA_NVFP4_FP4MULMAT", "0", 1);
@@ -902,7 +900,7 @@ int main(int argc, char ** argv) {
         if (!run_real_vcache_view_case(16, true) || !run_real_vcache_view_case(48, true)) {
             return 1;
         }
-        std::puts("test-vcache-nvfp4-matmul: native K padding cases passed");
+        std::puts("test-vcache-nvfp4-matmul: default native K padding cases passed");
         return 0;
     }
 

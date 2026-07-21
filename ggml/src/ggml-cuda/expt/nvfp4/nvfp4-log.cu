@@ -58,13 +58,17 @@ void ggml_cuda_nvfp4_log_trunc_bf16_input_once(const char * env, bool enabled) {
                     : "disabled, FP32 nearest-neighbor NVFP4 quantization uses full FP32 activations");
 }
 
-void ggml_cuda_nvfp4_log_native_pad_k_once(const char * env, bool enabled) {
+void ggml_cuda_nvfp4_log_native_k_padding_once(int64_t logical_k, int64_t padded_k) {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
     GGML_LOG_INFO(
-            "%s: GGML_CUDA_NVFP4_NATIVE_PAD_K=%s -> %s\n",
+            "%s: cuBLASLt NVFP4 K padding active: logical_k=%lld padded_k=%lld\n",
             __func__,
-            env != nullptr ? env : "(unset)",
-            enabled ? "enabled, cuBLASLt NVFP4 K is zero-padded to a multiple of 32"
-                    : "disabled, cuBLASLt NVFP4 requires the logical K to be a multiple of 32");
+            (long long) logical_k,
+            (long long) padded_k);
 }
 
 void ggml_cuda_nvfp4_log_vcache_cublaslt_trace_switch_once(const char * env, bool enabled) {
