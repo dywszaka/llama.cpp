@@ -13,8 +13,6 @@ LAYER=0
 CUDA_DEVICE="1"
 MODEL_PATH="${ROOT_DIR}/models/qwen3-8b-nvfp4.gguf"
 GGML_CUDA_RMS_NORM_QEMU_MODE="qemu_cuda"
-GGML_CUDA_TRUNC_ENABLE=1
-GGML_CUDA_TRUNC_LOG=1
 
 # Leave empty to create a timestamped directory under experiments/.
 RUN_DIR=""
@@ -125,7 +123,6 @@ printf '%s' "${PROMPT}" > "${RUN_DIR}/prompt.txt"
 {
     printf 'CUDA_VISIBLE_DEVICES=%q ' "${CUDA_DEVICE}"
     printf 'GGML_CUDA_RMS_NORM_QEMU_MODE=%q ' "${GGML_CUDA_RMS_NORM_QEMU_MODE}"
-    printf 'GGML_CUDA_TRUNC_ENABLE=%q ' "${GGML_CUDA_TRUNC_ENABLE}"
     printf 'LLAMA_EXPT_TENSOR_EXPORT_DIR=%q ' "${TENSOR_DIR}"
     printf 'LLAMA_EXPT_TENSOR_EXPORT_OP=%q ' "${OP}"
     printf 'LLAMA_EXPT_TENSOR_EXPORT_TYPE=%q ' "${TYPE}"
@@ -139,6 +136,9 @@ git -C "${ROOT_DIR}" status --short > "${RUN_DIR}/git-status.txt" 2>/dev/null ||
 set +e
 CUDA_VISIBLE_DEVICES="${CUDA_DEVICE}" \
 GGML_CUDA_RMS_NORM_QEMU_MODE="${GGML_CUDA_RMS_NORM_QEMU_MODE}" \
+GGML_CUDA_DISABLE_GRAPHS=0 \
+GGML_CUDA_TRUNC_ENABLE=1 \
+GGML_CUDA_TRUNC_LOG=1 \
 LLAMA_EXPT_TENSOR_EXPORT_DIR="${TENSOR_DIR}" \
 LLAMA_EXPT_TENSOR_EXPORT_OP="${OP}" \
 LLAMA_EXPT_TENSOR_EXPORT_TYPE="${TYPE}" \
