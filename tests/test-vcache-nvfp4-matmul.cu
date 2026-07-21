@@ -124,7 +124,7 @@ static void dequantize_v_blocks_scalar_like_lt(
     }
 }
 
-static bool run_case() {
+[[maybe_unused]] static bool run_case() {
     ggml_init_params params = {
         /* .mem_size   = */ 32 * 1024 * 1024,
         /* .mem_buffer = */ nullptr,
@@ -226,7 +226,7 @@ static bool run_case() {
     return true;
 }
 
-static bool run_permuted_case() {
+[[maybe_unused]] static bool run_permuted_case() {
     ggml_init_params params = {
         /* .mem_size   = */ 32 * 1024 * 1024,
         /* .mem_buffer = */ nullptr,
@@ -775,18 +775,12 @@ static bool run_real_vcache_view_benchmark(int64_t kv_size = 512) {
     const int64_t n_embd = head_dim * kv_heads;
 
     ggml_tensor * v_cache = ggml_new_tensor_3d(ctx, GGML_TYPE_NVFP4, kv_size, n_embd, 1);
-    ggml_tensor * v_scale_base = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, blocks * n_embd, 1);
+    ggml_tensor * v_scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
     ggml_tensor * v = ggml_view_4d(ctx, v_cache,
             kv_size, kv_heads, head_dim, 1,
             (int64_t) blocks * head_dim * sizeof(block_nvfp4),
             (int64_t) blocks * sizeof(block_nvfp4),
             (int64_t) blocks * n_embd * sizeof(block_nvfp4),
-            0);
-    ggml_tensor * v_scale = ggml_view_4d(ctx, v_scale_base,
-            blocks, kv_heads, head_dim, 1,
-            (int64_t) blocks * head_dim * sizeof(float),
-            (int64_t) blocks * sizeof(float),
-            (int64_t) blocks * n_embd * sizeof(float),
             0);
     ggml_tensor * p = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, kv_size, cols, q_heads, 1);
 
@@ -806,21 +800,18 @@ static bool run_real_vcache_view_benchmark(int64_t kv_size = 512) {
     }
 
     std::vector<block_nvfp4> v_q((size_t) n_embd * (size_t) blocks);
-    std::vector<float> v_s((size_t) n_embd * (size_t) blocks);
     std::vector<float> tmp((size_t) kv_size);
+    const float fixed_amax = 64.0f;
+    const float fixed_global = 6.0f * 224.0f / fixed_amax;
     for (int64_t row = 0; row < n_embd; ++row) {
         for (int64_t b = 0; b < blocks; ++b) {
-            float amax = 0.0f;
             for (int64_t i = 0; i < 16; ++i) {
                 const float x = 0.6f * sinf(0.011f * (float) (row * kv_size + b * 16 + i))
                     + 0.15f * cosf(0.023f * (float) (row + b * 16 + i));
                 tmp[(size_t) b * 16 + (size_t) i] = x;
-                amax = fmaxf(amax, fabsf(x));
             }
-            const float global = amax > 0.0f ? (6.0f * 224.0f / amax) : 0.0f;
             const size_t off = (size_t) row * (size_t) blocks + (size_t) b;
-            v_s[off] = global > 0.0f ? 1.0f / global : 0.0f;
-            quantize_row_nvfp4_ref(tmp.data() + (size_t) b * 16, v_q.data() + off, 16, global);
+            quantize_row_nvfp4_ref(tmp.data() + (size_t) b * 16, v_q.data() + off, 16, fixed_global);
         }
     }
 
@@ -830,7 +821,7 @@ static bool run_real_vcache_view_benchmark(int64_t kv_size = 512) {
     }
 
     ggml_backend_tensor_set(v_cache, v_q.data(), 0, v_q.size() * sizeof(block_nvfp4));
-    ggml_backend_tensor_set(v_scale_base, v_s.data(), 0, v_s.size() * sizeof(float));
+    ggml_backend_tensor_set(v_scale, &fixed_global, 0, sizeof(fixed_global));
     ggml_backend_tensor_set(p, p_host.data(), 0, p_host.size() * sizeof(float));
 
     const int warmup = 10;
@@ -866,7 +857,7 @@ static bool run_real_vcache_view_benchmark(int64_t kv_size = 512) {
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
-    std::printf("test-vcache-nvfp4-matmul: benchmark kv_size=%lld fp4_p=default %.3f us/iter (%d iters)\n",
+    std::printf("test-vcache-nvfp4-matmul: benchmark kv_size=%lld path=global-native-slice %.3f us/iter (%d iters)\n",
             (long long) kv_size, elapsed_ms * 1000.0f / (float) iters, iters);
 
     ggml_backend_buffer_free(buf);
@@ -904,22 +895,6 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
-    if (!run_case()) {
-        return 1;
-    }
-
-    if (!run_permuted_case()) {
-        return 1;
-    }
-
-    if (!run_real_vcache_view_case(16)) {
-        return 1;
-    }
-
-    if (!run_real_vcache_view_case(512)) {
-        return 1;
-    }
-
     if (!run_real_vcache_view_case(512, true)) {
         return 1;
     }
@@ -928,11 +903,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    if (!run_real_vcache_view_case(528)) {
-        return 1;
-    }
-
-    if (!run_set_rows_then_matmul_case(false)) {
+    if (!run_real_vcache_view_case(528, true)) {
         return 1;
     }
 
@@ -940,7 +911,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    if (!run_real_vcache_view_case(2048)) {
+    if (!run_real_vcache_view_case(2048, true)) {
         return 1;
     }
 

@@ -69,6 +69,12 @@ void ggml_cuda_nvfp4_log_vcache_native_slice_active_once(
         int64_t kv_size,
         int64_t q_heads,
         int64_t q_streams);
+void ggml_cuda_nvfp4_log_vcache_native_slice_failure_once(
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_size,
+        int64_t q_heads,
+        int64_t q_streams);
 void ggml_cuda_nvfp4_log_vcache_cublaslt_trace(
         int64_t rows,
         int64_t cols,

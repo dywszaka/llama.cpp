@@ -375,7 +375,7 @@ void ggml_cuda_nvfp4_log_vcache_fp4_pv_once() {
     }
 
     GGML_LOG_INFO(
-            "%s: CUDA NVFP4 V-cache p*v uses native-slice dynamic P for global-scale V, with cuBLASLt FP4 as fallback\n",
+            "%s: CUDA NVFP4 V-cache p*v uses native-slice dynamic P for global-scale V; detached fallback is disabled\n",
             __func__);
 }
 
@@ -392,6 +392,28 @@ void ggml_cuda_nvfp4_log_vcache_native_slice_active_once(
 
     GGML_LOG_INFO(
             "%s: native-slice V-cache P*V active rows=%lld cols=%lld kv_size=%lld q_heads=%lld q_streams=%lld P=F32 at wrapper boundary dynamic_P_quantization=native-matmul V_scale_compensation=native_weight_scale_1_over_global_scale\n",
+            __func__,
+            (long long) rows,
+            (long long) cols,
+            (long long) kv_size,
+            (long long) q_heads,
+            (long long) q_streams);
+}
+
+void ggml_cuda_nvfp4_log_vcache_native_slice_failure_once(
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_size,
+        int64_t q_heads,
+        int64_t q_streams) {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_WARN(
+            "%s: native-slice NVFP4 V-cache p*v matmul failed; fallback is detached and disabled "
+            "rows=%lld cols=%lld kv_size=%lld q_heads=%lld q_streams=%lld\n",
             __func__,
             (long long) rows,
             (long long) cols,

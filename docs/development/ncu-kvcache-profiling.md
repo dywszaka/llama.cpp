@@ -117,13 +117,18 @@ Expected evidence:
 - `server.log` contains:
   - `LLAMA_EXPERIMENT_NVFP4_VCACHE=1 -> enabled`;
   - `ggml_cuda_vcache_nvfp4_log_fp4_pv_once: CUDA NVFP4 V-cache p*v uses
-    native-slice dynamic P for global-scale V, with cuBLASLt FP4 as fallback`.
+    native-slice dynamic P for global-scale V; detached fallback is disabled`.
 - `server.log` shows `type_v = nvfp4`.
-- `ncu` includes V-cache NVFP4 store kernels and either native NVFP4 matmul
-  kernels for global-scale V or cuBLASLt FP4 fallback staging/quantization
-  kernels.
+- `ncu` includes V-cache NVFP4 store kernels and native NVFP4 matmul kernels
+  for global-scale V.
 
-### 4. V-cache NVFP4 cuBLASLt FP4 P*V
+### 4. Detached V-cache NVFP4 cuBLASLt FP4 P*V fallback
+
+The legacy fallback implementation remains buildable in
+`ggml/src/ggml-cuda/expt/nvfp4/vcache-nvfp4-matmul-fallback.cu`, but the main
+V-cache matmul path does not call it. The following command is retained only as
+a reference for future standalone fallback profiling after an explicit entry
+point is wired into a test or benchmark:
 
 ```bash
 LLAMA_EXPERIMENT_NVFP4_VCACHE=1 \
@@ -137,14 +142,10 @@ scripts/profile-llama-server-ncu.sh \
 
 Expected evidence:
 
-- `LLAMA_EXPERIMENT_NVFP4_VCACHE=1 -> enabled` appears in `server.log`.
-- A one-shot active log from `vcache-nvfp4-matmul.cu` indicates successful
-  cuBLASLt FP4 P*V fallback use. If Lt is unavailable or returns unsupported,
-  the V-cache-specific path returns false, so check logs before trusting only a
-  kernel name.
-- `ncu` should show staging/quantization kernels plus cuBLASLt GEMM kernels.
-  cuBLASLt kernel names are driver/toolkit dependent; use the source logs and
-  the presence of `cublasLtMatmul`-driven kernels together.
+- Normal `llama-server` execution should not show this fallback's staging or
+  cuBLASLt kernels.
+- A standalone caller must invoke `ggml_cuda_mul_mat_vcache_nvfp4_fallback()`
+  before expecting its one-shot active log or profiling evidence.
 
 ### 5. V-cache FP8
 
