@@ -130,17 +130,29 @@ strided F32 输入，并生成如下 canonical tensor：
 dtype  = BF16 bit pattern
 layout = dense [nsamples, nchannels, nrows, ncols]
 bytes  = ncols * nrows * nchannels * nsamples * sizeof(uint16_t)
-round  = F32-to-BF16 round-to-nearest-even
+round  = F32-to-BF16 RZ/truncation: bf16_bits = f32_bits >> 16
 ```
 
 QEMU/RVV 和 qemu_cuda 消费完全相同的 canonical BF16 input，并产生同布局 BF16
-output。`eps` 仍作为 F32 标量传递，不做隐式 BF16 量化。返回 llama.cpp 下游前，CUDA
-在 device 上把 BF16 output 转换回 dense F32 `dst`。
+output。RMS_NORM 在这里遵循所有后续 QEMU/RVV 算子的通用 canonical input 规则，并非
+特殊例外：上游 F32 tensor 直接保留 bit pattern 的高 16 位，不对低 16 位做进位，也
+不额外改写 NaN payload。
+`eps` 以 F32 标量传输，在算子入口按 RNE 量化为 BF16；`1/ncols` 也按 RNE 量化为
+BF16。返回 llama.cpp 下游前，CUDA 在 device 上把 BF16 output 转换回 dense F32
+`dst`。
 
-当前 BF16 RMS_NORM 数值模型参考 `decode/rms_norm/ybxkernel/eu_rms_norm.cl`：16 个
-归约 lane 跨列累计平方和，横向归约一次，计算 `1/sqrt(sum/ncols + eps)`，然后二次遍历
-缩放输入。llama.cpp 的未融合 `GGML_OP_RMS_NORM` 不包含 weight 乘法，因此 canonical
-RPC 不传 weight。
+当前 BF16 RMS_NORM 数值模型直接参考
+`decode/rms_norm/ybxkernel/eu_rms_norm.cl`，并固定为 NI900 VLEN=512 的 32 个 e16 lane：
+
+1. lane `i` 按 `i, i+32, ...` 读取列，并对每一步执行 BF16 fused multiply-add；
+2. `vfredusum` 按 lane 0 到 31 的顺序执行 BF16 加法；
+3. sum、BF16 `1/ncols` 和 BF16 `eps` 依次执行 BF16 multiply/add/sqrt/reciprocal；
+4. 第二遍按 BF16 multiply 缩放输入并直接输出 BF16。
+
+qemu_cuda 使用 `ggml/src/ggml-cuda/expt/rms-norm-bf16-core.cuh` 复刻相同 lane 映射、
+归约顺序和每一步 RNE 舍入。QEMU 与 qemu_cuda 比较原始 `uint16_t`，契约为 bit
+mismatch 数量等于 0。llama.cpp 的未融合 `GGML_OP_RMS_NORM` 不包含 weight 乘法，
+因此 canonical RPC 不传 weight。
 
 `qemu_cuda` 纯路径只使用 device buffer 和调用方 CUDA stream，不创建 ZMQ socket，也
 不执行 D2H/H2D。显式启用 `GGML_CUDA_RMS_NORM_QEMU_TIMING` 时会创建 CUDA event 并

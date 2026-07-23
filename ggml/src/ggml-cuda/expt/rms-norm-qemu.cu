@@ -118,7 +118,7 @@ static void log_mode_once(ggml_cuda_rms_norm_qemu_mode mode) {
     }
     if (mode == GGML_CUDA_RMS_NORM_QEMU_MODE_QEMU_CUDA) {
         GGML_LOG_INFO(
-                "%s: %s=qemu_cuda enabled; BF16 RMS_NORM stays on CUDA device, "
+                "%s: %s=qemu_cuda enabled; bit-exact BF16 RMS_NORM stays on CUDA device, "
                 "ZMQ/D2H/H2D are not used, timing=%s\n",
                 __func__, GGML_CUDA_RMS_NORM_QEMU_MODE_ENV,
                 timing_enabled() ? "on" : "off");
