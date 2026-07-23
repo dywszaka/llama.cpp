@@ -1,27 +1,7 @@
 #include "rms-norm-qemu-cuda.cuh"
+#include "rms-norm-bf16-core.cuh"
 
 #include <algorithm>
-
-static __device__ __forceinline__ uint16_t rms_norm_qemu_f32_to_bf16_bits(float value) {
-    const uint32_t bits = __float_as_uint(value);
-    const uint32_t exponent = bits & UINT32_C(0x7f800000);
-    const uint32_t mantissa = bits & UINT32_C(0x007fffff);
-    if (exponent == UINT32_C(0x7f800000) && mantissa != 0) {
-        uint16_t result = (uint16_t) (bits >> 16);
-        result |= UINT16_C(0x0040);
-        return result;
-    }
-
-    const uint32_t upper = bits >> 16;
-    const uint32_t lower = bits & UINT32_C(0xffff);
-    return (uint16_t) (upper +
-            (lower > UINT32_C(0x8000) ||
-             (lower == UINT32_C(0x8000) && (upper & UINT32_C(1)) != 0)));
-}
-
-static __device__ __forceinline__ float rms_norm_qemu_bf16_bits_to_f32(uint16_t value) {
-    return __uint_as_float((uint32_t) value << 16);
-}
 
 static __global__ void rms_norm_qemu_preprocess_kernel(
         const float * input,
@@ -39,40 +19,7 @@ static __global__ void rms_norm_qemu_preprocess_kernel(
         const int64_t sample = packed_channel / params.nchannels;
         const int64_t source_index = sample * params.stride_sample +
                 channel * params.stride_channel + row * params.stride_row + col;
-        output[index] = rms_norm_qemu_f32_to_bf16_bits(input[source_index]);
-    }
-}
-
-static __global__ void rms_norm_qemu_bf16_kernel(
-        const uint16_t * input,
-        uint16_t * output,
-        int ncols,
-        float eps) {
-    const int row = (int) blockIdx.x;
-    const int lane = (int) threadIdx.x;
-    const uint16_t * row_input = input + (size_t) row * (size_t) ncols;
-    uint16_t * row_output = output + (size_t) row * (size_t) ncols;
-
-    float sum_squares = 0.0f;
-    for (int col = lane; col < ncols; col += 16) {
-        const float value = rms_norm_qemu_bf16_bits_to_f32(row_input[col]);
-        sum_squares = fmaf(value, value, sum_squares);
-    }
-
-    const unsigned int mask = __activemask();
-    for (int offset = 8; offset > 0; offset >>= 1) {
-        sum_squares += __shfl_down_sync(mask, sum_squares, offset, 16);
-    }
-
-    __shared__ float scale;
-    if (lane == 0) {
-        scale = 1.0f / sqrtf(sum_squares / (float) ncols + eps);
-    }
-    __syncthreads();
-
-    for (int col = lane; col < ncols; col += 16) {
-        const float value = rms_norm_qemu_bf16_bits_to_f32(row_input[col]);
-        row_output[col] = rms_norm_qemu_f32_to_bf16_bits(value * scale);
+        output[index] = rms_norm_bf16_from_f32_rz(input[source_index]);
     }
 }
 
@@ -83,7 +30,7 @@ static __global__ void rms_norm_qemu_bf16_to_f32_kernel(
     for (size_t index = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
             index < elements;
             index += (size_t) blockDim.x * gridDim.x) {
-        output[index] = rms_norm_qemu_bf16_bits_to_f32(input[index]);
+        output[index] = rms_norm_bf16_to_f32(input[index]);
     }
 }
 
@@ -118,7 +65,7 @@ void ggml_cuda_rms_norm_qemu_cuda_run_bf16(
         return;
     }
     GGML_ASSERT(rows <= UINT32_MAX);
-    rms_norm_qemu_bf16_kernel<<<(unsigned int) rows, 16, 0, stream>>>(
+    rms_norm_bf16_bitexact_kernel<<<(unsigned int) rows, 32, 0, stream>>>(
             input_bf16, output_bf16, params.ncols, params.eps);
     CUDA_CHECK(cudaGetLastError());
 }

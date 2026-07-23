@@ -95,10 +95,19 @@ Supported values:
   QEMU/RVV daemon, convert returned BF16 to F32 on CUDA, and use that result.
 - `qemu_cuda`: perform F32-to-BF16 packing, the BF16 RMS_NORM model, and
   BF16-to-F32 conversion entirely on the current CUDA device. This mode creates
-  no ZMQ socket and performs no D2H/H2D transfer.
+  no ZMQ socket and performs no D2H/H2D transfer. Its 32-lane BF16 FMA,
+  lane-ordered reduction, sqrt, reciprocal, and scaling model is bit-exact with
+  the NI900 BF16-mode RVV implementation.
 - `compare`: run original CUDA, QEMU/RVV, and qemu_cuda concurrently and keep
   the original CUDA result downstream. Comparison artifacts include
-  llama-vs-QEMU errors and QEMU-vs-qemu_cuda numerical and BF16-bit metrics.
+  llama-vs-QEMU errors and QEMU-vs-qemu_cuda numerical and BF16-bit metrics;
+  the expected QEMU-vs-qemu_cuda bit mismatch count is zero.
+
+RMS_NORM follows the project-wide canonical input rule required for all new
+QEMU/RVV operators: F32-to-BF16 packing uses RZ/truncation by taking the raw
+high 16 bits of each F32 value (`bf16_bits = f32_bits >> 16`). This input-boundary
+rule does not change the RNE rounding used by `eps`, `1/ncols`, or internal BF16
+arithmetic in the NI900/qemu_cuda numerical model.
 
 `compare_cuda` and `compare_qemu` are accepted as aliases for `compare`.
 Unknown values fall back to `cuda`. All non-`cuda` modes disable RMS_NORM/MUL
