@@ -19,3 +19,28 @@ The runtime exporter also supports an op-oriented mode for capturing every
 matching node's `dst`, `dst->src[0]`, and `dst->src[1]` from the first selected
 prefill or decode graph. Edit and run `export.sh` in this directory to launch
 the export and record its artifacts under `experiments/`.
+
+For `OP=RMS_NORM`, each export directory contains an executable
+`verify-rms-norm.py`. Pass the result/dst binary first and the input/src0
+binary second:
+
+```bash
+./verify-rms-norm.py tensors/0-node1-dst-norm-0.bin tensors/1-node1-src0-CUDA0_inp_embd_0.bin
+```
+
+The script reads shape information from the adjacent `tensors/manifest.json`.
+It automatically selects the normal F32 algorithm or the deterministic QEMU
+BF16 algorithm used by `export.sh`; `--mode` can override detection.
+
+For `OP=MUL_MAT`, the export directory instead contains
+`verify-mul-mat.py`. Pass only the result/dst binary; the script locates the
+same node's inputs and any NVFP4 effective-input scale records in the adjacent
+manifest:
+
+```bash
+./verify-mul-mat.py tensors/0-node26-dst-kq-0.bin
+```
+
+The MUL_MAT validator supports strided F16/F32/BF16 inputs and native NVFP4
+effective inputs. It follows ggml's `dst = src0^T * src1` batch-broadcast
+semantics and recognizes the BF16 result rounding enabled by `export.sh`.

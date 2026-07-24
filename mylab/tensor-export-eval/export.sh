@@ -24,11 +24,26 @@ REBUILD="${REBUILD:-1}"
 EXTRA_ARGS=()
 
 LLAMA_CLI="${ROOT_DIR}/build_cuda/bin/llama-cli"
+RMS_NORM_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-rms-norm.py"
+MUL_MAT_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-mul-mat.py"
 
 TYPE="${TYPE,,}"
 OP="${OP^^}"
 OP="${OP#GGML_OP_}"
 OP="${OP//-/_}"
+
+VALIDATOR_SOURCE=""
+VALIDATOR_NAME=""
+case "${OP}" in
+    RMS_NORM)
+        VALIDATOR_SOURCE="${RMS_NORM_VALIDATOR_SOURCE}"
+        VALIDATOR_NAME="verify-rms-norm.py"
+        ;;
+    MUL_MAT)
+        VALIDATOR_SOURCE="${MUL_MAT_VALIDATOR_SOURCE}"
+        VALIDATOR_NAME="verify-mul-mat.py"
+        ;;
+esac
 
 case "${TYPE}" in
     decode)
@@ -69,6 +84,11 @@ if [[ ! -f "${MODEL_PATH}" ]]; then
     exit 1
 fi
 
+if [[ -n "${VALIDATOR_SOURCE}" && ! -f "${VALIDATOR_SOURCE}" ]]; then
+    echo "validator not found for OP=${OP}: ${VALIDATOR_SOURCE}" >&2
+    exit 1
+fi
+
 if [[ -z "${RUN_DIR}" ]]; then
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
     if [[ -n "${NAME}" ]]; then
@@ -90,6 +110,9 @@ fi
 
 TENSOR_DIR="${RUN_DIR}/tensors"
 mkdir -p "${TENSOR_DIR}"
+if [[ -n "${VALIDATOR_SOURCE}" ]]; then
+    install -m 0755 "${VALIDATOR_SOURCE}" "${RUN_DIR}/${VALIDATOR_NAME}"
+fi
 
 COMMAND=(
     "${LLAMA_CLI}"
@@ -199,6 +222,26 @@ requested_name="$(sed -nE 's/^[[:space:]]*"requested_name":[[:space:]]*"([^"]*)"
 dst_records="$(grep -c '"role": "dst"' "${MANIFEST_PATH}" || true)"
 src0_records="$(grep -c '"role": "src0"' "${MANIFEST_PATH}" || true)"
 src1_records="$(grep -c '"role": "src1"' "${MANIFEST_PATH}" || true)"
+first_dst_path="$(awk '
+    /"role": "dst"/ { selected = 1; next }
+    selected && /"path":/ {
+        path = $0
+        sub(/^[[:space:]]*"path":[[:space:]]*"/, "", path)
+        sub(/",?[[:space:]]*$/, "", path)
+        print path
+        exit
+    }
+' "${MANIFEST_PATH}")"
+first_src0_path="$(awk '
+    /"role": "src0"/ { selected = 1; next }
+    selected && /"path":/ {
+        path = $0
+        sub(/^[[:space:]]*"path":[[:space:]]*"/, "", path)
+        sub(/",?[[:space:]]*$/, "", path)
+        print path
+        exit
+    }
+' "${MANIFEST_PATH}")"
 
 resolved_name=""
 dst_name_mismatches=0
@@ -254,6 +297,7 @@ fi
     printf 'DST_RECORDS=%q\n' "${dst_records}"
     printf 'SRC0_RECORDS=%q\n' "${src0_records}"
     printf 'SRC1_RECORDS=%q\n' "${src1_records}"
+    printf 'VALIDATOR=%q\n' "${VALIDATOR_NAME}"
     printf 'VALID=%q\n' "${valid}"
 } > "${RUN_DIR}/validation.env"
 
@@ -273,7 +317,29 @@ fi
     echo "- dst records: ${dst_records}"
     echo "- src0 records: ${src0_records}"
     echo "- src1 records: ${src1_records}"
+    if [[ -n "${VALIDATOR_NAME}" ]]; then
+        echo "- Bundled validator: \`${VALIDATOR_NAME}\`"
+    fi
     echo "- Validation: \`${valid}\`"
+    if [[ "${OP}" == "RMS_NORM" && -n "${first_dst_path}" && -n "${first_src0_path}" ]]; then
+        echo
+        echo "## RMSNorm data validation"
+        echo
+        echo "Pass the result file first and the input file second:"
+        echo
+        echo '```bash'
+        printf './%s tensors/%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}" "${first_src0_path}"
+        echo '```'
+    elif [[ "${OP}" == "MUL_MAT" && -n "${first_dst_path}" ]]; then
+        echo
+        echo "## MUL_MAT data validation"
+        echo
+        echo "Pass one result file; its inputs are resolved from manifest.json:"
+        echo
+        echo '```bash'
+        printf './%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}"
+        echo '```'
+    fi
 } > "${RUN_DIR}/summary.md"
 
 if [[ "${valid}" != true ]]; then
