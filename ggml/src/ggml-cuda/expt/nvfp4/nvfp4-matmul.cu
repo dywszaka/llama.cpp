@@ -563,7 +563,22 @@ static __global__ void ggml_cuda_nvfp4_fp4mulmat_kernel(
         ggml_cuda_nvfp4_fp4mulmat_psum_accumulate(product_exp, product_mat, xb.e, wb.e, &state);
     }
 
-    *(float *) (dst + row * dst_nb0 + col * dst_nb1) = ggml_cuda_nvfp4_fp4mulmat_accumulator_to_f32(state) * column_scale;
+    *(float *) (dst + row * dst_nb0 + col * dst_nb1) = [] __device__ (float left, float right) {
+        const float product = __fmul_rn(
+                ggml_cuda_nvfp4_bf16_trunc_f32(left),
+                ggml_cuda_nvfp4_bf16_trunc_f32(right));
+        const uint32_t bits = __float_as_uint(product);
+        const uint32_t exponent = bits & 0x7f800000u;
+        const uint32_t mantissa = bits & 0x007fffffu;
+        if (exponent == 0x7f800000u && mantissa != 0u) {
+            return __uint_as_float(0x7fc00000u);
+        }
+        const uint32_t upper = bits >> 16;
+        const uint32_t lower = bits & 0xffffu;
+        const uint32_t rounded = upper +
+                (lower > 0x8000u || (lower == 0x8000u && (upper & 1u) != 0u));
+        return __uint_as_float(rounded << 16);
+    }(ggml_cuda_nvfp4_fp4mulmat_accumulator_to_f32(state), column_scale);
 }
 
 static void ggml_cuda_nvfp4_fp4mulmat_cuda(
