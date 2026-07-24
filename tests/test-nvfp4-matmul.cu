@@ -38,12 +38,8 @@ static inline int64_t pad_i64(int64_t x, int64_t a) {
     return ((x + a - 1) / a) * a;
 }
 
-static float bf16_trunc_f32(float value) {
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    bits &= 0xFFFF0000u;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
+static float bf16_round_f32(float value) {
+    return ggml_bf16_to_fp32(ggml_fp32_to_bf16(value));
 }
 
 static inline int64_t scale_tiled_index(int64_t outer, int64_t inner, int64_t n_inner_padded) {
@@ -1605,7 +1601,7 @@ static bool run_case_backend_batched_dynamic_rhs(
 
     std::vector<float> c_ref((size_t) batch_q * c_slice_elems, 0.0f);
     std::vector<block_nvfp4> b_q_ref(capture_rhs ? (size_t) batch_q * (b_slice_elems / QK_NVFP4) : 0);
-    std::vector<float> b_global_scale_ref(capture_rhs ? (size_t) batch_q * (size_t) n : 0);
+    std::vector<float> b_final_scale_ref(capture_rhs ? (size_t) batch_q * (size_t) n : 0);
     for (int ib = 0; ib < batch_q; ++ib) {
         const int ia = ib / q_per_k;
         std::vector<float> b_fp32_slice(
@@ -1621,15 +1617,17 @@ static bool run_case_backend_batched_dynamic_rhs(
             std::memcpy(
                     b_q_ref.data() + (size_t) ib * (b_slice_elems / QK_NVFP4),
                     b_q_slice.data(), b_q_slice.size() * sizeof(block_nvfp4));
-            std::memcpy(
-                    b_global_scale_ref.data() + (size_t) ib * (size_t) n,
-                    global_scales_b.data(), global_scales_b.size() * sizeof(float));
+            for (int row = 0; row < n; ++row) {
+                const float global_scale = global_scales_b[(size_t) row];
+                b_final_scale_ref[(size_t) ib * (size_t) n + (size_t) row] = bf16_round_f32(
+                        global_scale != 0.0f ? (1.0f / global_scale) : 0.0f);
+            }
         }
         dequantize_matrix_nvfp4_per_row_scale(b_q_slice, b_deq_slice, n, k, global_scales_b);
         for (int row = 0; row < n; ++row) {
             const float b_scale = global_scales_b[(size_t) row] != 0.0f ? (1.0f / global_scales_b[(size_t) row]) : 0.0f;
             const float scale = a_scale * b_scale;
-            const float scale_ratio = scale != 0.0f ? (bf16_trunc_f32(scale) / scale) : 0.0f;
+            const float scale_ratio = scale != 0.0f ? (bf16_round_f32(scale) / scale) : 0.0f;
             for (int kk = 0; kk < k; ++kk) {
                 b_deq_slice[(size_t) row * (size_t) k + (size_t) kk] *= scale_ratio;
             }
@@ -1724,14 +1722,15 @@ static bool run_case_backend_batched_dynamic_rhs(
     bool capture_ok = true;
     if (capture_rhs) {
         std::vector<block_nvfp4> b_q_gpu(b_q_ref.size());
-        std::vector<float> b_global_scale_gpu(b_global_scale_ref.size());
+        std::vector<float> b_final_scale_gpu(b_final_scale_ref.size());
         ggml_backend_tensor_get(b_capture, b_q_gpu.data(), 0, b_q_gpu.size() * sizeof(block_nvfp4));
-        ggml_backend_tensor_get(b_scale_capture, b_global_scale_gpu.data(), 0, b_global_scale_gpu.size() * sizeof(float));
+        ggml_backend_tensor_get(b_scale_capture, b_final_scale_gpu.data(), 0, b_final_scale_gpu.size() * sizeof(float));
         const uint32_t capture_flags = ggml_mul_mat_get_nvfp4_capture_flags(c);
         capture_ok = (capture_flags & GGML_NVFP4_MUL_MAT_CAPTURE_VALID) != 0 &&
+                (capture_flags & GGML_NVFP4_MUL_MAT_CAPTURE_FINAL_SCALE) != 0 &&
                 std::memcmp(b_q_gpu.data(), b_q_ref.data(), b_q_ref.size() * sizeof(block_nvfp4)) == 0;
-        for (size_t i = 0; i < b_global_scale_ref.size() && capture_ok; ++i) {
-            capture_ok = b_global_scale_gpu[i] == b_global_scale_ref[i];
+        for (size_t i = 0; i < b_final_scale_ref.size() && capture_ok; ++i) {
+            capture_ok = b_final_scale_gpu[i] == b_final_scale_ref[i];
         }
         if (!capture_ok) {
             std::fprintf(stderr, "NVFP4 RHS capture mismatch flags=0x%x\n", capture_flags);
@@ -2147,7 +2146,7 @@ static bool run_case_backend_batched_dynamic_rhs_permuted_lhs(
         for (int row = 0; row < n; ++row) {
             const float b_scale = global_scales_b[(size_t) row] != 0.0f ? (1.0f / global_scales_b[(size_t) row]) : 0.0f;
             const float scale = a_scale * b_scale;
-            const float scale_ratio = scale != 0.0f ? (bf16_trunc_f32(scale) / scale) : 0.0f;
+            const float scale_ratio = scale != 0.0f ? (bf16_round_f32(scale) / scale) : 0.0f;
             for (int kk = 0; kk < k; ++kk) {
                 b_deq_slice[(size_t) row * (size_t) k + (size_t) kk] *= scale_ratio;
             }

@@ -874,56 +874,60 @@ bool export_op_graph(
         capture["scale_mode"] = (flags & GGML_NVFP4_MUL_MAT_CAPTURE_DYNAMIC) == 0
                 ? "static"
                 : ((flags & GGML_NVFP4_MUL_MAT_CAPTURE_PER_TENSOR) != 0 ? "dynamic_per_tensor" : "dynamic_per_row");
+        const bool captures_final_scale =
+                (flags & GGML_NVFP4_MUL_MAT_CAPTURE_FINAL_SCALE) != 0;
 
-        const ggml_tensor * a_scale_raw = ggml_tensor_get_nvfp4_scale(dst->src[0]);
-        const char * a_scale_source = "src0_nvfp4_scale";
-        if (a_scale_raw == nullptr) {
-            a_scale_raw = ggml_mul_mat_get_nvfp4_weight_scale(dst);
-            a_scale_source = "mul_mat_weight_scale";
-        }
-        if (a_scale_raw != nullptr) {
-            if (observer && !observed_tensor(observed, a_scale_raw)) {
-                LLAMA_LOG_ERROR("%s: missing A-scale snapshot for node=%d tensor='%s'\n",
-                        __func__, i, ggml_get_name(a_scale_raw));
-                return false;
+        if (!captures_final_scale) {
+            const ggml_tensor * a_scale_raw = ggml_tensor_get_nvfp4_scale(dst->src[0]);
+            const char * a_scale_source = "src0_nvfp4_scale";
+            if (a_scale_raw == nullptr) {
+                a_scale_raw = ggml_mul_mat_get_nvfp4_weight_scale(dst);
+                a_scale_source = "mul_mat_weight_scale";
             }
-            if (write_op_tensor(dir, a_scale_raw, i, actual_op, "src0_scale_raw", record_index,
-                        manifest["records"], {
-                            { "scale_source", a_scale_source },
-                            { "scale_encoding", "inverse_global_scale" },
-                        }, observed_tensor(observed, a_scale_raw))) {
-                ++record_index;
-            }
-
-            std::vector<float> inverse_scales;
-            if (read_contiguous_tensor_f32(a_scale_raw, inverse_scales, observed_tensor(observed, a_scale_raw))) {
-                std::vector<float> global_scales(inverse_scales.size());
-                for (size_t j = 0; j < inverse_scales.size(); ++j) {
-                    const float v = inverse_scales[j];
-                    global_scales[j] = std::isfinite(v) && v != 0.0f ? 1.0f / v : 0.0f;
+            if (a_scale_raw != nullptr) {
+                if (observer && !observed_tensor(observed, a_scale_raw)) {
+                    LLAMA_LOG_ERROR("%s: missing A-scale snapshot for node=%d tensor='%s'\n",
+                            __func__, i, ggml_get_name(a_scale_raw));
+                    return false;
                 }
-                if (write_derived_f32_tensor(dir, a_scale_raw, global_scales, i, actual_op,
-                            "src0_global_scale", record_index, manifest["records"], {
+                if (write_op_tensor(dir, a_scale_raw, i, actual_op, "src0_scale_raw", record_index,
+                            manifest["records"], {
                                 { "scale_source", a_scale_source },
-                                { "derived_from_encoding", "inverse_global_scale" },
-                            })) {
+                                { "scale_encoding", "inverse_global_scale" },
+                            }, observed_tensor(observed, a_scale_raw))) {
                     ++record_index;
-                    capture["a_global_scale_role"] = "src0_global_scale";
+                }
+
+                std::vector<float> inverse_scales;
+                if (read_contiguous_tensor_f32(a_scale_raw, inverse_scales, observed_tensor(observed, a_scale_raw))) {
+                    std::vector<float> global_scales(inverse_scales.size());
+                    for (size_t j = 0; j < inverse_scales.size(); ++j) {
+                        const float v = inverse_scales[j];
+                        global_scales[j] = std::isfinite(v) && v != 0.0f ? 1.0f / v : 0.0f;
+                    }
+                    if (write_derived_f32_tensor(dir, a_scale_raw, global_scales, i, actual_op,
+                                "src0_global_scale", record_index, manifest["records"], {
+                                    { "scale_source", a_scale_source },
+                                    { "derived_from_encoding", "inverse_global_scale" },
+                                })) {
+                        ++record_index;
+                        capture["a_global_scale_role"] = "src0_global_scale";
+                    }
+                } else {
+                    LLAMA_LOG_WARN("%s: unable to canonicalize A global scale for tensor '%s'\n",
+                            __func__, ggml_get_name(dst));
                 }
             } else {
-                LLAMA_LOG_WARN("%s: unable to canonicalize A global scale for tensor '%s'\n",
-                        __func__, ggml_get_name(dst));
+                capture["a_global_scale"] = 1.0f;
+                capture["a_global_scale_source"] = "implicit_unit";
             }
-        } else {
-            capture["a_global_scale"] = 1.0f;
-            capture["a_global_scale_source"] = "implicit_unit";
         }
 
         if ((flags & GGML_NVFP4_MUL_MAT_CAPTURE_VALID) != 0) {
             const ggml_tensor * b_nvfp4 = ggml_mul_mat_get_nvfp4_rhs_capture(dst);
-            const ggml_tensor * b_global_scale = ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(dst);
+            const ggml_tensor * b_scale_capture = ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(dst);
             if (observer && (!observed_tensor(observed, b_nvfp4) ||
-                    !observed_tensor(observed, b_global_scale))) {
+                    !observed_tensor(observed, b_scale_capture))) {
                 LLAMA_LOG_ERROR("%s: missing effective RHS snapshot for node=%d tensor='%s'\n",
                         __func__, i, ggml_get_name(dst));
                 return false;
@@ -933,23 +937,36 @@ bool export_op_graph(
                         observed_tensor(observed, b_nvfp4))) {
                 ++record_index;
             }
-            if (write_op_tensor(dir, b_global_scale, i, actual_op, "src1_global_scale", record_index,
-                        manifest["records"], {
+            const char * scale_role = captures_final_scale ? "matmul_scale" : "src1_global_scale";
+            if (write_op_tensor(dir, b_scale_capture, i, actual_op, scale_role, record_index,
+                        manifest["records"], captures_final_scale ? json {
+                            { "scale_encoding", "bf16_rne_rounded_f32" },
+                            { "scale_semantics", "final_output_multiplier" },
+                            { "scale_axis", (flags & GGML_NVFP4_MUL_MAT_CAPTURE_DYNAMIC) != 0 ? 1 : -1 },
+                        } : json {
                             { "scale_encoding", "global_scale" },
                             { "scale_axis", (flags & GGML_NVFP4_MUL_MAT_CAPTURE_DYNAMIC) != 0 ? 1 : -1 },
-                        }, observed_tensor(observed, b_global_scale))) {
+                        }, observed_tensor(observed, b_scale_capture))) {
                 ++record_index;
             }
-            capture["effective_srcs"] = {
-                { "a", {
-                    { "tensor_role", "src0" },
-                    { "global_scale_role", capture.value("a_global_scale_role", "") },
-                } },
-                { "b", {
-                    { "tensor_role", "src1_nvfp4" },
-                    { "global_scale_role", "src1_global_scale" },
-                } },
-            };
+            if (captures_final_scale) {
+                capture["effective_srcs"] = {
+                    { "a", { { "tensor_role", "src0" } } },
+                    { "b", { { "tensor_role", "src1_nvfp4" } } },
+                    { "matmul_scale_role", "matmul_scale" },
+                };
+            } else {
+                capture["effective_srcs"] = {
+                    { "a", {
+                        { "tensor_role", "src0" },
+                        { "global_scale_role", capture.value("a_global_scale_role", "") },
+                    } },
+                    { "b", {
+                        { "tensor_role", "src1_nvfp4" },
+                        { "global_scale_role", "src1_global_scale" },
+                    } },
+                };
+            }
         }
         manifest["captures"].push_back(std::move(capture));
     }
@@ -1212,11 +1229,11 @@ bool tensor_export_maybe_bind_nvfp4_mul_mat_capture(
 
     ggml_tensor * rhs_nvfp4 = ggml_new_tensor(
             ctx, GGML_TYPE_NVFP4, GGML_MAX_DIMS, tensor->src[1]->ne);
-    ggml_tensor * rhs_global_scale = nullptr;
+    ggml_tensor * rhs_scale_capture = nullptr;
     if (ggml_mul_mat_get_nvfp4_input_scale(tensor) != nullptr) {
-        rhs_global_scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+        rhs_scale_capture = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
     } else {
-        rhs_global_scale = ggml_new_tensor_3d(
+        rhs_scale_capture = ggml_new_tensor_3d(
                 ctx, GGML_TYPE_F32,
                 tensor->src[1]->ne[1],
                 tensor->src[1]->ne[2],
@@ -1224,10 +1241,10 @@ bool tensor_export_maybe_bind_nvfp4_mul_mat_capture(
     }
 
     ggml_format_name(rhs_nvfp4, "%s.src1_nvfp4", ggml_get_name(tensor));
-    ggml_format_name(rhs_global_scale, "%s.src1_global_scale", ggml_get_name(tensor));
+    ggml_format_name(rhs_scale_capture, "%s.src1_scale_capture", ggml_get_name(tensor));
     ggml_set_output(rhs_nvfp4);
-    ggml_set_output(rhs_global_scale);
-    ggml_mul_mat_set_nvfp4_rhs_capture(tensor, rhs_nvfp4, rhs_global_scale);
+    ggml_set_output(rhs_scale_capture);
+    ggml_mul_mat_set_nvfp4_rhs_capture(tensor, rhs_nvfp4, rhs_scale_capture);
     return true;
 }
 

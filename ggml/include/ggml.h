@@ -1363,10 +1363,13 @@ extern "C" {
         GGML_NVFP4_MUL_MAT_CAPTURE_PER_TENSOR = 1u << 3,
         GGML_NVFP4_MUL_MAT_CAPTURE_FP4MULMAT  = 1u << 4,
         GGML_NVFP4_MUL_MAT_CAPTURE_CUBLASLT   = 1u << 5,
+        GGML_NVFP4_MUL_MAT_CAPTURE_FINAL_SCALE = 1u << 6,
     };
 
     // bind optional graph-owned tensors used to capture the effective NVFP4 RHS
-    // and the corresponding canonical global scale(s) of a MUL_MAT node
+    // and its associated scale(s). The scale capture contains canonical RHS global
+    // scales for cuBLASLt, or the rounded final output scale for FP4MULMAT when
+    // GGML_NVFP4_MUL_MAT_CAPTURE_FINAL_SCALE is set.
     GGML_API void ggml_mul_mat_set_nvfp4_rhs_capture(
             struct ggml_tensor * mul_mat,
             struct ggml_tensor * rhs_nvfp4,

@@ -70,6 +70,7 @@ class TensorData:
     record: dict
     raw: bytes
     scale: "TensorData | None" = None
+    implicit_unit_global_scale: bool = False
 
     @property
     def dtype(self) -> str:
@@ -95,6 +96,8 @@ class TensorData:
 
     def row_scale(self, i1: int, i2: int, i3: int) -> float:
         if self.scale is None:
+            if self.implicit_unit_global_scale:
+                return 1.0
             raise ValueError(f"NVFP4 tensor has no global-scale record: {self.path}")
         sne = self.scale.ne
         if math.prod(sne) == 1:
@@ -139,6 +142,12 @@ def parse_args() -> argparse.Namespace:
         help="auto reads GGML_CUDA_TRUNC_ENABLE from the export command",
     )
     parser.add_argument("--max-mismatches", type=int, default=10)
+    parser.add_argument(
+        "--max-scale-values",
+        type=int,
+        default=16,
+        help="maximum number of values printed for each scale tensor",
+    )
     return parser.parse_args()
 
 
@@ -175,26 +184,136 @@ def records_for_node(document: dict, node_index: int) -> tuple[dict[str, dict], 
     return role_records, capture
 
 
-def load_tensor(manifest_path: Path, record: dict, scale_record: dict | None = None) -> TensorData:
+def load_tensor(
+    manifest_path: Path,
+    record: dict,
+    scale_record: dict | None = None,
+    *,
+    implicit_unit_global_scale: bool = False,
+) -> TensorData:
     path = (manifest_path.parent / record["path"]).resolve()
     raw = path.read_bytes()
     expected_size = int(record["byte_size"])
     if len(raw) != expected_size:
         raise ValueError(f"byte-size mismatch for {path}: file={len(raw)} manifest={expected_size}")
     scale = load_tensor(manifest_path, scale_record) if scale_record is not None else None
-    return TensorData(path=path, record=record, raw=raw, scale=scale)
+    return TensorData(
+        path=path,
+        record=record,
+        raw=raw,
+        scale=scale,
+        implicit_unit_global_scale=implicit_unit_global_scale,
+    )
+
+
+def scale_value_for_rhs_row(
+    scale: TensorData,
+    src1: TensorData,
+    i1: int,
+    i2: int,
+    i3: int,
+) -> float:
+    sne = scale.ne
+    if math.prod(sne) == 1:
+        return scale.scalar(0, 0, 0, 0)
+    if sne[0] == src1.ne[1] and sne[1] == src1.ne[2] and sne[2] == src1.ne[3]:
+        return scale.scalar(i1, i2, i3, 0)
+    if sne[0] == src1.ne[1] and sne[1:] == (1, 1, 1):
+        return scale.scalar(i1, 0, 0, 0)
+    raise ValueError(f"unsupported final scale shape {sne} for RHS shape {src1.ne}")
+
+
+def tensor_scalar_values(tensor: TensorData) -> list[float]:
+    return [
+        tensor.scalar(i0, i1, i2, i3)
+        for i3 in range(tensor.ne[3])
+        for i2 in range(tensor.ne[2])
+        for i1 in range(tensor.ne[1])
+        for i0 in range(tensor.ne[0])
+    ]
+
+
+def bf16_storage_summary(tensor: TensorData) -> tuple[str, int, int, list[str]]:
+    count = math.prod(tensor.ne)
+    if tensor.dtype == "bf16":
+        return "yes (native BF16 storage)", count, count, []
+    if tensor.dtype != "f32":
+        return f"not applicable for dtype={tensor.dtype}", 0, count, []
+
+    values = tensor_scalar_values(tensor)
+    matching = 0
+    failures: list[str] = []
+    for index, value in enumerate(values):
+        bits = f32_bits(value)
+        if bits & 0xFFFF == 0:
+            matching += 1
+        elif len(failures) < 4:
+            failures.append(f"index={index} value={value:.9g} bits=0x{bits:08x}")
+    status = "yes" if matching == count else "no"
+    return status, matching, count, failures
+
+
+def print_scale_details(label: str, tensor: TensorData, max_values: int) -> None:
+    values = tensor_scalar_values(tensor)
+    shown = values[:max_values]
+    suffix = "" if len(shown) == len(values) else f" ... ({len(values) - len(shown)} more)"
+    encoding = tensor.record.get("scale_encoding", "unspecified")
+    semantics = tensor.record.get("scale_semantics", "unspecified")
+    role = tensor.record.get("role", "unknown")
+    bf16_status, bf16_matching, bf16_count, bf16_failures = bf16_storage_summary(tensor)
+
+    print(f"  {label}:")
+    print(f"    role: {role}")
+    print(f"    file: {tensor.path}")
+    print(f"    dtype: {tensor.dtype}")
+    print(f"    shape: {tensor.ne}")
+    print(f"    scale encoding: {encoding}")
+    print(f"    scale semantics: {semantics}")
+    print(f"    values: {shown}{suffix}")
+    if tensor.dtype == "f32":
+        shown_bits = [f"0x{f32_bits(value):08x}" for value in shown]
+        print(f"    F32 bits: {shown_bits}{suffix}")
+    if values:
+        print(f"    value range: min={min(values):.9g} max={max(values):.9g}")
+    print(
+        "    BF16 value check: "
+        f"{bf16_status} (F32 low 16 bits zero: {bf16_matching}/{bf16_count})"
+    )
+    for failure in bf16_failures:
+        print(f"      non-BF16 value: {failure}")
 
 
 def resolve_inputs(
-        manifest_path: Path,
-        role_records: dict[str, dict],
-        capture: dict | None) -> tuple[TensorData, TensorData, str]:
+    manifest_path: Path,
+    role_records: dict[str, dict],
+    capture: dict | None,
+) -> tuple[TensorData, TensorData, TensorData | None, str]:
     if capture and capture.get("status") == "native_nvfp4_valid":
         effective = capture.get("effective_srcs", {})
         a_desc = effective.get("a", {})
         b_desc = effective.get("b", {})
         a_role = a_desc.get("tensor_role")
         b_role = b_desc.get("tensor_role")
+        final_scale_role = effective.get("matmul_scale_role")
+        if final_scale_role:
+            required = [a_role, b_role, final_scale_role]
+            if any(not role or role not in role_records for role in required):
+                raise ValueError("FP4MULMAT capture is missing an effective input or final scale record")
+            return (
+                load_tensor(
+                    manifest_path,
+                    role_records[a_role],
+                    implicit_unit_global_scale=True,
+                ),
+                load_tensor(
+                    manifest_path,
+                    role_records[b_role],
+                    implicit_unit_global_scale=True,
+                ),
+                load_tensor(manifest_path, role_records[final_scale_role]),
+                "native_nvfp4_fp4mulmat_final_scale",
+            )
+
         a_scale_role = a_desc.get("global_scale_role")
         b_scale_role = b_desc.get("global_scale_role")
         required = [a_role, b_role, a_scale_role, b_scale_role]
@@ -203,6 +322,7 @@ def resolve_inputs(
         return (
             load_tensor(manifest_path, role_records[a_role], role_records[a_scale_role]),
             load_tensor(manifest_path, role_records[b_role], role_records[b_scale_role]),
+            None,
             "native_nvfp4_effective_inputs",
         )
 
@@ -215,6 +335,7 @@ def resolve_inputs(
     return (
         load_tensor(manifest_path, src0_record, src0_scale),
         load_tensor(manifest_path, src1_record, src1_scale),
+        None,
         "manifest_src0_src1",
     )
 
@@ -244,15 +365,15 @@ def detect_result_rounding(manifest_path: Path, requested: str) -> str:
 
 def run() -> int:
     args = parse_args()
-    if args.atol < 0 or args.rtol < 0 or args.max_mismatches < 0:
-        raise ValueError("tolerances and --max-mismatches must be non-negative")
+    if args.atol < 0 or args.rtol < 0 or args.max_mismatches < 0 or args.max_scale_values < 0:
+        raise ValueError("tolerances and output limits must be non-negative")
 
     result_path = args.result.resolve()
     manifest_path, document = load_document(result_path, args.manifest)
     result_record = find_result_record(result_path, manifest_path, document)
     node_index = int(result_record["node_index"])
     role_records, capture = records_for_node(document, node_index)
-    src0, src1, input_mode = resolve_inputs(manifest_path, role_records, capture)
+    src0, src1, final_scale, input_mode = resolve_inputs(manifest_path, role_records, capture)
     result = load_tensor(manifest_path, result_record)
     validate_shapes(src0, src1, result)
     result_rounding = detect_result_rounding(manifest_path, args.result_rounding)
@@ -276,6 +397,9 @@ def run() -> int:
                 a_row = src0.row(i0, a2, a3)
                 for i1, b_row in enumerate(b_rows):
                     expected = f32(math.fsum(a * b for a, b in zip(a_row, b_row)))
+                    if final_scale is not None:
+                        scale = scale_value_for_rhs_row(final_scale, src1, i1, i2, i3)
+                        expected = f32(expected * scale)
                     if result_rounding == "bf16_rne":
                         expected = round_f32_to_bf16_rne(expected)
                     actual = result.scalar(i0, i1, i2, i3)
@@ -305,8 +429,23 @@ def run() -> int:
     print(f"  result rounding: {result_rounding}")
     print(f"  src0: {src0.path} dtype={src0.dtype} shape={src0.ne}")
     print(f"  src1: {src1.path} dtype={src1.dtype} shape={src1.ne}")
+    scale_tensors: list[tuple[str, TensorData]] = []
+    if final_scale is not None:
+        scale_tensors.append(("final matmul scale", final_scale))
+    else:
+        if src0.scale is not None:
+            scale_tensors.append(("src0 global scale", src0.scale))
+        if src1.scale is not None:
+            scale_tensors.append(("src1 global scale", src1.scale))
+    if scale_tensors:
+        print("  scales used:")
+        for label, tensor in scale_tensors:
+            print_scale_details(label, tensor, args.max_scale_values)
+    else:
+        print("  scales used: none")
     print(f"  result shape: {result.ne}")
-    print("  formula: dst = src0^T * src1")
+    formula = "dst = (src0^T * src1) * matmul_scale" if final_scale is not None else "dst = src0^T * src1"
+    print(f"  formula: {formula}")
     print(f"  MAE: {mae:.9g}")
     print(f"  RMSE: {rmse:.9g}")
     print(f"  max abs error: {max_abs:.9g}")

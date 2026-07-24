@@ -220,15 +220,18 @@ Without a layer, a base name such as `kq` matches `kq-<layer>` tensors, while an
 explicit name such as `kq-0` remains an exact match.
 
 For a selected `NVFP4 x F32 -> F32` `MUL_MAT`, graph construction allocates
-graph-owned output sidecars for the effective NVFP4 RHS and its canonical
-global scale. The native CUDA path writes directly into these sidecars. The v2
-manifest exports the original NVFP4 A tensor, A's raw inverse-global scale and
-canonical global scale, the original F32 B tensor, the effective NVFP4 B
-tensor, and B's canonical global scale. If the native path is not used, the
-manifest records `native_nvfp4_not_used` and does not claim an effective B
-source. The capture sidecars are created only for the selected name/type/layer,
-so a precise name such as `kq-0` avoids retaining every MUL_MAT input in a
-layer.
+graph-owned output sidecars for the effective NVFP4 RHS and its associated
+scale. The native CUDA path writes directly into these sidecars. For the
+cuBLASLt variant, the v2 manifest exports the original NVFP4 A tensor, A's raw
+inverse-global scale and canonical global scale, the original F32 B tensor, the
+effective NVFP4 B tensor, and B's canonical global scale. For the FP4MULMAT
+variant, it instead exports only one scale record named `matmul_scale`: the
+BF16-RNE-rounded final multiplier actually applied to the accumulator output.
+The separate A and B global-scale records are omitted in that variant. If the
+native path is not used, the manifest records `native_nvfp4_not_used` and does
+not claim an effective B source. The capture sidecars are created only for the
+selected name/type/layer, so a precise name such as `kq-0` avoids retaining
+every MUL_MAT input in a layer.
 
 ### `LLAMA_EXPT_TENSOR_EXPORT_TYPE`
 
@@ -326,6 +329,13 @@ activations through the current NVFP4 activation quantizer, then evaluates the
 NVFP4 block dot product with the experimental FP4 accumulator model instead of
 cuBLASLt. This is intended for hardware-model comparison and correctness
 experiments, not performance measurement.
+
+The final output multiplier is rounded to BF16 with round-to-nearest-even before
+it is applied. For static input scales this multiplier is
+`weight_scale_2 / global_scale`; for dynamic input scales it is computed per RHS
+row. NVFP4 tensor export captures this rounded final multiplier as the single
+exported scale for the FP4MULMAT variant, rather than exporting the separate
+weight/input global-scale components.
 
 The path logs once when selected. Combine with
 `GGML_CUDA_NVFP4_FP4MULMAT_LOG=1` to log the first several selections during a

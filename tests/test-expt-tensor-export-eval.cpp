@@ -1,5 +1,7 @@
 #include "../src/expt/tensor-export-eval.h"
 
+#include <ggml-cpu.h>
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -228,7 +230,7 @@ static bool test_tensor_name_priority_binds_nvfp4_capture() {
         expect(rhs_capture->ne[0] == 16 && rhs_capture->ne[1] == 2,
                 "RHS capture shape mismatch") &&
         expect(scale_capture != nullptr && scale_capture->type == GGML_TYPE_F32,
-                "expected RHS global-scale capture tensor") &&
+                "expected RHS scale capture tensor") &&
         expect(scale_capture->ne[0] == 2 && ggml_nelements(scale_capture) == 2,
                 "dynamic RHS scale capture shape mismatch") &&
         expect((rhs_capture->flags & GGML_TENSOR_FLAG_OUTPUT) != 0 &&
@@ -240,6 +242,111 @@ static bool test_tensor_name_priority_binds_nvfp4_capture() {
         expect(!other_bound && ggml_mul_mat_get_nvfp4_rhs_capture(other) == nullptr,
                 "layer-qualified tensor name should not bind kq-1");
 
+    ggml_free(ctx);
+    for (size_t i = 0; i < old_values.size(); ++i) {
+        if (old_present[i]) {
+            setenv(env_names[i], old_values[i].c_str(), 1);
+        } else {
+            unsetenv(env_names[i]);
+        }
+    }
+    return ok;
+}
+
+static bool test_fp4mulmat_export_writes_only_final_scale() {
+    const char * env_names[] = {
+        "LLAMA_EXPT_TENSOR_EXPORT_DIR",
+        "LLAMA_EXPT_TENSOR_EXPORT_NAME",
+        "LLAMA_EXPT_TENSOR_EXPORT_OP",
+        "LLAMA_EXPT_TENSOR_EXPORT_TYPE",
+        "LLAMA_EXPT_TENSOR_EXPORT_LAYER",
+    };
+    std::vector<std::string> old_values;
+    std::vector<bool> old_present;
+    for (const char * env_name : env_names) {
+        const char * value = std::getenv(env_name);
+        old_present.push_back(value != nullptr);
+        old_values.emplace_back(value ? value : "");
+    }
+
+    const std::string dir = temp_dir() + "-fp4mulmat-final-scale";
+    std::filesystem::remove_all(dir);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", dir.c_str(), 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_NAME", "fp4mulmat-export-0", 1);
+    unsetenv("LLAMA_EXPT_TENSOR_EXPORT_OP");
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_TYPE", "decode", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_LAYER", "0", 1);
+
+    ggml_init_params params = {};
+    params.mem_size = 2 * 1024 * 1024;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!expect(ctx != nullptr, "expected ggml context for FP4MULMAT export test")) {
+        return false;
+    }
+
+    ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_NVFP4, 16, 16);
+    ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 16, 2);
+    ggml_tensor * dst = ggml_mul_mat(ctx, a, b);
+    ggml_set_name(dst, "fp4mulmat-export-0");
+    ggml_tensor * rhs_capture = ggml_new_tensor_2d(ctx, GGML_TYPE_NVFP4, 16, 2);
+    ggml_tensor * final_scale_capture = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2);
+    ggml_set_output(rhs_capture);
+    ggml_set_output(final_scale_capture);
+    ggml_mul_mat_set_nvfp4_rhs_capture(dst, rhs_capture, final_scale_capture);
+    ggml_mul_mat_set_nvfp4_capture_flags(
+            dst,
+            GGML_NVFP4_MUL_MAT_CAPTURE_REQUESTED |
+            GGML_NVFP4_MUL_MAT_CAPTURE_VALID |
+            GGML_NVFP4_MUL_MAT_CAPTURE_DYNAMIC |
+            GGML_NVFP4_MUL_MAT_CAPTURE_FP4MULMAT |
+            GGML_NVFP4_MUL_MAT_CAPTURE_FINAL_SCALE);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, dst);
+
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_sched_t sched = ggml_backend_sched_new(&backend, nullptr, 1, 16, false, true);
+    bool ok = expect(backend != nullptr && sched != nullptr, "expected CPU scheduler for FP4MULMAT export test") &&
+            expect(ggml_backend_sched_alloc_graph(sched, gf), "expected graph allocation for FP4MULMAT export test");
+
+    if (ok) {
+        std::vector<uint8_t> a_data(ggml_nbytes(a), 0);
+        std::vector<float> b_data((size_t) ggml_nelements(b), 0.0f);
+        std::vector<float> dst_data((size_t) ggml_nelements(dst), 0.0f);
+        std::vector<uint8_t> rhs_data(ggml_nbytes(rhs_capture), 0);
+        const std::vector<float> final_scales = { 0.125f, 0.25f };
+        ggml_backend_tensor_set(a, a_data.data(), 0, a_data.size());
+        ggml_backend_tensor_set(b, b_data.data(), 0, b_data.size() * sizeof(float));
+        ggml_backend_tensor_set(dst, dst_data.data(), 0, dst_data.size() * sizeof(float));
+        ggml_backend_tensor_set(rhs_capture, rhs_data.data(), 0, rhs_data.size());
+        ggml_backend_tensor_set(final_scale_capture, final_scales.data(), 0, final_scales.size() * sizeof(float));
+
+        ok = expect(llama_expt::tensor_export_graph(sched, gf, false),
+                    "expected FP4MULMAT graph export") && ok;
+    }
+
+    if (ok) {
+        std::ifstream in(dir + "/manifest.json", std::ios::binary);
+        const std::string manifest((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        ok = expect(manifest.find("\"role\": \"matmul_scale\"") != std::string::npos,
+                    "FP4MULMAT export must contain matmul_scale") &&
+             expect(manifest.find("\"scale_semantics\": \"final_output_multiplier\"") != std::string::npos,
+                    "FP4MULMAT export must describe final scale semantics") &&
+             expect(manifest.find("\"role\": \"src0_scale_raw\"") == std::string::npos,
+                    "FP4MULMAT export must omit raw src0 scale") &&
+             expect(manifest.find("\"role\": \"src0_global_scale\"") == std::string::npos,
+                    "FP4MULMAT export must omit derived src0 global scale") &&
+             expect(manifest.find("\"role\": \"src1_global_scale\"") == std::string::npos,
+                    "FP4MULMAT export must omit RHS global scale") && ok;
+    }
+
+    if (sched) {
+        ggml_backend_sched_free(sched);
+    }
+    if (backend) {
+        ggml_backend_free(backend);
+    }
     ggml_free(ctx);
     for (size_t i = 0; i < old_values.size(); ++i) {
         if (old_present[i]) {
@@ -476,6 +583,9 @@ int main() {
         return 1;
     }
     if (!test_tensor_name_priority_binds_nvfp4_capture()) {
+        return 1;
+    }
+    if (!test_fp4mulmat_export_writes_only_final_scale()) {
         return 1;
     }
     if (!test_manifest_eval_and_rejection()) {

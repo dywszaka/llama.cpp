@@ -73,17 +73,24 @@ static bool ggml_cuda_fetch_input_scale_f32(const ggml_tensor * scale, float & o
     }
 }
 
-static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_bf16_trunc_f32(float x) {
+static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_bf16_round_f32(float x) {
     union {
         float f;
         uint32_t u;
     } v;
     v.f = x;
+
+    if ((v.u & 0x7FFFFFFFu) > 0x7F800000u) {
+        v.u = (v.u & 0xFFFF0000u) | 0x00400000u;
+        return v.f;
+    }
+
+    v.u += 0x7FFFu + ((v.u >> 16) & 1u);
     v.u &= 0xFFFF0000u;
     return v.f;
 }
 
-static __global__ void ggml_cuda_nvfp4_bf16_trunc_scales_kernel(
+static __global__ void ggml_cuda_nvfp4_bf16_round_scales_kernel(
         float * __restrict__ scales,
         const int64_t nrows) {
     const int64_t row = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
@@ -91,7 +98,7 @@ static __global__ void ggml_cuda_nvfp4_bf16_trunc_scales_kernel(
         return;
     }
 
-    scales[row] = ggml_cuda_nvfp4_bf16_trunc_f32(scales[row]);
+    scales[row] = ggml_cuda_nvfp4_bf16_round_f32(scales[row]);
 }
 
 static __global__ void ggml_cuda_nvfp4_set_scalar_kernel(float * dst, float value) {
@@ -1188,7 +1195,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         ggml_cuda_nvfp4_prepare_dynamic_input_scales(
                 dynamic_amax_rows.get(),
                 dynamic_input_scales.get(),
-                capture_active ? (float *) rhs_scale_capture->data : nullptr,
+                capture_active && !use_fp4mulmat ? (float *) rhs_scale_capture->data : nullptr,
                 ne11,
                 out_scale,
                 use_outlier_q_tensor_scale,
@@ -1197,13 +1204,21 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         if (use_fp4mulmat) {
             const int block_size = 256;
             const int grid_size = (int) ((ne11 + block_size - 1) / block_size);
-            ggml_cuda_nvfp4_bf16_trunc_scales_kernel<<<grid_size, block_size, 0, stream>>>(
+            ggml_cuda_nvfp4_bf16_round_scales_kernel<<<grid_size, block_size, 0, stream>>>(
                     dynamic_input_scales.get(), ne11);
             CUDA_CHECK(cudaGetLastError());
+            if (capture_active) {
+                CUDA_CHECK(cudaMemcpyAsync(
+                        rhs_scale_capture->data,
+                        dynamic_input_scales.get(),
+                        (size_t) ne11 * sizeof(float),
+                        cudaMemcpyDeviceToDevice,
+                        stream));
+            }
         }
 
         if (use_bf16_trunc_nn) {
-            if (capture_active) {
+            if (capture_active && !use_fp4mulmat) {
                 ggml_cuda_nvfp4_quantize_rows_bf16_f32(
                         (const float *) src1->data, src1_q_nvfp4,
                         ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
@@ -1217,7 +1232,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                         use_bf16_internal_arith, use_bf16_block_scale, stream);
             }
         } else {
-            if (capture_active) {
+            if (capture_active && !use_fp4mulmat) {
                 ggml_cuda_nvfp4_quantize_rows_scales_f32(
                         (const float *) src1->data, src1_q_nvfp4,
                         ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
@@ -1231,7 +1246,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             }
         }
     } else {
-        if (capture_active) {
+        if (capture_active && !use_fp4mulmat) {
             ggml_cuda_nvfp4_set_scalar_kernel<<<1, 1, 0, stream>>>(
                     (float *) rhs_scale_capture->data, global_scale);
             CUDA_CHECK(cudaGetLastError());
@@ -1285,7 +1300,13 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                     (long long) ne10,
                     used_dynamic_scale ? 1 : 0);
         }
-        const float static_scale = used_dynamic_scale ? 1.0f : ggml_cuda_nvfp4_bf16_trunc_f32((global_scale != 0.0f) ? (out_scale / global_scale) : out_scale);
+        const float static_scale = used_dynamic_scale ? 1.0f : ggml_cuda_nvfp4_bf16_round_f32(
+                (global_scale != 0.0f) ? (out_scale / global_scale) : out_scale);
+        if (capture_active && !used_dynamic_scale) {
+            ggml_cuda_nvfp4_set_scalar_kernel<<<1, 1, 0, stream>>>(
+                    (float *) rhs_scale_capture->data, static_scale);
+            CUDA_CHECK(cudaGetLastError());
+        }
         ggml_cuda_nvfp4_fp4mulmat_cuda(
                 (const block_nvfp4 *) src0->data,
                 src1_q_nvfp4,
@@ -1303,7 +1324,9 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             ggml_cuda_nvfp4_apply_kcache_outlier_correction(src0, src1, dst, stream);
         }
         if (capture_result_flags != nullptr) {
-            *capture_result_flags = make_capture_result_flags(GGML_NVFP4_MUL_MAT_CAPTURE_FP4MULMAT);
+            *capture_result_flags = make_capture_result_flags(
+                    GGML_NVFP4_MUL_MAT_CAPTURE_FP4MULMAT |
+                    GGML_NVFP4_MUL_MAT_CAPTURE_FINAL_SCALE);
         }
         return true;
     }

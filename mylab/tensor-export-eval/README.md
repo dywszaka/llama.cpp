@@ -44,3 +44,8 @@ manifest:
 The MUL_MAT validator supports strided F16/F32/BF16 inputs and native NVFP4
 effective inputs. It follows ggml's `dst = src0^T * src1` batch-broadcast
 semantics and recognizes the BF16 result rounding enabled by `export.sh`.
+For native NVFP4 captures, the report lists every scale file actually used by
+the reconstruction. FP4MULMAT exports report the single `matmul_scale` file,
+its manifest encoding and semantics, scalar values/range, and whether every
+F32 value has zero low 16 bits (that is, it is an expanded BF16 value). Use
+`--max-scale-values` to control how many scale values are printed.
