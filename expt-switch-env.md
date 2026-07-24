@@ -1,5 +1,40 @@
 # Experiment Switch Environment Variables
 
+## CUDA MUL QEMU Offload
+
+### `GGML_CUDA_MUL_QEMU_MODE`
+
+Selects `cuda|qemu|qemu_cuda|compare` for `GGML_OP_MUL`. The build option is
+`-DGGML_CUDA_MUL_QEMU=ON`; unset defaults to `cuda`. CUDA preprocessing expands
+the complete ggml four-dimensional broadcast mapping and converts both F16/F32
+operands to dense BF16 with RZ/high-16-bit truncation. `qemu_cuda` is
+device-only. `compare` executes the original CUDA result plus both BF16 models
+and keeps the original result downstream. Non-CUDA modes disable graph capture
+and RMS_NORM/MUL fusion.
+
+### `GGML_CUDA_MUL_QEMU_ENDPOINT`
+
+Daemon endpoint, default `tcp://127.0.0.1:15582`.
+
+### `GGML_CUDA_MUL_QEMU_TIMEOUT_MS`
+
+ZMQ timeout in milliseconds, default `300000`.
+
+### `GGML_CUDA_MUL_QEMU_ARTIFACT`
+
+Compare JSONL path, default `experiments/mul-qemu-compare.jsonl`. It records
+llama-vs-QEMU MSE/RMSE/max error and QEMU-vs-qemu_cuda BF16 mismatch details.
+
+### `GGML_CUDA_MUL_QEMU_MISMATCH_LOG`
+
+Mismatch-only JSONL path, default `experiments/mul-qemu-cuda-mismatch.jsonl`.
+Records both complete canonical inputs and both complete BF16 outputs.
+
+### `GGML_CUDA_MUL_QEMU_TIMING`
+
+Enables diagnostic `MUL_QEMU_TIMING` per-call total timing. It synchronizes the
+calling stream and therefore changes performance behavior.
+
 ## CUDA SOFT_MAX QEMU Offload
 
 ### `GGML_CUDA_SOFT_MAX_QEMU_MODE`

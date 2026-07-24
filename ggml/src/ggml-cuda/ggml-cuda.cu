@@ -24,6 +24,7 @@
 #include "ggml-cuda/fattn.cuh"
 #include "ggml-cuda/expt/fp8/fp8-e8m0-matmul.cuh"
 #include "ggml-cuda/expt/rms-norm-qemu.cuh"
+#include "ggml-cuda/expt/mul-qemu.cuh"
 #include "ggml-cuda/expt/softmax-qemu.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
@@ -2921,6 +2922,13 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
 #endif
         }
 
+        if (node->op == GGML_OP_MUL && ggml_cuda_mul_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for MUL QEMU experiment\n", __func__);
+#endif
+        }
+
         if (node->op == GGML_OP_SOFT_MAX && ggml_cuda_soft_max_qemu_enabled()) {
             use_cuda_graph = false;
 #ifndef NDEBUG
@@ -3096,7 +3104,7 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, 
     }
 
     if (ops.size() == 2 && ops.begin()[0] == GGML_OP_RMS_NORM && ops.begin()[1] == GGML_OP_MUL) {
-        if (ggml_cuda_rms_norm_qemu_enabled()) {
+        if (ggml_cuda_rms_norm_qemu_enabled() || ggml_cuda_mul_qemu_enabled()) {
             return false;
         }
         const ggml_tensor *rms_norm = cgraph->nodes[node_idx];
