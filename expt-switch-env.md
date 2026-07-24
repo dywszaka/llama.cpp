@@ -171,8 +171,11 @@ V, KQ, or KQV records. It creates the directory when needed, writes one
 contiguous raw `.bin` file per tensor, and writes `manifest.json` containing
 `name`, `kind`, `dtype`, `ne`, `nb`, `path`, and `byte_size`. Unsupported dtypes
 are skipped with a warning so normal inference does not fail solely because
-export is enabled. The export hook is narrow and does not change inference math;
-when this switch is unset or empty, no tensors are written.
+export is enabled. Before graph allocation, matching tensors are marked as graph
+outputs so their backend storage remains valid until the post-compute export and
+cannot be reused by later nodes. The export hook is narrow and does not change
+inference math; when this switch is unset or empty, no tensors are retained or
+written.
 
 ### `LLAMA_EXPT_TENSOR_EXPORT_KINDS`
 
@@ -192,7 +195,15 @@ optional `GGML_OP_` prefix. For the first graph selected by
 `LLAMA_EXPT_TENSOR_EXPORT_TYPE`, it writes each matching node's `dst`,
 `dst->src[0]`, and `dst->src[1]` as raw binary spans and records their role,
 dtype, shape, strides, contiguity, and view offset in `manifest.json`. This mode
-does not use `LLAMA_EXPT_TENSOR_EXPORT_KINDS`. If
+marks the matching `dst`, `src0`, and `src1` storage as graph outputs before
+allocation. During the selected execution, the scheduler also stops immediately
+after each matching node, synchronizes its backend, and copies `dst`, `src0`,
+and `src1` into host snapshots before later nodes can overwrite aliased storage.
+The v2 manifest records `snapshot_timing: node_completion`. Existing user eval
+callbacks are chained through the export observer. Retention is applied when the
+graph is built even if a compatible prefill graph is later reused for the
+selected decode execution. This mode does not use
+`LLAMA_EXPT_TENSOR_EXPORT_KINDS`. If
 `LLAMA_EXPT_TENSOR_EXPORT_NAME` is also set, tensor-name selection takes
 priority and this op value is recorded but ignored for node selection.
 

@@ -68,13 +68,27 @@ struct k_channel_sort_eval_report {
     float global_scale = 1.0f;
 };
 
+struct tensor_export_observer;
+
 bool tensor_export_enabled();
 bool tensor_export_maybe_log_config();
+bool tensor_export_maybe_retain_graph(ggml_cgraph * gf);
+tensor_export_observer * tensor_export_observer_create(
+        ggml_cgraph * gf,
+        bool is_prefill,
+        ggml_backend_sched_eval_callback user_callback,
+        void * user_data);
+bool tensor_export_observer_callback(ggml_tensor * tensor, bool ask, void * user_data);
+void tensor_export_observer_free(tensor_export_observer * observer);
 bool tensor_export_maybe_bind_nvfp4_mul_mat_capture(
         ggml_context * ctx,
         ggml_tensor * tensor,
         bool is_prefill);
-bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf, bool is_prefill);
+bool tensor_export_graph(
+        ggml_backend_sched_t sched,
+        ggml_cgraph * gf,
+        bool is_prefill,
+        const tensor_export_observer * observer = nullptr);
 
 tensor_error_metrics compute_error_metrics(const std::vector<float> & reference, const std::vector<float> & actual);
 std::vector<size_t> make_k_channel_order_from_first_row(const std::vector<float> & values, size_t row_size);

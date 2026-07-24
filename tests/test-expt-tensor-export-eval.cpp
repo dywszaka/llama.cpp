@@ -25,6 +25,22 @@ static bool expect_close(double actual, double expected, double tol, const char 
     return true;
 }
 
+struct eval_callback_probe {
+    ggml_tensor * selected = nullptr;
+    int asks = 0;
+    int observations = 0;
+};
+
+static bool eval_callback_for_probe(ggml_tensor * tensor, bool ask, void * user_data) {
+    eval_callback_probe * probe = static_cast<eval_callback_probe *>(user_data);
+    if (ask) {
+        ++probe->asks;
+        return tensor == probe->selected;
+    }
+    ++probe->observations;
+    return true;
+}
+
 static std::string temp_dir() {
     const char * base = std::getenv("TMPDIR");
     if (!base) {
@@ -74,6 +90,92 @@ static bool test_export_dir_switch_enables_export() {
     }
 
     return expect(enabled, "expected LLAMA_EXPT_TENSOR_EXPORT_DIR to enable export");
+}
+
+static bool test_op_export_retains_selected_node_storage() {
+    const char * env_names[] = {
+        "LLAMA_EXPT_TENSOR_EXPORT_DIR",
+        "LLAMA_EXPT_TENSOR_EXPORT_KINDS",
+        "LLAMA_EXPT_TENSOR_EXPORT_NAME",
+        "LLAMA_EXPT_TENSOR_EXPORT_OP",
+        "LLAMA_EXPT_TENSOR_EXPORT_TYPE",
+        "LLAMA_EXPT_TENSOR_EXPORT_LAYER",
+    };
+    std::vector<std::string> old_values;
+    std::vector<bool> old_present;
+    for (const char * env_name : env_names) {
+        const char * value = std::getenv(env_name);
+        old_present.push_back(value != nullptr);
+        old_values.emplace_back(value ? value : "");
+    }
+
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", "/tmp/llama-expt-export-retain-test", 1);
+    unsetenv("LLAMA_EXPT_TENSOR_EXPORT_KINDS");
+    unsetenv("LLAMA_EXPT_TENSOR_EXPORT_NAME");
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_OP", "RMS_NORM", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_TYPE", "decode", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_LAYER", "0", 1);
+
+    ggml_init_params params = {};
+    params.mem_size = 1024 * 1024;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!expect(ctx != nullptr, "expected ggml context for graph retention test")) {
+        return false;
+    }
+
+    ggml_tensor * input0 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 16);
+    ggml_tensor * input1 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 16);
+    ggml_set_name(input0, "inp_embd-0");
+    ggml_set_name(input1, "inp_embd-1");
+    ggml_tensor * norm0 = ggml_rms_norm(ctx, input0, 1.0e-6f);
+    ggml_tensor * norm1 = ggml_rms_norm(ctx, input1, 1.0e-6f);
+    ggml_set_name(norm0, "norm-0");
+    ggml_set_name(norm1, "norm-1");
+    ggml_tensor * output = ggml_add(ctx, norm0, norm1);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 32, false);
+    ggml_build_forward_expand(gf, output);
+    const bool retained = llama_expt::tensor_export_maybe_retain_graph(gf);
+
+    eval_callback_probe probe;
+    probe.selected = norm1;
+    llama_expt::tensor_export_observer * observer =
+        llama_expt::tensor_export_observer_create(gf, false, eval_callback_for_probe, &probe);
+    llama_expt::tensor_export_observer * prefill_observer =
+        llama_expt::tensor_export_observer_create(gf, true, nullptr, nullptr);
+
+    const bool ok = expect(retained, "expected selected RMS_NORM storage retention") &&
+        expect((norm0->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                "selected RMS_NORM dst must be retained as a graph output") &&
+        expect((input0->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                "selected RMS_NORM src0 must be retained as a graph output") &&
+        expect((norm1->flags & GGML_TENSOR_FLAG_OUTPUT) == 0,
+                "unselected RMS_NORM dst must remain reusable") &&
+        expect((input1->flags & GGML_TENSOR_FLAG_OUTPUT) == 0,
+                "unselected RMS_NORM src0 must remain reusable") &&
+        expect(observer != nullptr, "expected decode observer for selected RMS_NORM") &&
+        expect(prefill_observer == nullptr, "decode selection must not observe prefill execution") &&
+        expect(llama_expt::tensor_export_observer_callback(norm0, true, observer),
+                "export observer must request the selected RMS_NORM node") &&
+        expect(llama_expt::tensor_export_observer_callback(norm1, true, observer),
+                "export observer must preserve a user callback request") &&
+        expect(llama_expt::tensor_export_observer_callback(norm1, false, observer),
+                "export observer must preserve the user callback result") &&
+        expect(probe.asks == 2 && probe.observations == 1,
+                "export observer must chain user callback ask/observe calls");
+
+    llama_expt::tensor_export_observer_free(prefill_observer);
+    llama_expt::tensor_export_observer_free(observer);
+    ggml_free(ctx);
+    for (size_t i = 0; i < old_values.size(); ++i) {
+        if (old_present[i]) {
+            setenv(env_names[i], old_values[i].c_str(), 1);
+        } else {
+            unsetenv(env_names[i]);
+        }
+    }
+    return ok;
 }
 
 static bool test_tensor_name_priority_binds_nvfp4_capture() {
@@ -368,6 +470,9 @@ int main() {
         return 1;
     }
     if (!test_export_dir_switch_enables_export()) {
+        return 1;
+    }
+    if (!test_op_export_retains_selected_node_storage()) {
         return 1;
     }
     if (!test_tensor_name_priority_binds_nvfp4_capture()) {
