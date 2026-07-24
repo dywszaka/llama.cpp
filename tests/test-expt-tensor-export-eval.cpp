@@ -76,6 +76,79 @@ static bool test_export_dir_switch_enables_export() {
     return expect(enabled, "expected LLAMA_EXPT_TENSOR_EXPORT_DIR to enable export");
 }
 
+static bool test_tensor_name_priority_binds_nvfp4_capture() {
+    const char * env_names[] = {
+        "LLAMA_EXPT_TENSOR_EXPORT_DIR",
+        "LLAMA_EXPT_TENSOR_EXPORT_NAME",
+        "LLAMA_EXPT_TENSOR_EXPORT_OP",
+        "LLAMA_EXPT_TENSOR_EXPORT_TYPE",
+        "LLAMA_EXPT_TENSOR_EXPORT_LAYER",
+    };
+    std::vector<std::string> old_values;
+    std::vector<bool> old_present;
+    for (const char * env_name : env_names) {
+        const char * value = std::getenv(env_name);
+        old_present.push_back(value != nullptr);
+        old_values.emplace_back(value ? value : "");
+    }
+
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", "/tmp/llama-expt-export-name-test", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_NAME", "kq", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_OP", "RMS_NORM", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_TYPE", "decode", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_LAYER", "0", 1);
+
+    ggml_init_params params = {};
+    params.mem_size = 1024 * 1024;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!expect(ctx != nullptr, "expected ggml context for tensor-name capture test")) {
+        return false;
+    }
+
+    ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_NVFP4, 16, 16);
+    ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 16, 2);
+    ggml_tensor * dst = ggml_mul_mat(ctx, a, b);
+    ggml_set_name(dst, "kq-0");
+
+    const bool bound = llama_expt::tensor_export_maybe_bind_nvfp4_mul_mat_capture(ctx, dst, false);
+    const ggml_tensor * rhs_capture = ggml_mul_mat_get_nvfp4_rhs_capture(dst);
+    const ggml_tensor * scale_capture = ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(dst);
+    const uint32_t flags = ggml_mul_mat_get_nvfp4_capture_flags(dst);
+
+    ggml_tensor * other = ggml_mul_mat(ctx, a, b);
+    ggml_set_name(other, "kq-1");
+    const bool other_bound = llama_expt::tensor_export_maybe_bind_nvfp4_mul_mat_capture(ctx, other, false);
+
+    bool ok = expect(bound, "tensor name should override mismatched op selection") &&
+        expect(rhs_capture != nullptr && rhs_capture->type == GGML_TYPE_NVFP4,
+                "expected NVFP4 RHS capture tensor") &&
+        expect(rhs_capture->ne[0] == 16 && rhs_capture->ne[1] == 2,
+                "RHS capture shape mismatch") &&
+        expect(scale_capture != nullptr && scale_capture->type == GGML_TYPE_F32,
+                "expected RHS global-scale capture tensor") &&
+        expect(scale_capture->ne[0] == 2 && ggml_nelements(scale_capture) == 2,
+                "dynamic RHS scale capture shape mismatch") &&
+        expect((rhs_capture->flags & GGML_TENSOR_FLAG_OUTPUT) != 0 &&
+               (scale_capture->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                "capture tensors must be retained as graph outputs") &&
+        expect((flags & GGML_NVFP4_MUL_MAT_CAPTURE_REQUESTED) != 0 &&
+               (flags & GGML_NVFP4_MUL_MAT_CAPTURE_VALID) == 0,
+                "capture flags should start requested but not valid") &&
+        expect(!other_bound && ggml_mul_mat_get_nvfp4_rhs_capture(other) == nullptr,
+                "layer-qualified tensor name should not bind kq-1");
+
+    ggml_free(ctx);
+    for (size_t i = 0; i < old_values.size(); ++i) {
+        if (old_present[i]) {
+            setenv(env_names[i], old_values[i].c_str(), 1);
+        } else {
+            unsetenv(env_names[i]);
+        }
+    }
+    return ok;
+}
+
 static bool test_manifest_eval_and_rejection() {
     const std::string dir = temp_dir();
     std::filesystem::remove_all(dir);
@@ -295,6 +368,9 @@ int main() {
         return 1;
     }
     if (!test_export_dir_switch_enables_export()) {
+        return 1;
+    }
+    if (!test_tensor_name_priority_binds_nvfp4_capture()) {
         return 1;
     }
     if (!test_manifest_eval_and_rejection()) {

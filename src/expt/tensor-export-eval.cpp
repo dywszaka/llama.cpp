@@ -28,6 +28,7 @@ using json = nlohmann::ordered_json;
 constexpr const char * ENV_DIR    = "LLAMA_EXPT_TENSOR_EXPORT_DIR";
 constexpr const char * ENV_KINDS  = "LLAMA_EXPT_TENSOR_EXPORT_KINDS";
 constexpr const char * ENV_OP     = "LLAMA_EXPT_TENSOR_EXPORT_OP";
+constexpr const char * ENV_NAME   = "LLAMA_EXPT_TENSOR_EXPORT_NAME";
 constexpr const char * ENV_TYPE   = "LLAMA_EXPT_TENSOR_EXPORT_TYPE";
 constexpr const char * ENV_LAYER  = "LLAMA_EXPT_TENSOR_EXPORT_LAYER";
 
@@ -66,6 +67,17 @@ std::string normalize_op_name(std::string name) {
     const size_t prefix_len = std::strlen(prefix);
     if (name.size() >= prefix_len && name.compare(0, prefix_len, prefix) == 0) {
         name.erase(0, prefix_len);
+    }
+    return name;
+}
+
+std::string selected_export_name() {
+    std::string name = env_str(ENV_NAME);
+    while (!name.empty() && std::isspace((unsigned char) name.front())) {
+        name.erase(name.begin());
+    }
+    while (!name.empty() && std::isspace((unsigned char) name.back())) {
+        name.pop_back();
     }
     return name;
 }
@@ -117,6 +129,52 @@ int parse_layer_number(const std::string & name, size_t start) {
     return (int) value;
 }
 
+int trailing_dash_layer(const std::string & name) {
+    const size_t dash = name.rfind('-');
+    if (dash == std::string::npos || dash + 1 >= name.size()) {
+        return -1;
+    }
+    for (size_t i = dash + 1; i < name.size(); ++i) {
+        if (!std::isdigit((unsigned char) name[i])) {
+            return -1;
+        }
+    }
+    return parse_layer_number(name, dash + 1);
+}
+
+bool tensor_name_matches_selection(const ggml_tensor * tensor, const std::string & requested_name, int layer) {
+    if (!tensor || requested_name.empty()) {
+        return false;
+    }
+
+    const std::string actual_name = ggml_get_name(tensor);
+    const int requested_layer = trailing_dash_layer(requested_name);
+    if (layer >= 0) {
+        if (requested_layer >= 0 && requested_layer != layer) {
+            return false;
+        }
+        const std::string resolved_name = requested_layer >= 0
+                ? requested_name
+                : requested_name + "-" + std::to_string(layer);
+        return actual_name == resolved_name;
+    }
+
+    if (actual_name == requested_name) {
+        return true;
+    }
+    if (requested_layer >= 0 || actual_name.size() <= requested_name.size() + 1 ||
+            actual_name.compare(0, requested_name.size(), requested_name) != 0 ||
+            actual_name[requested_name.size()] != '-') {
+        return false;
+    }
+    for (size_t i = requested_name.size() + 1; i < actual_name.size(); ++i) {
+        if (!std::isdigit((unsigned char) actual_name[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int tensor_name_layer(const ggml_tensor * tensor) {
     if (!tensor) {
         return -1;
@@ -155,6 +213,19 @@ bool op_node_matches_layer(const ggml_tensor * dst, int layer) {
     }
     return tensor_name_layer(dst->src[0]) == layer ||
            tensor_name_layer(dst->src[1]) == layer;
+}
+
+bool export_node_matches(
+        const ggml_tensor * dst,
+        const std::string & requested_name,
+        const std::string & requested_op,
+        int layer) {
+    if (!requested_name.empty()) {
+        return tensor_name_matches_selection(dst, requested_name, layer);
+    }
+    return !requested_op.empty() &&
+           normalize_op_name(ggml_op_name(dst->op)) == requested_op &&
+           op_node_matches_layer(dst, layer);
 }
 
 bool has_prefix(const std::string & text, const char * prefix) {
@@ -435,7 +506,8 @@ bool write_op_tensor(
         const std::string & op,
         const char * role,
         size_t record_index,
-        json & records) {
+        json & records,
+        const json & extra = json::object()) {
     if (!tensor) {
         return false;
     }
@@ -479,8 +551,122 @@ bool write_op_tensor(
     rec["byte_size"] = byte_size;
     rec["contiguous"] = ggml_is_contiguous(tensor);
     rec["view_offset"] = tensor->view_offs;
+    rec.update(extra);
     records.push_back(std::move(rec));
     return true;
+}
+
+bool read_contiguous_tensor_f32(const ggml_tensor * tensor, std::vector<float> & values) {
+    if (!tensor || !tensor->data || !ggml_is_contiguous(tensor)) {
+        return false;
+    }
+    const ggml_backend_buffer_t buffer = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+    if (!buffer) {
+        return false;
+    }
+
+    const size_t n = (size_t) ggml_nelements(tensor);
+    values.resize(n);
+    switch (tensor->type) {
+        case GGML_TYPE_F32:
+            if (ggml_nbytes(tensor) != n * sizeof(float)) {
+                return false;
+            }
+            ggml_backend_tensor_get(tensor, values.data(), 0, n * sizeof(float));
+            return true;
+        case GGML_TYPE_F16: {
+            if (ggml_nbytes(tensor) != n * sizeof(ggml_fp16_t)) {
+                return false;
+            }
+            std::vector<ggml_fp16_t> raw(n);
+            ggml_backend_tensor_get(tensor, raw.data(), 0, raw.size() * sizeof(raw[0]));
+            for (size_t i = 0; i < n; ++i) {
+                values[i] = ggml_fp16_to_fp32(raw[i]);
+            }
+            return true;
+        }
+        case GGML_TYPE_BF16: {
+            if (ggml_nbytes(tensor) != n * sizeof(ggml_bf16_t)) {
+                return false;
+            }
+            std::vector<ggml_bf16_t> raw(n);
+            ggml_backend_tensor_get(tensor, raw.data(), 0, raw.size() * sizeof(raw[0]));
+            for (size_t i = 0; i < n; ++i) {
+                values[i] = ggml_bf16_to_fp32(raw[i]);
+            }
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+bool write_derived_f32_tensor(
+        const std::filesystem::path & dir,
+        const ggml_tensor * shape_source,
+        const std::vector<float> & values,
+        int node_index,
+        const std::string & op,
+        const char * role,
+        size_t record_index,
+        json & records,
+        const json & extra = json::object()) {
+    if (!shape_source || values.size() != (size_t) ggml_nelements(shape_source)) {
+        return false;
+    }
+
+    const std::string name = std::string(ggml_get_name(shape_source)) + ".canonical_global_scale";
+    const std::string path = std::to_string(record_index) + "-node" + std::to_string(node_index) + "-" +
+            role + "-" + sanitize_filename(name) + ".bin";
+    std::ofstream out(dir / path, std::ios::binary);
+    if (!out) {
+        return false;
+    }
+    out.write(reinterpret_cast<const char *>(values.data()), (std::streamsize) (values.size() * sizeof(float)));
+    if (!out) {
+        return false;
+    }
+
+    json rec;
+    rec["node_index"] = node_index;
+    rec["op"] = op;
+    rec["role"] = role;
+    rec["name"] = name;
+    rec["dtype"] = "f32";
+    rec["ne"] = { shape_source->ne[0], shape_source->ne[1], shape_source->ne[2], shape_source->ne[3] };
+    const size_t nb0 = sizeof(float);
+    const size_t nb1 = nb0 * (size_t) shape_source->ne[0];
+    const size_t nb2 = nb1 * (size_t) shape_source->ne[1];
+    const size_t nb3 = nb2 * (size_t) shape_source->ne[2];
+    rec["nb"] = { nb0, nb1, nb2, nb3 };
+    rec["path"] = path;
+    rec["byte_size"] = values.size() * sizeof(float);
+    rec["contiguous"] = true;
+    rec["view_offset"] = 0;
+    rec["derived"] = true;
+    rec.update(extra);
+    records.push_back(std::move(rec));
+    return true;
+}
+
+const char * capture_status_name(uint32_t flags) {
+    if ((flags & GGML_NVFP4_MUL_MAT_CAPTURE_REQUESTED) == 0) {
+        return "not_requested";
+    }
+    if ((flags & GGML_NVFP4_MUL_MAT_CAPTURE_VALID) == 0) {
+        return "native_nvfp4_not_used";
+    }
+    return "native_nvfp4_valid";
+}
+
+const char * capture_variant_name(uint32_t flags) {
+    if ((flags & GGML_NVFP4_MUL_MAT_CAPTURE_FP4MULMAT) != 0) {
+        return "fp4mulmat";
+    }
+    if ((flags & GGML_NVFP4_MUL_MAT_CAPTURE_CUBLASLT) != 0) {
+        return "cublaslt";
+    }
+    return "none";
 }
 
 bool export_op_graph(
@@ -488,10 +674,11 @@ bool export_op_graph(
         ggml_cgraph * gf,
         bool is_prefill,
         const std::filesystem::path & dir) {
-    const std::string op = normalize_op_name(env_str(ENV_OP));
+    const std::string requested_name = selected_export_name();
+    const std::string requested_op = normalize_op_name(env_str(ENV_OP));
     const std::string type = selected_export_type();
     const int layer = selected_export_layer();
-    if (op.empty()) {
+    if (requested_name.empty() && requested_op.empty()) {
         return false;
     }
     if (type != "decode" && type != "prefill") {
@@ -507,9 +694,28 @@ bool export_op_graph(
         return false;
     }
 
+    const int requested_name_layer = trailing_dash_layer(requested_name);
+    if (!requested_name.empty() && layer >= 0 && requested_name_layer >= 0 && requested_name_layer != layer) {
+        LLAMA_LOG_ERROR("%s: conflicting %s='%s' and %s=%d\n",
+                __func__, ENV_NAME, requested_name.c_str(), ENV_LAYER, layer);
+        return false;
+    }
+
+    std::vector<std::pair<int, ggml_tensor *>> matched;
+    const int n_nodes = ggml_graph_n_nodes(gf);
+    for (int i = 0; i < n_nodes; ++i) {
+        ggml_tensor * dst = ggml_graph_node(gf, i);
+        if (dst && export_node_matches(dst, requested_name, requested_op, layer)) {
+            matched.emplace_back(i, dst);
+        }
+    }
+    if (matched.empty()) {
+        return false;
+    }
+
     static std::unordered_set<std::string> completed_exports;
-    const std::string export_key = dir.lexically_normal().string() + "\n" + type + "\n" + op + "\n" +
-            std::to_string(layer);
+    const std::string export_key = dir.lexically_normal().string() + "\n" + type + "\n" +
+            requested_name + "\n" + requested_op + "\n" + std::to_string(layer);
     if (!completed_exports.insert(export_key).second) {
         return false;
     }
@@ -517,33 +723,121 @@ bool export_op_graph(
     ggml_backend_sched_synchronize(sched);
 
     json manifest;
-    manifest["format"] = "llama_expt_op_tensor_export_v1";
+    manifest["format"] = "llama_expt_op_tensor_export_v2";
     manifest["type"] = type;
-    manifest["op"] = op;
+    manifest["op"] = requested_op;
     manifest["layer"] = layer;
+    manifest["selection"] = {
+        { "priority", requested_name.empty() ? "op" : "tensor_name" },
+        { "requested_name", requested_name },
+        { "requested_op", requested_op },
+        { "requested_layer", layer },
+    };
+    if (!requested_name.empty() && !requested_op.empty()) {
+        manifest["selection"]["ignored_op"] = requested_op;
+    }
     manifest["records"] = json::array();
+    manifest["captures"] = json::array();
 
     size_t record_index = 0;
-    size_t matched_nodes = 0;
-    const int n_nodes = ggml_graph_n_nodes(gf);
-    for (int i = 0; i < n_nodes; ++i) {
-        ggml_tensor * dst = ggml_graph_node(gf, i);
-        if (!dst || normalize_op_name(ggml_op_name(dst->op)) != op ||
-                !op_node_matches_layer(dst, layer)) {
+    for (const auto & item : matched) {
+        const int i = item.first;
+        ggml_tensor * dst = item.second;
+        const std::string actual_op = normalize_op_name(ggml_op_name(dst->op));
+        if (write_op_tensor(dir, dst, i, actual_op, "dst", record_index, manifest["records"])) {
+            ++record_index;
+        }
+        if (write_op_tensor(dir, dst->src[0], i, actual_op, "src0", record_index, manifest["records"],
+                    { { "effective_role", dst->src[0] && dst->src[0]->type == GGML_TYPE_NVFP4 ? "a_nvfp4" : "" } })) {
+            ++record_index;
+        }
+        if (write_op_tensor(dir, dst->src[1], i, actual_op, "src1", record_index, manifest["records"],
+                    { { "effective_role", "b_original" } })) {
+            ++record_index;
+        }
+
+        if (dst->op != GGML_OP_MUL_MAT || !dst->src[0] || dst->src[0]->type != GGML_TYPE_NVFP4) {
             continue;
         }
-        ++matched_nodes;
-        if (write_op_tensor(dir, dst, i, op, "dst", record_index, manifest["records"])) {
-            ++record_index;
+
+        json capture;
+        const uint32_t flags = ggml_mul_mat_get_nvfp4_capture_flags(dst);
+        capture["node_index"] = i;
+        capture["name"] = ggml_get_name(dst);
+        capture["actual_op"] = actual_op;
+        capture["status"] = capture_status_name(flags);
+        capture["native_variant"] = capture_variant_name(flags);
+        capture["scale_mode"] = (flags & GGML_NVFP4_MUL_MAT_CAPTURE_DYNAMIC) == 0
+                ? "static"
+                : ((flags & GGML_NVFP4_MUL_MAT_CAPTURE_PER_TENSOR) != 0 ? "dynamic_per_tensor" : "dynamic_per_row");
+
+        const ggml_tensor * a_scale_raw = ggml_tensor_get_nvfp4_scale(dst->src[0]);
+        const char * a_scale_source = "src0_nvfp4_scale";
+        if (a_scale_raw == nullptr) {
+            a_scale_raw = ggml_mul_mat_get_nvfp4_weight_scale(dst);
+            a_scale_source = "mul_mat_weight_scale";
         }
-        if (write_op_tensor(dir, dst->src[0], i, op, "src0", record_index, manifest["records"])) {
-            ++record_index;
+        if (a_scale_raw != nullptr) {
+            if (write_op_tensor(dir, a_scale_raw, i, actual_op, "src0_scale_raw", record_index,
+                        manifest["records"], {
+                            { "scale_source", a_scale_source },
+                            { "scale_encoding", "inverse_global_scale" },
+                        })) {
+                ++record_index;
+            }
+
+            std::vector<float> inverse_scales;
+            if (read_contiguous_tensor_f32(a_scale_raw, inverse_scales)) {
+                std::vector<float> global_scales(inverse_scales.size());
+                for (size_t j = 0; j < inverse_scales.size(); ++j) {
+                    const float v = inverse_scales[j];
+                    global_scales[j] = std::isfinite(v) && v != 0.0f ? 1.0f / v : 0.0f;
+                }
+                if (write_derived_f32_tensor(dir, a_scale_raw, global_scales, i, actual_op,
+                            "src0_global_scale", record_index, manifest["records"], {
+                                { "scale_source", a_scale_source },
+                                { "derived_from_encoding", "inverse_global_scale" },
+                            })) {
+                    ++record_index;
+                    capture["a_global_scale_role"] = "src0_global_scale";
+                }
+            } else {
+                LLAMA_LOG_WARN("%s: unable to canonicalize A global scale for tensor '%s'\n",
+                        __func__, ggml_get_name(dst));
+            }
+        } else {
+            capture["a_global_scale"] = 1.0f;
+            capture["a_global_scale_source"] = "implicit_unit";
         }
-        if (write_op_tensor(dir, dst->src[1], i, op, "src1", record_index, manifest["records"])) {
-            ++record_index;
+
+        if ((flags & GGML_NVFP4_MUL_MAT_CAPTURE_VALID) != 0) {
+            const ggml_tensor * b_nvfp4 = ggml_mul_mat_get_nvfp4_rhs_capture(dst);
+            const ggml_tensor * b_global_scale = ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(dst);
+            if (write_op_tensor(dir, b_nvfp4, i, actual_op, "src1_nvfp4", record_index,
+                        manifest["records"], { { "effective_role", "b_nvfp4" } })) {
+                ++record_index;
+            }
+            if (write_op_tensor(dir, b_global_scale, i, actual_op, "src1_global_scale", record_index,
+                        manifest["records"], {
+                            { "scale_encoding", "global_scale" },
+                            { "scale_axis", (flags & GGML_NVFP4_MUL_MAT_CAPTURE_DYNAMIC) != 0 ? 1 : -1 },
+                        })) {
+                ++record_index;
+            }
+            capture["effective_srcs"] = {
+                { "a", {
+                    { "tensor_role", "src0" },
+                    { "global_scale_role", capture.value("a_global_scale_role", "") },
+                } },
+                { "b", {
+                    { "tensor_role", "src1_nvfp4" },
+                    { "global_scale_role", "src1_global_scale" },
+                } },
+            };
         }
+        manifest["captures"].push_back(std::move(capture));
     }
-    manifest["matched_nodes"] = matched_nodes;
+    manifest["matched_nodes"] = matched.size();
 
     std::ofstream out(dir / "manifest.json", std::ios::binary);
     if (!out) {
@@ -556,8 +850,9 @@ bool export_op_graph(
         return false;
     }
 
-    LLAMA_LOG_INFO("%s: exported type=%s op=%s layer=%d matched_nodes=%zu tensor_records=%zu to '%s'\n",
-            __func__, type.c_str(), op.c_str(), layer, matched_nodes, record_index, dir.string().c_str());
+    LLAMA_LOG_INFO("%s: exported type=%s name=%s op=%s layer=%d matched_nodes=%zu tensor_records=%zu to '%s'\n",
+            __func__, type.c_str(), requested_name.c_str(), requested_op.c_str(), layer,
+            matched.size(), record_index, dir.string().c_str());
     return true;
 }
 
@@ -565,6 +860,71 @@ bool export_op_graph(
 
 bool tensor_export_enabled() {
     return !env_str(ENV_DIR).empty();
+}
+
+bool tensor_export_maybe_bind_nvfp4_mul_mat_capture(
+        ggml_context * ctx,
+        ggml_tensor * tensor,
+        bool is_prefill) {
+    if (!ctx || !tensor_export_enabled() || !tensor) {
+        return false;
+    }
+
+    const std::string requested_name = selected_export_name();
+    const std::string requested_op = normalize_op_name(env_str(ENV_OP));
+    const std::string type = selected_export_type();
+    const int layer = selected_export_layer();
+    if ((requested_name.empty() && requested_op.empty()) ||
+            (type != "decode" && type != "prefill") ||
+            layer == -2) {
+        return false;
+    }
+    GGML_UNUSED(is_prefill);
+
+    const int requested_name_layer = trailing_dash_layer(requested_name);
+    if (!requested_name.empty() && layer >= 0 && requested_name_layer >= 0 && requested_name_layer != layer) {
+        static bool logged_name_layer_conflict = false;
+        if (!logged_name_layer_conflict) {
+            logged_name_layer_conflict = true;
+            LLAMA_LOG_ERROR("%s: conflicting %s='%s' and %s=%d\n",
+                    __func__, ENV_NAME, requested_name.c_str(), ENV_LAYER, layer);
+        }
+        return false;
+    }
+
+    if (!export_node_matches(tensor, requested_name, requested_op, layer) ||
+            tensor->op != GGML_OP_MUL_MAT ||
+            tensor->src[0] == nullptr || tensor->src[1] == nullptr ||
+            tensor->src[0]->type != GGML_TYPE_NVFP4 ||
+            tensor->src[1]->type != GGML_TYPE_F32 ||
+            tensor->type != GGML_TYPE_F32 ||
+            tensor->src[1]->ne[0] % QK_NVFP4 != 0) {
+        return false;
+    }
+
+    if (ggml_mul_mat_get_nvfp4_rhs_capture(tensor) != nullptr) {
+        return true;
+    }
+
+    ggml_tensor * rhs_nvfp4 = ggml_new_tensor(
+            ctx, GGML_TYPE_NVFP4, GGML_MAX_DIMS, tensor->src[1]->ne);
+    ggml_tensor * rhs_global_scale = nullptr;
+    if (ggml_mul_mat_get_nvfp4_input_scale(tensor) != nullptr) {
+        rhs_global_scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    } else {
+        rhs_global_scale = ggml_new_tensor_3d(
+                ctx, GGML_TYPE_F32,
+                tensor->src[1]->ne[1],
+                tensor->src[1]->ne[2],
+                tensor->src[1]->ne[3]);
+    }
+
+    ggml_format_name(rhs_nvfp4, "%s.src1_nvfp4", ggml_get_name(tensor));
+    ggml_format_name(rhs_global_scale, "%s.src1_global_scale", ggml_get_name(tensor));
+    ggml_set_output(rhs_nvfp4);
+    ggml_set_output(rhs_global_scale);
+    ggml_mul_mat_set_nvfp4_rhs_capture(tensor, rhs_nvfp4, rhs_global_scale);
+    return true;
 }
 
 bool tensor_export_maybe_log_config() {
@@ -576,9 +936,9 @@ bool tensor_export_maybe_log_config() {
 
     const bool enabled = tensor_export_enabled();
     if (enabled) {
-        LLAMA_LOG_INFO("%s: enabled %s='%s' %s='%s' %s='%s' %s='%s' %s='%s'\n",
+        LLAMA_LOG_INFO("%s: enabled %s='%s' %s='%s' %s='%s' %s='%s' %s='%s' %s='%s'\n",
                 __func__, ENV_DIR, env_str(ENV_DIR).c_str(), ENV_KINDS, env_str(ENV_KINDS).c_str(),
-                ENV_OP, env_str(ENV_OP).c_str(), ENV_TYPE, env_str(ENV_TYPE).c_str(),
+                ENV_OP, env_str(ENV_OP).c_str(), ENV_NAME, env_str(ENV_NAME).c_str(), ENV_TYPE, env_str(ENV_TYPE).c_str(),
                 ENV_LAYER, env_str(ENV_LAYER).c_str());
     } else {
         LLAMA_LOG_INFO("%s: disabled; %s is unset\n", __func__, ENV_DIR);
@@ -602,7 +962,7 @@ bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf, bool is_p
         return false;
     }
 
-    if (!env_str(ENV_OP).empty()) {
+    if (!env_str(ENV_NAME).empty() || !env_str(ENV_OP).empty()) {
         return export_op_graph(sched, gf, is_prefill, dir);
     }
 

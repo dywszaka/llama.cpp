@@ -1555,7 +1555,8 @@ static bool run_case_backend_batched_dynamic_rhs(
         float global_scale_a,
         float k_amplitude,
         float q_amplitude,
-        uint32_t seed) {
+        uint32_t seed,
+        bool capture_rhs = false) {
     GGML_ASSERT((m % 16) == 0);
     GGML_ASSERT((k % 16) == 0);
     GGML_ASSERT((k % QK_NVFP4) == 0);
@@ -1603,6 +1604,8 @@ static bool run_case_backend_batched_dynamic_rhs(
     }
 
     std::vector<float> c_ref((size_t) batch_q * c_slice_elems, 0.0f);
+    std::vector<block_nvfp4> b_q_ref(capture_rhs ? (size_t) batch_q * (b_slice_elems / QK_NVFP4) : 0);
+    std::vector<float> b_global_scale_ref(capture_rhs ? (size_t) batch_q * (size_t) n : 0);
     for (int ib = 0; ib < batch_q; ++ib) {
         const int ia = ib / q_per_k;
         std::vector<float> b_fp32_slice(
@@ -1614,6 +1617,14 @@ static bool run_case_backend_batched_dynamic_rhs(
         std::vector<block_nvfp4> b_q_slice;
         std::vector<float> b_deq_slice;
         quantize_matrix_nvfp4_dynamic_ref(b_fp32_slice, b_q_slice, n, k, global_scales_b);
+        if (capture_rhs) {
+            std::memcpy(
+                    b_q_ref.data() + (size_t) ib * (b_slice_elems / QK_NVFP4),
+                    b_q_slice.data(), b_q_slice.size() * sizeof(block_nvfp4));
+            std::memcpy(
+                    b_global_scale_ref.data() + (size_t) ib * (size_t) n,
+                    global_scales_b.data(), global_scales_b.size() * sizeof(float));
+        }
         dequantize_matrix_nvfp4_per_row_scale(b_q_slice, b_deq_slice, n, k, global_scales_b);
         for (int row = 0; row < n; ++row) {
             const float b_scale = global_scales_b[(size_t) row] != 0.0f ? (1.0f / global_scales_b[(size_t) row]) : 0.0f;
@@ -1665,6 +1676,15 @@ static bool run_case_backend_batched_dynamic_rhs(
     ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32,   k, n, batch_q, 1);
     ggml_tensor * c = ggml_mul_mat(ctx, a, b);
     ggml_mul_mat_set_prec(c, GGML_PREC_F32);
+    ggml_tensor * b_capture = nullptr;
+    ggml_tensor * b_scale_capture = nullptr;
+    if (capture_rhs) {
+        b_capture = ggml_new_tensor_4d(ctx, GGML_TYPE_NVFP4, k, n, batch_q, 1);
+        b_scale_capture = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, batch_q, 1);
+        ggml_set_output(b_capture);
+        ggml_set_output(b_scale_capture);
+        ggml_mul_mat_set_nvfp4_rhs_capture(c, b_capture, b_scale_capture);
+    }
 
     ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8, false);
     ggml_build_forward_expand(gf, c);
@@ -1701,6 +1721,22 @@ static bool run_case_backend_batched_dynamic_rhs(
 
     std::vector<float> c_gpu(c_ref.size(), 0.0f);
     ggml_backend_tensor_get(c, c_gpu.data(), 0, c_gpu.size() * sizeof(float));
+    bool capture_ok = true;
+    if (capture_rhs) {
+        std::vector<block_nvfp4> b_q_gpu(b_q_ref.size());
+        std::vector<float> b_global_scale_gpu(b_global_scale_ref.size());
+        ggml_backend_tensor_get(b_capture, b_q_gpu.data(), 0, b_q_gpu.size() * sizeof(block_nvfp4));
+        ggml_backend_tensor_get(b_scale_capture, b_global_scale_gpu.data(), 0, b_global_scale_gpu.size() * sizeof(float));
+        const uint32_t capture_flags = ggml_mul_mat_get_nvfp4_capture_flags(c);
+        capture_ok = (capture_flags & GGML_NVFP4_MUL_MAT_CAPTURE_VALID) != 0 &&
+                std::memcmp(b_q_gpu.data(), b_q_ref.data(), b_q_ref.size() * sizeof(block_nvfp4)) == 0;
+        for (size_t i = 0; i < b_global_scale_ref.size() && capture_ok; ++i) {
+            capture_ok = b_global_scale_gpu[i] == b_global_scale_ref[i];
+        }
+        if (!capture_ok) {
+            std::fprintf(stderr, "NVFP4 RHS capture mismatch flags=0x%x\n", capture_flags);
+        }
+    }
 
     ggml_backend_buffer_free(buf);
     ggml_backend_free(backend);
@@ -1725,7 +1761,7 @@ static bool run_case_backend_batched_dynamic_rhs(
 
     const float tol_abs = 2e-1f;
     const float tol_rel = 5e-2f;
-    const bool ok = max_abs_err <= tol_abs || max_rel_err <= tol_rel;
+    const bool ok = (max_abs_err <= tol_abs || max_rel_err <= tol_rel) && capture_ok;
 
     std::printf(
             "backend-batched case m=%d n=%d k=%d batch_k=%d batch_q=%d k_amp=%.4g q_amp=%.1f | max_abs=%.6g max_rel=%.6g | %s\n",
@@ -2274,7 +2310,7 @@ int main() {
     ok = run_case_integration_style(64, 9, 128, 1.00f, 1.00f, 12u) && ok;
     ok = run_case_integration_style(96, 5, 192, 1.50f, 0.90f, 13u) && ok;
     ok = run_case_integration_style_dynamic_device_alpha(32, 16, 128, 1.0f, 96.0f, 20u) && ok;
-    ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 1, 1, 1.0f, 1.0f, 96.0f, 22u) && ok;
+    ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 1, 1, 1.0f, 1.0f, 96.0f, 22u, true) && ok;
     ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 8, 1.0f, 1.0f, 96.0f, 23u) && ok;
     ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 32, 1.0f, 1.0f, 96.0f, 21u) && ok;
     ok = run_case_backend_batched_dynamic_rhs(32, 16, 128, 8, 32, 1.0f, 1e-3f, 96.0f, 25u) && ok;

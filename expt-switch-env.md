@@ -192,7 +192,32 @@ optional `GGML_OP_` prefix. For the first graph selected by
 `LLAMA_EXPT_TENSOR_EXPORT_TYPE`, it writes each matching node's `dst`,
 `dst->src[0]`, and `dst->src[1]` as raw binary spans and records their role,
 dtype, shape, strides, contiguity, and view offset in `manifest.json`. This mode
-does not use `LLAMA_EXPT_TENSOR_EXPORT_KINDS`.
+does not use `LLAMA_EXPT_TENSOR_EXPORT_KINDS`. If
+`LLAMA_EXPT_TENSOR_EXPORT_NAME` is also set, tensor-name selection takes
+priority and this op value is recorded but ignored for node selection.
+
+### `LLAMA_EXPT_TENSOR_EXPORT_NAME`
+
+Selects a graph tensor by name for op-oriented export. Default: unset/off.
+
+Tensor-name selection has higher priority than `LLAMA_EXPT_TENSOR_EXPORT_OP`.
+When a layer is selected, a base name is resolved with the layer suffix; for
+example, `LLAMA_EXPT_TENSOR_EXPORT_NAME=kq` and
+`LLAMA_EXPT_TENSOR_EXPORT_LAYER=0` select exactly `kq-0`. A name that already
+contains a trailing layer suffix must agree with `LLAMA_EXPT_TENSOR_EXPORT_LAYER`.
+Without a layer, a base name such as `kq` matches `kq-<layer>` tensors, while an
+explicit name such as `kq-0` remains an exact match.
+
+For a selected `NVFP4 x F32 -> F32` `MUL_MAT`, graph construction allocates
+graph-owned output sidecars for the effective NVFP4 RHS and its canonical
+global scale. The native CUDA path writes directly into these sidecars. The v2
+manifest exports the original NVFP4 A tensor, A's raw inverse-global scale and
+canonical global scale, the original F32 B tensor, the effective NVFP4 B
+tensor, and B's canonical global scale. If the native path is not used, the
+manifest records `native_nvfp4_not_used` and does not claim an effective B
+source. The capture sidecars are created only for the selected name/type/layer,
+so a precise name such as `kq-0` avoids retaining every MUL_MAT input in a
+layer.
 
 ### `LLAMA_EXPT_TENSOR_EXPORT_TYPE`
 

@@ -1356,6 +1356,35 @@ extern "C" {
     GGML_API const struct ggml_tensor * ggml_mul_mat_get_nvfp4_weight_scale(
             const struct ggml_tensor * mul_mat);
 
+    enum ggml_nvfp4_mul_mat_capture_flag {
+        GGML_NVFP4_MUL_MAT_CAPTURE_REQUESTED  = 1u << 0,
+        GGML_NVFP4_MUL_MAT_CAPTURE_VALID      = 1u << 1,
+        GGML_NVFP4_MUL_MAT_CAPTURE_DYNAMIC    = 1u << 2,
+        GGML_NVFP4_MUL_MAT_CAPTURE_PER_TENSOR = 1u << 3,
+        GGML_NVFP4_MUL_MAT_CAPTURE_FP4MULMAT  = 1u << 4,
+        GGML_NVFP4_MUL_MAT_CAPTURE_CUBLASLT   = 1u << 5,
+    };
+
+    // bind optional graph-owned tensors used to capture the effective NVFP4 RHS
+    // and the corresponding canonical global scale(s) of a MUL_MAT node
+    GGML_API void ggml_mul_mat_set_nvfp4_rhs_capture(
+            struct ggml_tensor * mul_mat,
+            struct ggml_tensor * rhs_nvfp4,
+            struct ggml_tensor * rhs_global_scale);
+
+    GGML_API const struct ggml_tensor * ggml_mul_mat_get_nvfp4_rhs_capture(
+            const struct ggml_tensor * mul_mat);
+
+    GGML_API const struct ggml_tensor * ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(
+            const struct ggml_tensor * mul_mat);
+
+    GGML_API void ggml_mul_mat_set_nvfp4_capture_flags(
+            struct ggml_tensor * mul_mat,
+            uint32_t flags);
+
+    GGML_API uint32_t ggml_mul_mat_get_nvfp4_capture_flags(
+            const struct ggml_tensor * mul_mat);
+
     // indirect matrix multiplication
     GGML_API struct ggml_tensor * ggml_mul_mat_id(
             struct ggml_context * ctx,

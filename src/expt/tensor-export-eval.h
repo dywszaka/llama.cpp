@@ -70,6 +70,10 @@ struct k_channel_sort_eval_report {
 
 bool tensor_export_enabled();
 bool tensor_export_maybe_log_config();
+bool tensor_export_maybe_bind_nvfp4_mul_mat_capture(
+        ggml_context * ctx,
+        ggml_tensor * tensor,
+        bool is_prefill);
 bool tensor_export_graph(ggml_backend_sched_t sched, ggml_cgraph * gf, bool is_prefill);
 
 tensor_error_metrics compute_error_metrics(const std::vector<float> & reference, const std::vector<float> & actual);
