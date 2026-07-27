@@ -247,6 +247,14 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     const int64_t r3 = q_streams / kv_streams;
     ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
 
+    if (ggml_cuda_nvfp4_vcache_batched_enabled()) {
+        if (ggml_cuda_mul_mat_vcache_nvfp4_batched(ctx, src0, src1, dst)) {
+            ggml_cuda_nvfp4_log_vcache_matmul_path_once("batched-native-dynamic-p-global-scale");
+            return true;
+        }
+        ggml_cuda_nvfp4_log_vcache_batched_fallback_once();
+    }
+
     const bool native_result = ggml_cuda_vcache_nvfp4_matmul_global_native_slices(
             ctx,
             src0,
