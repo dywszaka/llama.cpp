@@ -1,5 +1,45 @@
 # Experiment Switch Environment Variables
 
+## CUDA ADD QEMU Offload
+
+### `GGML_CUDA_ADD_QEMU_MODE`
+
+Selects `cuda|qemu|qemu_cuda|compare` for `GGML_OP_ADD`. The build option is
+`-DGGML_CUDA_ADD_QEMU=ON`; unset defaults to `cuda`, preserving the original
+llama.cpp CUDA ADD implementation. CUDA preprocessing expands ggml's complete
+four-dimensional `src1` repeat/broadcast mapping and converts both F16/F32
+operands to dense canonical BF16 using RZ/high-16-bit truncation.
+
+The replacement numerical model is the `call_add_fp32` contract: both BF16
+inputs are widened exactly to FP32, added with FP32 round-to-nearest semantics,
+and narrowed once to BF16 with RNE. `qemu_cuda` is device-only. `compare` runs
+the original CUDA ADD plus QEMU/RVV and qemu_cuda, compares QEMU and qemu_cuda
+as raw BF16 bits, and keeps the original CUDA result downstream. All non-CUDA
+modes disable CUDA graph capture for graphs containing ADD.
+
+### `GGML_CUDA_ADD_QEMU_ENDPOINT`
+
+Daemon endpoint, default `tcp://127.0.0.1:15586`.
+
+### `GGML_CUDA_ADD_QEMU_TIMEOUT_MS`
+
+ZMQ timeout in milliseconds, default `300000`.
+
+### `GGML_CUDA_ADD_QEMU_ARTIFACT`
+
+Compare JSONL path, default `experiments/add-qemu-compare.jsonl`. It records
+llama-vs-QEMU MSE/RMSE/max error and QEMU-vs-qemu_cuda BF16 mismatch counts.
+
+### `GGML_CUDA_ADD_QEMU_MISMATCH_LOG`
+
+Mismatch-only JSONL path, default `experiments/add-qemu-cuda-mismatch.jsonl`.
+It records both complete canonical inputs and both complete BF16 outputs.
+
+### `GGML_CUDA_ADD_QEMU_TIMING`
+
+Enables diagnostic ADD timing logs. Default: unset/off. Timing synchronizes the
+measured call and therefore changes performance behavior.
+
 ## CUDA MUL QEMU Offload
 
 ### `GGML_CUDA_MUL_QEMU_MODE`
