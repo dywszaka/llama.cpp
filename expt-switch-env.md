@@ -128,11 +128,11 @@ Supported values:
 - `cuda`: use the original F32 CUDA RMS_NORM.
 - `qemu`: pack the strided F32 input into dense BF16 on CUDA, send BF16 to the
   QEMU/RVV daemon, convert returned BF16 to F32 on CUDA, and use that result.
-- `qemu_cuda`: perform F32-to-BF16 packing, the BF16 RMS_NORM model, and
-  BF16-to-F32 conversion entirely on the current CUDA device. This mode creates
-  no ZMQ socket and performs no D2H/H2D transfer. Its 32-lane BF16 FMA,
-  lane-ordered reduction, sqrt, reciprocal, and scaling model is bit-exact with
-  the NI900 BF16-mode RVV implementation.
+- `qemu_cuda`: perform F32-to-BF16 packing, the FP32-compute/BF16-I/O RMS_NORM
+  model, and BF16-to-F32 conversion entirely on the current CUDA device. This
+  mode creates no ZMQ socket and performs no D2H/H2D transfer. Its 32-lane FP32
+  FMA, lane-ordered FP32 reduction, sqrt, reciprocal, and scaling model is
+  bit-exact with `call_rms_norm_fp32` on the NI900 RVV implementation.
 - `compare`: run original CUDA, QEMU/RVV, and qemu_cuda concurrently and keep
   the original CUDA result downstream. Comparison artifacts include
   llama-vs-QEMU errors and QEMU-vs-qemu_cuda numerical and BF16-bit metrics;
@@ -141,8 +141,9 @@ Supported values:
 RMS_NORM follows the project-wide canonical input rule required for all new
 QEMU/RVV operators: F32-to-BF16 packing uses RZ/truncation by taking the raw
 high 16 bits of each F32 value (`bf16_bits = f32_bits >> 16`). This input-boundary
-rule does not change the RNE rounding used by `eps`, `1/ncols`, or internal BF16
-arithmetic in the NI900/qemu_cuda numerical model.
+rule is followed by an exact BF16-to-FP32 expansion. `eps`, `1/ncols`, the
+reduction, sqrt, reciprocal, and scaling remain FP32. Only the canonical output
+conversion rounds FP32 to BF16 using RNE.
 
 `compare_cuda` and `compare_qemu` are accepted as aliases for `compare`.
 Unknown values fall back to `cuda`. All non-`cuda` modes disable RMS_NORM/MUL
@@ -150,7 +151,8 @@ fusion and CUDA graph capture so the experimental hook cannot be bypassed.
 
 ### `GGML_CUDA_RMS_NORM_QEMU_ENDPOINT`
 
-ZMQ endpoint for the RMS_NORM daemon. Default: `tcp://127.0.0.1:15581`.
+ZMQ endpoint for the FP32-compute RMS_NORM daemon. Default:
+`tcp://127.0.0.1:15583`.
 
 ### `GGML_CUDA_RMS_NORM_QEMU_TIMEOUT_MS`
 
@@ -171,10 +173,11 @@ outputs are written only when raw output bits differ.
 
 Enables per-call timing logs. Default: unset/off. `RVV_RMS_NORM_TIMING` records
 D2H, RPC, daemon, return-copy, and total offload time. In `qemu_cuda`,
-`QEMU_CUDA_RMS_NORM_TIMING` records F32-to-BF16 preprocess, BF16 RMS_NORM,
-BF16-to-F32 conversion, total duration, cumulative call count, and average
-duration. Timing events are created only when enabled and synchronize the timed
-call. `LLAMA_CUDA_RMS_NORM_TIMING` records original CUDA time in `compare`.
+`QEMU_CUDA_RMS_NORM_TIMING` records F32-to-BF16 preprocess, FP32-compute
+RMS_NORM with BF16 I/O, BF16-to-F32 conversion, total duration, cumulative call
+count, and average duration. Timing events are created only when enabled and
+synchronize the timed call. `LLAMA_CUDA_RMS_NORM_TIMING` records original CUDA
+time in `compare`.
 
 ## Tensor Export and Offline Quantization Evaluation
 

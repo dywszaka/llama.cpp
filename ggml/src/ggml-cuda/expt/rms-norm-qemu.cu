@@ -27,7 +27,7 @@ static const char * GGML_CUDA_RMS_NORM_QEMU_TIMEOUT_ENV = "GGML_CUDA_RMS_NORM_QE
 static const char * GGML_CUDA_RMS_NORM_QEMU_ARTIFACT_ENV = "GGML_CUDA_RMS_NORM_QEMU_ARTIFACT";
 static const char * GGML_CUDA_RMS_NORM_QEMU_MISMATCH_LOG_ENV = "GGML_CUDA_RMS_NORM_QEMU_MISMATCH_LOG";
 static const char * GGML_CUDA_RMS_NORM_QEMU_TIMING_ENV = "GGML_CUDA_RMS_NORM_QEMU_TIMING";
-static const char * GGML_CUDA_RMS_NORM_QEMU_DEFAULT_ENDPOINT = "tcp://127.0.0.1:15581";
+static const char * GGML_CUDA_RMS_NORM_QEMU_DEFAULT_ENDPOINT = "tcp://127.0.0.1:15583";
 static const char * GGML_CUDA_RMS_NORM_QEMU_DEFAULT_ARTIFACT =
         "experiments/rms-norm-qemu-compare.jsonl";
 static const char * GGML_CUDA_RMS_NORM_QEMU_DEFAULT_MISMATCH_LOG =
@@ -118,7 +118,8 @@ static void log_mode_once(ggml_cuda_rms_norm_qemu_mode mode) {
     }
     if (mode == GGML_CUDA_RMS_NORM_QEMU_MODE_QEMU_CUDA) {
         GGML_LOG_INFO(
-                "%s: %s=qemu_cuda enabled; bit-exact BF16 RMS_NORM stays on CUDA device, "
+                "%s: %s=qemu_cuda enabled; bit-exact FP32-compute/BF16-I/O RMS_NORM "
+                "stays on CUDA device, "
                 "ZMQ/D2H/H2D are not used, timing=%s\n",
                 __func__, GGML_CUDA_RMS_NORM_QEMU_MODE_ENV,
                 timing_enabled() ? "on" : "off");
@@ -137,7 +138,8 @@ static void log_mode_once(ggml_cuda_rms_norm_qemu_mode mode) {
     }
     const std::string rpc_endpoint = endpoint();
     GGML_LOG_INFO(
-            "%s: %s=qemu enabled; BF16 RVV RMS_NORM endpoint=%s, timing=%s\n",
+            "%s: %s=qemu enabled; FP32 RVV compute/BF16 I/O RMS_NORM "
+            "endpoint=%s, timing=%s\n",
             __func__, GGML_CUDA_RMS_NORM_QEMU_MODE_ENV, rpc_endpoint.c_str(),
             timing_enabled() ? "on" : "off");
 }

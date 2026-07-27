@@ -136,24 +136,23 @@ round  = F32-to-BF16 RZ/truncation: bf16_bits = f32_bits >> 16
 QEMU/RVV 和 qemu_cuda 消费完全相同的 canonical BF16 input，并产生同布局 BF16
 output。RMS_NORM 在这里遵循所有后续 QEMU/RVV 算子的通用 canonical input 规则，并非
 特殊例外：上游 F32 tensor 直接保留 bit pattern 的高 16 位，不对低 16 位做进位，也
-不额外改写 NaN payload。
-`eps` 以 F32 标量传输，在算子入口按 RNE 量化为 BF16；`1/ncols` 也按 RNE 量化为
-BF16。返回 llama.cpp 下游前，CUDA 在 device 上把 BF16 output 转换回 dense F32
-`dst`。
+不额外改写 NaN payload。返回 llama.cpp 下游前，CUDA 在 device 上把 BF16 output 转换
+回 dense F32 `dst`。
 
-当前 BF16 RMS_NORM 数值模型直接参考
-`decode/rms_norm/ybxkernel/eu_rms_norm.cl`，并固定为 NI900 VLEN=512 的 32 个 e16 lane：
+当前 FP32-compute RMS_NORM 数值模型对应 `call_rms_norm_fp32`，固定为 NI900 VLEN=512
+下保持相同元素数的 32 个 `e16m1 -> e32m2` lane：
 
-1. lane `i` 按 `i, i+32, ...` 读取列，并对每一步执行 BF16 fused multiply-add；
-2. `vfredusum` 按 lane 0 到 31 的顺序执行 BF16 加法；
-3. sum、BF16 `1/ncols` 和 BF16 `eps` 依次执行 BF16 multiply/add/sqrt/reciprocal；
-4. 第二遍按 BF16 multiply 缩放输入并直接输出 BF16。
+1. lane `i` 按 `i, i+32, ...` 读取 canonical BF16，并精确扩展为 FP32；
+2. 每个 lane 使用 FP32 fused multiply-add 累加 `x*x`；
+3. `vfredusum` 按 lane 0 到 31 的顺序执行 FP32 加法；
+4. `1/ncols`、`eps`、mean、sqrt、reciprocal 和第二遍缩放均保持 FP32；
+5. 最终缩放结果通过 RNE 从 FP32 rounding 到 canonical BF16 output。
 
-qemu_cuda 使用 `ggml/src/ggml-cuda/expt/rms-norm-bf16-core.cuh` 复刻相同 lane 映射、
-归约顺序和每一步 RNE 舍入。QEMU 与 qemu_cuda 比较原始 `uint16_t`，契约为 bit
-mismatch 数量等于 0。llama.cpp 的未融合 `GGML_OP_RMS_NORM` 不包含 weight 乘法，
+qemu_cuda 使用 `ggml/src/ggml-cuda/expt/rms-norm-fp32-core.cuh` 复刻相同 lane 映射、
+FP32 FMA、归约顺序和最终 BF16 RNE。QEMU 与 qemu_cuda 比较原始 `uint16_t`，契约为
+bit mismatch 数量等于 0。llama.cpp 的未融合 `GGML_OP_RMS_NORM` 不包含 weight 乘法，
 因此 canonical RPC 不传 weight。
 
 `qemu_cuda` 纯路径只使用 device buffer 和调用方 CUDA stream，不创建 ZMQ socket，也
 不执行 D2H/H2D。显式启用 `GGML_CUDA_RMS_NORM_QEMU_TIMING` 时会创建 CUDA event 并
-同步当前调用，以记录 preprocess、BF16 operator、BF16-to-F32 和 total 时间。
+同步当前调用，以记录 preprocess、FP32-compute operator、BF16-to-F32 和 total 时间。

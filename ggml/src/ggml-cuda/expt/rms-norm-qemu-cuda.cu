@@ -1,5 +1,5 @@
 #include "rms-norm-qemu-cuda.cuh"
-#include "rms-norm-bf16-core.cuh"
+#include "rms-norm-fp32-core.cuh"
 
 #include <algorithm>
 
@@ -65,7 +65,7 @@ void ggml_cuda_rms_norm_qemu_cuda_run_bf16(
         return;
     }
     GGML_ASSERT(rows <= UINT32_MAX);
-    rms_norm_bf16_bitexact_kernel<<<(unsigned int) rows, 32, 0, stream>>>(
+    rms_norm_fp32_bitexact_kernel<<<(unsigned int) rows, 32, 0, stream>>>(
             input_bf16, output_bf16, params.ncols, params.eps);
     CUDA_CHECK(cudaGetLastError());
 }
