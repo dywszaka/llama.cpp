@@ -209,8 +209,11 @@ V, KQ, or KQV records. It creates the directory when needed, writes one
 contiguous raw `.bin` file per tensor, and writes `manifest.json` containing
 `name`, `kind`, `dtype`, `ne`, `nb`, `path`, and `byte_size`. Unsupported dtypes
 are skipped with a warning so normal inference does not fail solely because
-export is enabled. The export hook is narrow and does not change inference math;
-when this switch is unset or empty, no tensors are written.
+export is enabled. Before graph allocation, matching tensors are marked as graph
+outputs so their backend storage remains valid until the post-compute export and
+cannot be reused by later nodes. The export hook is narrow and does not change
+inference math; when this switch is unset or empty, no tensors are retained or
+written.
 
 ### `LLAMA_EXPT_TENSOR_EXPORT_KINDS`
 
@@ -230,7 +233,43 @@ optional `GGML_OP_` prefix. For the first graph selected by
 `LLAMA_EXPT_TENSOR_EXPORT_TYPE`, it writes each matching node's `dst`,
 `dst->src[0]`, and `dst->src[1]` as raw binary spans and records their role,
 dtype, shape, strides, contiguity, and view offset in `manifest.json`. This mode
-does not use `LLAMA_EXPT_TENSOR_EXPORT_KINDS`.
+marks the matching `dst`, `src0`, and `src1` storage as graph outputs before
+allocation. During the selected execution, the scheduler also stops immediately
+after each matching node, synchronizes its backend, and copies `dst`, `src0`,
+and `src1` into host snapshots before later nodes can overwrite aliased storage.
+The v2 manifest records `snapshot_timing: node_completion`. Existing user eval
+callbacks are chained through the export observer. Retention is applied when the
+graph is built even if a compatible prefill graph is later reused for the
+selected decode execution. This mode does not use
+`LLAMA_EXPT_TENSOR_EXPORT_KINDS`. If
+`LLAMA_EXPT_TENSOR_EXPORT_NAME` is also set, tensor-name selection takes
+priority and this op value is recorded but ignored for node selection.
+
+### `LLAMA_EXPT_TENSOR_EXPORT_NAME`
+
+Selects a graph tensor by name for op-oriented export. Default: unset/off.
+
+Tensor-name selection has higher priority than `LLAMA_EXPT_TENSOR_EXPORT_OP`.
+When a layer is selected, a base name is resolved with the layer suffix; for
+example, `LLAMA_EXPT_TENSOR_EXPORT_NAME=kq` and
+`LLAMA_EXPT_TENSOR_EXPORT_LAYER=0` select exactly `kq-0`. A name that already
+contains a trailing layer suffix must agree with `LLAMA_EXPT_TENSOR_EXPORT_LAYER`.
+Without a layer, a base name such as `kq` matches `kq-<layer>` tensors, while an
+explicit name such as `kq-0` remains an exact match.
+
+For a selected `NVFP4 x F32 -> F32` `MUL_MAT`, graph construction allocates
+graph-owned output sidecars for the effective NVFP4 RHS and its associated
+scale. The native CUDA path writes directly into these sidecars. For the
+cuBLASLt variant, the v2 manifest exports the original NVFP4 A tensor, A's raw
+inverse-global scale and canonical global scale, the original F32 B tensor, the
+effective NVFP4 B tensor, and B's canonical global scale. For the FP4MULMAT
+variant, it instead exports only one scale record named `matmul_scale`: the
+BF16-RNE-rounded final multiplier actually applied to the accumulator output.
+The separate A and B global-scale records are omitted in that variant. If the
+native path is not used, the manifest records `native_nvfp4_not_used` and does
+not claim an effective B source. The capture sidecars are created only for the
+selected name/type/layer, so a precise name such as `kq-0` avoids retaining
+every MUL_MAT input in a layer.
 
 ### `LLAMA_EXPT_TENSOR_EXPORT_TYPE`
 
@@ -333,6 +372,12 @@ The accumulator writeback follows the `call_mul_fp32` model: the accumulator
 is truncated to canonical BF16 and exactly widened to FP32, multiplied by the
 original FP32 column scale without rounding that scale to BF16, then rounded
 to BF16 with RNE before being stored in the F32 destination.
+
+For static input scales this multiplier is
+`weight_scale_2 / global_scale`; for dynamic input scales it is computed per RHS
+row. NVFP4 tensor export captures this rounded final multiplier as the single
+exported scale for the FP4MULMAT variant, rather than exporting the separate
+weight/input global-scale components.
 
 The path logs once when selected. Combine with
 `GGML_CUDA_NVFP4_FP4MULMAT_LOG=1` to log the first several selections during a

@@ -134,6 +134,7 @@ static __global__ void ggml_cuda_nvfp4_abs_max_tensor_f32_kernel(
 static __global__ void ggml_cuda_nvfp4_prepare_dynamic_input_scales_kernel(
         const float * __restrict__ amax_rows,
         float * __restrict__ input_scales,
+        float * __restrict__ global_scales,
         const int64_t nrows,
         const float out_scale,
         const bool per_tensor_scale) {
@@ -145,6 +146,9 @@ static __global__ void ggml_cuda_nvfp4_prepare_dynamic_input_scales_kernel(
     const float amax_f = per_tensor_scale ? amax_rows[0] : amax_rows[row];
     const float global_scale = ggml_cuda_nvfp4_kcache_outlier_q_global_scale(amax_f);
     input_scales[row] = (global_scale != 0.0f) ? (out_scale / global_scale) : 0.0f;
+    if (global_scales != nullptr) {
+        global_scales[row] = global_scale;
+    }
 }
 
 static __global__ void quantize_row_nvfp4_kernel(
@@ -191,6 +195,28 @@ static __global__ void quantize_row_nvfp4_dynamic_kernel(
             xi, lane_active, global_scale, y + (int64_t) i1 * (ne00 / QK_NVFP4) + ib);
 }
 
+static __global__ void quantize_row_nvfp4_scales_kernel(
+        const float * __restrict__ x,
+        block_nvfp4 * __restrict__ y,
+        const int64_t ne00,
+        const int64_t s01,
+        const float * __restrict__ global_scales,
+        const bool per_tensor_scale,
+        const bool truncate_bf16_input) {
+    const int lane = threadIdx.x;
+    const bool lane_active = lane < QK_NVFP4;
+
+    const int ib = blockIdx.x;
+    const int i1 = blockIdx.y;
+    const int64_t k0 = (int64_t) ib * QK_NVFP4 + lane;
+    const float xi_src = (lane_active && k0 < ne00) ? x[(int64_t) i1 * s01 + k0] : 0.0f;
+    const float xi = truncate_bf16_input ? ggml_cuda_trunc_f32_to_bf16_value(xi_src) : xi_src;
+    const float global_scale = per_tensor_scale ? global_scales[0] : global_scales[i1];
+
+    ggml_cuda_nvfp4_core_quantize_block_f32(
+            xi, lane_active, global_scale, y + (int64_t) i1 * (ne00 / QK_NVFP4) + ib);
+}
+
 } // namespace
 
 void ggml_cuda_nvfp4_abs_max_rows_f32(
@@ -224,6 +250,7 @@ void ggml_cuda_nvfp4_abs_max_tensor_f32(
 void ggml_cuda_nvfp4_prepare_dynamic_input_scales(
         const float * amax_rows,
         float * input_scales,
+        float * global_scales,
         int64_t nrows,
         float out_scale,
         bool per_tensor_scale,
@@ -231,7 +258,7 @@ void ggml_cuda_nvfp4_prepare_dynamic_input_scales(
     const int block_size = 256;
     const int grid_size = (int) ((nrows + block_size - 1) / block_size);
     ggml_cuda_nvfp4_prepare_dynamic_input_scales_kernel<<<grid_size, block_size, 0, stream>>>(
-            amax_rows, input_scales, nrows, out_scale, per_tensor_scale);
+            amax_rows, input_scales, global_scales, nrows, out_scale, per_tensor_scale);
 }
 
 void ggml_cuda_nvfp4_quantize_rows_f32(
@@ -265,4 +292,21 @@ void ggml_cuda_nvfp4_quantize_rows_dynamic_f32(
     const dim3 block_size(WARP_SIZE, 1, 1);
     quantize_row_nvfp4_dynamic_kernel<<<num_blocks, block_size, 0, stream>>>(
             x, y, ne00, s01, amax_rows, per_tensor_scale, truncate_bf16_input);
+}
+
+void ggml_cuda_nvfp4_quantize_rows_scales_f32(
+        const float * x,
+        block_nvfp4 * y,
+        int64_t ne00,
+        int64_t s01,
+        int64_t ne01,
+        const float * global_scales,
+        bool per_tensor_scale,
+        bool truncate_bf16_input,
+        cudaStream_t stream) {
+    GGML_ASSERT(ne00 % QK_NVFP4 == 0);
+    const dim3 num_blocks((uint32_t) (ne00 / QK_NVFP4), (uint32_t) ne01, 1);
+    const dim3 block_size(WARP_SIZE, 1, 1);
+    quantize_row_nvfp4_scales_kernel<<<num_blocks, block_size, 0, stream>>>(
+            x, y, ne00, s01, global_scales, per_tensor_scale, truncate_bf16_input);
 }

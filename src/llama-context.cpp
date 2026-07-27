@@ -737,6 +737,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
+    const bool is_prefill = ubatch.n_seq_tokens > 1 ||
+            (ubatch.pos && ubatch.n_tokens > 0 && ubatch.pos[0] == 0);
     const bool can_reuse = !graph_reuse_disable && res->can_reuse(gparams);
 
     LLAMA_LOG_DEBUG("%s: start, gtype = %d, n_tokens = %u, can_reuse = %d\n",
@@ -764,6 +766,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             return nullptr;
         }
 
+        llama_expt::tensor_export_maybe_retain_graph(gf);
+
         if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
@@ -784,12 +788,24 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
+    llama_expt::tensor_export_observer * tensor_export_observer =
+        llama_expt::tensor_export_observer_create(
+                res->get_gf(), is_prefill, cparams.cb_eval, cparams.cb_eval_user_data);
+    if (tensor_export_observer) {
+        ggml_backend_sched_set_eval_callback(
+                sched.get(), llama_expt::tensor_export_observer_callback, tensor_export_observer);
+    } else {
+        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+    }
+
     // const int64_t t_compute_start_us = ggml_time_us();
     // LLAMA_LOG_DEBUG("%s: graph_compute begin\n", __func__);
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
     // LLAMA_LOG_DEBUG("%s: graph_compute end, status = %d, dt = %.3f ms\n",
             // __func__, status, (ggml_time_us() - t_compute_start_us) / 1000.0);
     if (status != GGML_STATUS_SUCCESS) {
+        llama_expt::tensor_export_observer_free(tensor_export_observer);
+        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
@@ -802,9 +818,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         llama_log::debug_nvfp4_norm_weights(model);
     }
 
-    const bool is_prefill = ubatch.n_seq_tokens > 1 ||
-            (ubatch.pos && ubatch.n_tokens > 0 && ubatch.pos[0] == 0);
-    llama_expt::tensor_export_graph(sched.get(), res->get_gf(), is_prefill);
+    llama_expt::tensor_export_graph(sched.get(), res->get_gf(), is_prefill, tensor_export_observer);
+    llama_expt::tensor_export_observer_free(tensor_export_observer);
+    ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
     return res;
 }

@@ -9,6 +9,7 @@
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
 #include "expt/nvfp4-k-offline-channel-order.h"
+#include "expt/tensor-export-eval.h"
 
 #include <cassert>
 #include <cmath>
@@ -556,6 +557,10 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
     if (cb_func) {
         cb_func(ubatch, cur, name, il);
     }
+
+    const bool is_prefill = ubatch.n_seq_tokens > 1 ||
+            (ubatch.pos && ubatch.n_tokens > 0 && ubatch.pos[0] == 0);
+    llama_expt::tensor_export_maybe_bind_nvfp4_mul_mat_capture(ctx0, cur, is_prefill);
 }
 
 ggml_tensor * llm_graph_context::build_cvec(

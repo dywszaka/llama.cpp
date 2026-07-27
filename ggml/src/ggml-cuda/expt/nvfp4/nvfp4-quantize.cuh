@@ -34,6 +34,7 @@ void ggml_cuda_nvfp4_abs_max_tensor_f32(
 void ggml_cuda_nvfp4_prepare_dynamic_input_scales(
         const float * amax_rows,
         float * input_scales,
+        float * global_scales,
         int64_t nrows,
         float out_scale,
         bool per_tensor_scale,
@@ -56,6 +57,17 @@ void ggml_cuda_nvfp4_quantize_rows_dynamic_f32(
         int64_t s01,
         int64_t ne01,
         const float * amax_rows,
+        bool per_tensor_scale,
+        bool truncate_bf16_input,
+        cudaStream_t stream);
+
+void ggml_cuda_nvfp4_quantize_rows_scales_f32(
+        const float * x,
+        block_nvfp4 * y,
+        int64_t ne00,
+        int64_t s01,
+        int64_t ne01,
+        const float * global_scales,
         bool per_tensor_scale,
         bool truncate_bf16_input,
         cudaStream_t stream);
