@@ -565,8 +565,8 @@ static __global__ void ggml_cuda_nvfp4_fp4mulmat_kernel(
 
     *(float *) (dst + row * dst_nb0 + col * dst_nb1) = [] __device__ (float left, float right) {
         const float product = __fmul_rn(
-                ggml_cuda_nvfp4_bf16_trunc_f32(left),
-                right);
+                ggml_cuda_nvfp4_bf16_round_f32(left),
+                ggml_cuda_nvfp4_bf16_round_f32(right));
         const uint32_t bits = __float_as_uint(product);
         const uint32_t exponent = bits & 0x7f800000u;
         const uint32_t mantissa = bits & 0x007fffffu;
