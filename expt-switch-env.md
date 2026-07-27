@@ -264,7 +264,9 @@ cuBLASLt variant, the v2 manifest exports the original NVFP4 A tensor, A's raw
 inverse-global scale and canonical global scale, the original F32 B tensor, the
 effective NVFP4 B tensor, and B's canonical global scale. For the FP4MULMAT
 variant, it instead exports only one scale record named `matmul_scale`: the
-BF16-RNE-rounded final multiplier actually applied to the accumulator output.
+original FP32 final multiplier supplied to the accumulator output multiply.
+The manifest records the BF16-RNE operand rounding performed by FP4MULMAT, but
+the exported scale itself retains its FP32 low bits.
 The separate A and B global-scale records are omitted in that variant. If the
 native path is not used, the manifest records `native_nvfp4_not_used` and does
 not claim an effective B source. The capture sidecars are created only for the
@@ -369,13 +371,13 @@ cuBLASLt. This is intended for hardware-model comparison and correctness
 experiments, not performance measurement.
 
 The accumulator writeback follows the `call_mul_fp32` model: the accumulator
-is truncated to canonical BF16 and exactly widened to FP32, multiplied by the
-original FP32 column scale without rounding that scale to BF16, then rounded
-to BF16 with RNE before being stored in the F32 destination.
+and column-scale operands are rounded to BF16 with RNE and exactly widened to
+FP32, multiplied in FP32, then rounded to BF16 with RNE before being stored in
+the F32 destination.
 
 For static input scales this multiplier is
 `weight_scale_2 / global_scale`; for dynamic input scales it is computed per RHS
-row. NVFP4 tensor export captures this rounded final multiplier as the single
+row. NVFP4 tensor export captures the original FP32 final multiplier as the single
 exported scale for the FP4MULMAT variant, rather than exporting the separate
 weight/input global-scale components.
 

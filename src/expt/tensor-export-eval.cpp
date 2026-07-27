@@ -940,8 +940,9 @@ bool export_op_graph(
             const char * scale_role = captures_final_scale ? "matmul_scale" : "src1_global_scale";
             if (write_op_tensor(dir, b_scale_capture, i, actual_op, scale_role, record_index,
                         manifest["records"], captures_final_scale ? json {
-                            { "scale_encoding", "bf16_rne_rounded_f32" },
+                            { "scale_encoding", "f32" },
                             { "scale_semantics", "final_output_multiplier" },
+                            { "operand_rounding", "bf16_rne" },
                             { "scale_axis", (flags & GGML_NVFP4_MUL_MAT_CAPTURE_DYNAMIC) != 0 ? 1 : -1 },
                         } : json {
                             { "scale_encoding", "global_scale" },

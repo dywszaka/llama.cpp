@@ -333,6 +333,10 @@ static bool test_fp4mulmat_export_writes_only_final_scale() {
                     "FP4MULMAT export must contain matmul_scale") &&
              expect(manifest.find("\"scale_semantics\": \"final_output_multiplier\"") != std::string::npos,
                     "FP4MULMAT export must describe final scale semantics") &&
+             expect(manifest.find("\"scale_encoding\": \"f32\"") != std::string::npos,
+                    "FP4MULMAT export must preserve the F32 scale") &&
+             expect(manifest.find("\"operand_rounding\": \"bf16_rne\"") != std::string::npos,
+                    "FP4MULMAT export must describe scale operand rounding") &&
              expect(manifest.find("\"role\": \"src0_scale_raw\"") == std::string::npos,
                     "FP4MULMAT export must omit raw src0 scale") &&
              expect(manifest.find("\"role\": \"src0_global_scale\"") == std::string::npos,

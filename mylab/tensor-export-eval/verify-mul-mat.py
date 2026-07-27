@@ -399,6 +399,9 @@ def run() -> int:
                     expected = f32(math.fsum(a * b for a, b in zip(a_row, b_row)))
                     if final_scale is not None:
                         scale = scale_value_for_rhs_row(final_scale, src1, i1, i2, i3)
+                        if final_scale.record.get("operand_rounding") == "bf16_rne":
+                            expected = round_f32_to_bf16_rne(expected)
+                            scale = round_f32_to_bf16_rne(scale)
                         expected = f32(expected * scale)
                     if result_rounding == "bf16_rne":
                         expected = round_f32_to_bf16_rne(expected)
@@ -444,7 +447,10 @@ def run() -> int:
     else:
         print("  scales used: none")
     print(f"  result shape: {result.ne}")
-    formula = "dst = (src0^T * src1) * matmul_scale" if final_scale is not None else "dst = src0^T * src1"
+    if final_scale is not None and final_scale.record.get("operand_rounding") == "bf16_rne":
+        formula = "dst = bf16_rne(src0^T * src1) * bf16_rne(matmul_scale)"
+    else:
+        formula = "dst = (src0^T * src1) * matmul_scale" if final_scale is not None else "dst = src0^T * src1"
     print(f"  formula: {formula}")
     print(f"  MAE: {mae:.9g}")
     print(f"  RMSE: {rmse:.9g}")

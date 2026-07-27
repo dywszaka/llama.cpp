@@ -46,6 +46,8 @@ effective inputs. It follows ggml's `dst = src0^T * src1` batch-broadcast
 semantics and recognizes the BF16 result rounding enabled by `export.sh`.
 For native NVFP4 captures, the report lists every scale file actually used by
 the reconstruction. FP4MULMAT exports report the single `matmul_scale` file,
-its manifest encoding and semantics, scalar values/range, and whether every
-F32 value has zero low 16 bits (that is, it is an expanded BF16 value). Use
-`--max-scale-values` to control how many scale values are printed.
+its manifest encoding and semantics, scalar values/range, and whether each F32
+value happens to have zero low 16 bits. The scale file preserves the original
+FP32 values; the manifest tells the validator to apply BF16-RNE operand rounding
+when reconstructing the FP4MULMAT output multiply. Use `--max-scale-values` to
+control how many scale values are printed.
