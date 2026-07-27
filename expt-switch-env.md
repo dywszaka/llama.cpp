@@ -329,6 +329,11 @@ NVFP4 block dot product with the experimental FP4 accumulator model instead of
 cuBLASLt. This is intended for hardware-model comparison and correctness
 experiments, not performance measurement.
 
+The accumulator writeback follows the `call_mul_fp32` model: the accumulator
+is truncated to canonical BF16 and exactly widened to FP32, multiplied by the
+original FP32 column scale without rounding that scale to BF16, then rounded
+to BF16 with RNE before being stored in the F32 destination.
+
 The path logs once when selected. Combine with
 `GGML_CUDA_NVFP4_FP4MULMAT_LOG=1` to log the first several selections during a
 run.

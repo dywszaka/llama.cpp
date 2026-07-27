@@ -553,7 +553,7 @@ static __global__ void ggml_cuda_nvfp4_fp4mulmat_kernel(
     *(float *) (dst + row * dst_nb0 + col * dst_nb1) = [] __device__ (float left, float right) {
         const float product = __fmul_rn(
                 ggml_cuda_nvfp4_bf16_trunc_f32(left),
-                ggml_cuda_nvfp4_bf16_trunc_f32(right));
+                right);
         const uint32_t bits = __float_as_uint(product);
         const uint32_t exponent = bits & 0x7f800000u;
         const uint32_t mantissa = bits & 0x007fffffu;
@@ -1176,7 +1176,8 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                     (long long) ne10,
                     used_dynamic_scale ? 1 : 0);
         }
-        const float static_scale = used_dynamic_scale ? 1.0f : ggml_cuda_nvfp4_bf16_trunc_f32((global_scale != 0.0f) ? (out_scale / global_scale) : out_scale);
+        const float static_scale = used_dynamic_scale ? 1.0f :
+                ((global_scale != 0.0f) ? (out_scale / global_scale) : out_scale);
         ggml_cuda_nvfp4_fp4mulmat_cuda(
                 (const block_nvfp4 *) src0->data,
                 src1_q_nvfp4.get(),
