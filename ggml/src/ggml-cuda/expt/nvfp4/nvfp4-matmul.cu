@@ -1315,8 +1315,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                     (long long) ne10,
                     used_dynamic_scale ? 1 : 0);
         }
-        const float static_scale = used_dynamic_scale ? 1.0f : ggml_cuda_nvfp4_bf16_round_f32(
-                (global_scale != 0.0f) ? (out_scale / global_scale) : out_scale);
+        const float static_scale = used_dynamic_scale ? 1.0f : (global_scale != 0.0f) ? (out_scale / global_scale) : out_scale;
         if (capture_active && !used_dynamic_scale) {
             ggml_cuda_nvfp4_set_scalar_kernel<<<1, 1, 0, stream>>>(
                     (float *) rhs_scale_capture->data, static_scale);
