@@ -1,0 +1,8 @@
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+ggml_cuda_rope_qemu_enabled: GGML_CUDA_ROPE_QEMU_ENABLED=1; RoPE QEMU dispatch hook enabled
+check_node_graph_compatibility_and_refresh_copy_ops: disabling CUDA graphs for ROPE QEMU experiment
+ggml_cuda_rope_qemu_try_run: RoPE QEMU hook reached for tensor 'node_0'; using the CUDA fallback until the QEMU operator implementation is connected
+exported 1048576 F32 values to /home/allen/host_workspace/develop/llama.cpp/experiments/20260728T102936Z-rope-cos-sin-context-8192

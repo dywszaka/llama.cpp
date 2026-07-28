@@ -604,3 +604,18 @@ Enables CUDA NVFP4 V-cache single-token fast update. Default: off.
 
 When enabled, CUDA set_rows may patch single-token updates without
 requantizing the whole 16-token V-cache block.
+
+## CUDA RoPE QEMU Dispatch
+
+### `GGML_CUDA_ROPE_QEMU_ENABLED`
+
+Enables the experimental CUDA RoPE QEMU dispatch hook. Default: unset/off.
+
+Accepted true values are `1`, `true`, and `on`; accepted false values are an
+unset or empty value, `0`, `false`, and `off`. The switch is read once on first
+use. When enabled, `GGML_OP_ROPE` receives `qemu_enabled=true`, CUDA graph
+capture is disabled for graphs containing RoPE, and the experimental QEMU entry
+point is attempted. The current interface-only entry point returns control to
+the existing CUDA RoPE kernel, preserving output while the external QEMU
+operator is not yet connected. A once-only log confirms both the switch state
+and the fallback path.

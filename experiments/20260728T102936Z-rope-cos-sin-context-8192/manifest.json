@@ -1,0 +1,27 @@
+{
+  "format": "llama_cuda_rope_cos_sin_v1",
+  "source": "GGML_OP_ROPE CUDA kernel evaluated with GPT-NeoX basis input",
+  "model": "/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf",
+  "context_size": 8192,
+  "position_range": {"start": 0, "end_exclusive": 8192},
+  "channel_idx_range": {"start": 0, "end_exclusive": 64},
+  "shape": [8192, 64, 2],
+  "component_order": ["cos", "sin"],
+  "dtype": "f32_le",
+  "layout": "position_major_channel_major_component",
+  "byte_offset": "((position * 64 + channel_idx) * 2 + component) * 4",
+  "data_file": "rope-cos-sin-f32.bin",
+  "rope_params": {
+    "mode": 2,
+    "mode_name": "neox",
+    "n_dims": 128,
+    "n_ctx_orig": 40960,
+    "freq_base": 1e+06,
+    "freq_scale": 1,
+    "ext_factor": 0,
+    "attn_factor": 1,
+    "beta_fast": 32,
+    "beta_slow": 1,
+    "freq_factors": null
+  }
+}

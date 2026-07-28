@@ -25,6 +25,7 @@
 #include "ggml-cuda/expt/fp8/fp8-e8m0-matmul.cuh"
 #include "ggml-cuda/expt/rms-norm-qemu.cuh"
 #include "ggml-cuda/expt/mul-qemu.cuh"
+#include "ggml-cuda/expt/rope-qemu.cuh"
 #include "ggml-cuda/expt/softmax-qemu.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
@@ -2693,7 +2694,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_op_soft_max_back(ctx, dst);
             break;
         case GGML_OP_ROPE:
-            ggml_cuda_op_rope(ctx, dst);
+            ggml_cuda_op_rope(ctx, dst, ggml_cuda_rope_qemu_enabled());
             break;
         case GGML_OP_ROPE_BACK:
             ggml_cuda_op_rope_back(ctx, dst);
@@ -2933,6 +2934,13 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             use_cuda_graph = false;
 #ifndef NDEBUG
             GGML_LOG_DEBUG("%s: disabling CUDA graphs for SOFT_MAX QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_ROPE && ggml_cuda_rope_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for ROPE QEMU experiment\n", __func__);
 #endif
         }
 
