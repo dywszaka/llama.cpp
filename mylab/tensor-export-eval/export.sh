@@ -8,8 +8,8 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 TYPE="${TYPE:-decode}" # decode or prefill
 PROMPT="${PROMPT:-$(cat "${ROOT_DIR}/mylab/tensor-export-eval/wikitext-chunk-512.txt")}"
 echo "PROMPT=${PROMPT}"
-OP="${OP-GGML_OP_RMS_NORM}"
-NAME="${NAME-norm}"
+OP="${OP-GGML_OP_SOFT_MAX}"
+NAME="${NAME-kq_soft_max}"
 LAYER="${LAYER:-0}"
 CUDA_DEVICE="${CUDA_DEVICE:-1}"
 MODEL_PATH="${MODEL_PATH:-${ROOT_DIR}/models/qwen3-8b-nvfp4.gguf}"
@@ -26,6 +26,7 @@ EXTRA_ARGS=()
 LLAMA_CLI="${ROOT_DIR}/build_cuda/bin/llama-cli"
 RMS_NORM_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-rms-norm.py"
 MUL_MAT_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-mul-mat.py"
+SOFT_MAX_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-soft-max.py"
 
 TYPE="${TYPE,,}"
 OP="${OP^^}"
@@ -42,6 +43,10 @@ case "${OP}" in
     MUL_MAT)
         VALIDATOR_SOURCE="${MUL_MAT_VALIDATOR_SOURCE}"
         VALIDATOR_NAME="verify-mul-mat.py"
+        ;;
+    SOFT_MAX)
+        VALIDATOR_SOURCE="${SOFT_MAX_VALIDATOR_SOURCE}"
+        VALIDATOR_NAME="verify-soft-max.py"
         ;;
 esac
 
@@ -226,6 +231,7 @@ requested_name="$(sed -nE 's/^[[:space:]]*"requested_name":[[:space:]]*"([^"]*)"
 dst_records="$(grep -c '"role": "dst"' "${MANIFEST_PATH}" || true)"
 src0_records="$(grep -c '"role": "src0"' "${MANIFEST_PATH}" || true)"
 src1_records="$(grep -c '"role": "src1"' "${MANIFEST_PATH}" || true)"
+src2_records="$(grep -c '"role": "src2"' "${MANIFEST_PATH}" || true)"
 first_dst_path="$(awk '
     /"role": "dst"/ { selected = 1; next }
     selected && /"path":/ {
@@ -290,6 +296,7 @@ fi
     printf 'DST_RECORDS=%q\n' "${dst_records}"
     printf 'SRC0_RECORDS=%q\n' "${src0_records}"
     printf 'SRC1_RECORDS=%q\n' "${src1_records}"
+    printf 'SRC2_RECORDS=%q\n' "${src2_records}"
     printf 'VALIDATOR=%q\n' "${VALIDATOR_NAME}"
     printf 'VALID=%q\n' "${valid}"
 } > "${RUN_DIR}/validation.env"
@@ -310,6 +317,7 @@ fi
     echo "- dst records: ${dst_records}"
     echo "- src0 records: ${src0_records}"
     echo "- src1 records: ${src1_records}"
+    echo "- src2 records: ${src2_records}"
     if [[ -n "${VALIDATOR_NAME}" ]]; then
         echo "- Bundled validator: \`${VALIDATOR_NAME}\`"
     fi
@@ -328,6 +336,15 @@ fi
         echo "## MUL_MAT data validation"
         echo
         echo "Pass one result file; its inputs are resolved from manifest.json:"
+        echo
+        echo '```bash'
+        printf './%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}"
+        echo '```'
+    elif [[ "${OP}" == "SOFT_MAX" && -n "${first_dst_path}" ]]; then
+        echo
+        echo "## SOFT_MAX data validation"
+        echo
+        echo "Pass one result file; its inputs and op parameters are resolved from manifest.json:"
         echo
         echo '```bash'
         printf './%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}"

@@ -16,9 +16,9 @@ locations:
 - `tests/test-expt-tensor-export-eval.cpp`
 
 The runtime exporter also supports an op-oriented mode for capturing every
-matching node's `dst`, `dst->src[0]`, and `dst->src[1]` from the first selected
-prefill or decode graph. Edit and run `export.sh` in this directory to launch
-the export and record its artifacts under `experiments/`.
+matching node's `dst` and populated `dst->src[0..2]` tensors from the first
+selected prefill or decode graph. Edit and run `export.sh` in this directory to
+launch the export and record its artifacts under `experiments/`.
 
 For `OP=RMS_NORM`, each export directory contains an executable
 `verify-rms-norm.py`. Pass the result/dst binary; the script locates the same
@@ -54,3 +54,21 @@ value happens to have zero low 16 bits. The scale file preserves the original
 FP32 values; the manifest tells the validator to apply BF16-RNE operand rounding
 when reconstructing the FP4MULMAT output multiply. Use `--max-scale-values` to
 control how many scale values are printed.
+
+For `OP=SOFT_MAX`, the export directory contains `verify-soft-max.py`. The
+attention softmax dst is named `kq_soft_max-<layer>`, so it can be selected with
+`NAME=kq_soft_max`. The dst manifest record includes `op_params.scale` and
+`op_params.max_bias`; the same node's logits (`src0`), optional mask (`src1`),
+and optional attention sinks (`src2`) are resolved automatically:
+
+```bash
+./verify-soft-max.py tensors/0-node42-dst-kq_soft_max-0.bin
+```
+
+The validator reproduces mask broadcasting, ALiBi slopes, attention sinks, and
+the configured scale. It supports the normal F32 CUDA calculation and the
+deterministic QEMU BF16 algorithm selected by
+`GGML_CUDA_SOFT_MAX_QEMU_MODE=qemu` or `qemu_cuda`; `--mode` can override
+automatic detection. It also requires every exported `src0`/KQ F32 value to be
+BF16-representable (`f32_bits & 0xffff == 0`) and fails validation if any input
+value retains non-zero low 16 bits.

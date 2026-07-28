@@ -230,17 +230,24 @@ Selects op-oriented tensor export mode. Default: unset/off.
 When set together with `LLAMA_EXPT_TENSOR_EXPORT_DIR`, the export pass matches
 all graph nodes whose `ggml_op_name()` equals this value, ignoring case and an
 optional `GGML_OP_` prefix. For the first graph selected by
-`LLAMA_EXPT_TENSOR_EXPORT_TYPE`, it writes each matching node's `dst`,
-`dst->src[0]`, and `dst->src[1]` as raw binary spans and records their role,
-dtype, shape, strides, contiguity, and view offset in `manifest.json`. This mode
-marks the matching `dst`, `src0`, and `src1` storage as graph outputs before
-allocation. During the selected execution, the scheduler also stops immediately
-after each matching node, synchronizes its backend, and copies `dst`, `src0`,
-and `src1` into host snapshots before later nodes can overwrite aliased storage.
-The v2 manifest records `snapshot_timing: node_completion`. Existing user eval
-callbacks are chained through the export observer. Retention is applied when the
-graph is built even if a compatible prefill graph is later reused for the
-selected decode execution. This mode does not use
+`LLAMA_EXPT_TENSOR_EXPORT_TYPE`, it writes each matching node's `dst` and
+populated `dst->src[0..2]` tensors as raw binary spans and records their role,
+dtype, shape, strides, contiguity, and view offset in `manifest.json`. For
+`SOFT_MAX`, the dst record also stores `op_params.scale` and
+`op_params.max_bias`, while `src2` captures optional attention sinks. This mode
+marks the matching `dst` and populated `src0` through `src2` storage as graph
+outputs before allocation. During the selected execution, the scheduler also
+stops immediately after each matching node, synchronizes its backend, and
+copies those tensors into host snapshots before later nodes can overwrite
+aliased storage.
+The v2 manifest records
+`snapshot_timing: source_producer_and_node_completion`: graph-produced inputs
+are copied when their producer finishes so in-place selected ops cannot
+overwrite them, while the selected dst and any remaining inputs are copied when
+the selected node finishes. Existing user eval callbacks are chained through
+the export observer. Retention is applied when the graph is built even if a
+compatible prefill graph is later reused for the selected decode execution.
+This mode does not use
 `LLAMA_EXPT_TENSOR_EXPORT_KINDS`. If
 `LLAMA_EXPT_TENSOR_EXPORT_NAME` is also set, tensor-name selection takes
 priority and this op value is recorded but ignored for node selection.
