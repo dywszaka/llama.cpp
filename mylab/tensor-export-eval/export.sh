@@ -236,17 +236,6 @@ first_dst_path="$(awk '
         exit
     }
 ' "${MANIFEST_PATH}")"
-first_src0_path="$(awk '
-    /"role": "src0"/ { selected = 1; next }
-    selected && /"path":/ {
-        path = $0
-        sub(/^[[:space:]]*"path":[[:space:]]*"/, "", path)
-        sub(/",?[[:space:]]*$/, "", path)
-        print path
-        exit
-    }
-' "${MANIFEST_PATH}")"
-
 resolved_name=""
 dst_name_mismatches=0
 if [[ -n "${NAME}" ]]; then
@@ -325,14 +314,14 @@ fi
         echo "- Bundled validator: \`${VALIDATOR_NAME}\`"
     fi
     echo "- Validation: \`${valid}\`"
-    if [[ "${OP}" == "RMS_NORM" && -n "${first_dst_path}" && -n "${first_src0_path}" ]]; then
+    if [[ "${OP}" == "RMS_NORM" && -n "${first_dst_path}" ]]; then
         echo
         echo "## RMSNorm data validation"
         echo
-        echo "Pass the result file first and the input file second:"
+        echo "Pass one result file; its input is resolved from manifest.json:"
         echo
         echo '```bash'
-        printf './%s tensors/%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}" "${first_src0_path}"
+        printf './%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}"
         echo '```'
     elif [[ "${OP}" == "MUL_MAT" && -n "${first_dst_path}" ]]; then
         echo

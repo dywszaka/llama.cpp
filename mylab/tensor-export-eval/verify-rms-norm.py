@@ -2,10 +2,11 @@
 """Validate an exported RMS_NORM result against its input tensor.
 
 Usage:
-    verify-rms-norm.py RESULT.bin INPUT.bin
+    verify-rms-norm.py RESULT.bin [INPUT.bin]
 
-The first positional argument is the exported result (dst); the second is the
-exported input (src0). Only F32 RMS_NORM tensor exports are supported.
+Pass the exported result (dst). The matching input (src0) is resolved from the
+adjacent manifest.json by node index. An explicit input remains supported for
+exports without a manifest. Only F32 RMS_NORM tensor exports are supported.
 """
 
 from __future__ import annotations
@@ -113,50 +114,131 @@ def rms_norm_qemu_bf16(values: list[float], row_width: int, epsilon: float) -> l
     return output
 
 
-def find_manifest(result_path: Path, input_path: Path) -> tuple[Path | None, dict | None]:
-    candidates = [
-        result_path.parent / "manifest.json",
-        input_path.parent / "manifest.json",
-    ]
+def rms_norm_qemu_fp32(values: list[float], row_width: int, epsilon: float) -> list[float]:
+    output: list[float] = []
+    inverse_cols = f32(1.0 / f32(float(row_width)))
+    epsilon_f32 = f32(epsilon)
+
+    for offset in range(0, len(values), row_width):
+        row = [bf16_to_f32(bf16_from_f32_rz(value))
+               for value in values[offset : offset + row_width]]
+        lane_sums: list[float] = []
+        for lane in range(32):
+            lane_sum = 0.0
+            for column in range(lane, row_width, 32):
+                # A BF16 square is exact in F32, so rounding the sum reproduces
+                # the FP32 FMA used by the CUDA model without requiring math.fma.
+                lane_sum = f32(row[column] * row[column] + lane_sum)
+            lane_sums.append(lane_sum)
+
+        sum_squares = 0.0
+        for lane_sum in lane_sums:
+            sum_squares = f32(sum_squares + lane_sum)
+        mean = f32(sum_squares * inverse_cols)
+        mean_with_epsilon = f32(mean + epsilon_f32)
+        root = f32(math.sqrt(mean_with_epsilon))
+        scale = f32(1.0 / root)
+        output.extend(
+            bf16_to_f32(bf16_from_f32_rne(f32(value * scale)))
+            for value in row
+        )
+    return output
+
+
+def find_manifest(
+        result_path: Path,
+        input_path: Path | None,
+        requested_manifest: Path | None) -> tuple[Path | None, dict | None]:
+    if requested_manifest is not None:
+        candidate = requested_manifest.resolve()
+        if not candidate.is_file():
+            raise ValueError(f"manifest not found: {candidate}")
+        return candidate, json.loads(candidate.read_text(encoding="utf-8"))
+
+    candidates = [result_path.parent / "manifest.json"]
+    if input_path is not None:
+        candidates.append(input_path.parent / "manifest.json")
     for candidate in candidates:
         if candidate.is_file():
             return candidate, json.loads(candidate.read_text(encoding="utf-8"))
     return None, None
 
 
-def find_record(manifest: dict, path: Path) -> dict | None:
-    for record in manifest.get("records", []):
-        if record.get("path") == path.name:
-            return record
-    return None
+def find_record(manifest_path: Path, manifest: dict, path: Path) -> dict:
+    matches = [
+        record for record in manifest.get("records", [])
+        if (manifest_path.parent / str(record.get("path", ""))).resolve() == path
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"expected one manifest record for {path}, found {len(matches)}")
+    return matches[0]
 
 
-def infer_row_width(
-        result_path: Path,
-        input_path: Path,
-        element_count: int,
-        requested_width: int | None) -> tuple[int, Path | None, dict | None]:
-    manifest_path, manifest = find_manifest(result_path, input_path)
-    if requested_width is not None:
-        return requested_width, manifest_path, manifest
-    if manifest is None:
-        return element_count, None, None
-
-    result_record = find_record(manifest, result_path)
-    input_record = find_record(manifest, input_path)
-    if result_record is None or input_record is None:
-        raise ValueError("both binaries must have records in the adjacent manifest.json")
-    if result_record.get("op") != "RMS_NORM" or input_record.get("op") != "RMS_NORM":
-        raise ValueError("the selected manifest records are not RMS_NORM exports")
-    if result_record.get("role") != "dst" or input_record.get("role") != "src0":
-        raise ValueError("expected arguments in RESULT(dst) INPUT(src0) order")
-    if result_record.get("dtype") != "f32" or input_record.get("dtype") != "f32":
+def validate_record(record: dict, expected_role: str) -> None:
+    if record.get("op") != "RMS_NORM" or record.get("role") != expected_role:
+        raise ValueError(
+            f"expected role={expected_role} and op=RMS_NORM, got "
+            f"role={record.get('role')} and op={record.get('op')}"
+        )
+    if record.get("dtype") != "f32":
         raise ValueError("only F32 RMS_NORM exports are supported")
+
+
+def resolve_input(
+        result_path: Path,
+        requested_input: Path | None,
+        requested_manifest: Path | None) -> tuple[Path, Path | None, dict | None, dict | None]:
+    manifest_path, manifest = find_manifest(result_path, requested_input, requested_manifest)
+    if manifest is None or manifest_path is None:
+        if requested_input is None:
+            raise ValueError(
+                f"manifest not found next to {result_path}; pass INPUT.bin explicitly"
+            )
+        return requested_input, None, None, None
+
+    result_record = find_record(manifest_path, manifest, result_path)
+    validate_record(result_record, "dst")
+
+    if requested_input is None:
+        node_index = result_record.get("node_index")
+        matches = [
+            record for record in manifest.get("records", [])
+            if record.get("node_index") == node_index
+            and record.get("op") == "RMS_NORM"
+            and record.get("role") == "src0"
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"expected one RMS_NORM src0 record for node {node_index}, found {len(matches)}"
+            )
+        input_record = matches[0]
+        input_path = (manifest_path.parent / str(input_record.get("path", ""))).resolve()
+    else:
+        input_path = requested_input
+        input_record = find_record(manifest_path, manifest, input_path)
+
+    validate_record(input_record, "src0")
+    if result_record.get("node_index") != input_record.get("node_index"):
+        raise ValueError(
+            f"node mismatch: result={result_record.get('node_index')} "
+            f"input={input_record.get('node_index')}"
+        )
     if result_record.get("ne") != input_record.get("ne"):
         raise ValueError(
             f"shape mismatch: result={result_record.get('ne')} input={input_record.get('ne')}"
         )
-    return int(input_record["ne"][0]), manifest_path, manifest
+    return input_path, manifest_path, result_record, input_record
+
+
+def infer_row_width(
+        element_count: int,
+        requested_width: int | None,
+        input_record: dict | None) -> int:
+    if requested_width is not None:
+        return requested_width
+    if input_record is None:
+        return element_count
+    return int(input_record["ne"][0])
 
 
 def detect_mode(result_path: Path, actual: list[float], requested_mode: str) -> str:
@@ -169,20 +251,30 @@ def detect_mode(result_path: Path, actual: list[float], requested_mode: str) -> 
             command = command_path.read_text(encoding="utf-8", errors="replace")
             if "GGML_CUDA_RMS_NORM_QEMU_MODE=qemu_cuda" in command or \
                     "GGML_CUDA_RMS_NORM_QEMU_MODE=qemu " in command:
-                return "qemu-bf16"
+                return "qemu-fp32"
 
     if all((f32_bits(value) & 0xFFFF) == 0 for value in actual):
-        return "qemu-bf16"
+        return "qemu-fp32"
     return "f32"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("result", type=Path, help="RMS_NORM result/dst F32 .bin file")
-    parser.add_argument("input", type=Path, help="RMS_NORM input/src0 F32 .bin file")
+    parser.add_argument(
+        "input",
+        type=Path,
+        nargs="?",
+        help="optional RMS_NORM input/src0; defaults to the same node's src0 in manifest.json",
+    )
+    parser.add_argument("--manifest", type=Path, help="defaults to RESULT.bin's sibling manifest.json")
     parser.add_argument("--epsilon", type=float, default=1.0e-6)
     parser.add_argument("--row-width", type=int, help="override ne[0] when no manifest is available")
-    parser.add_argument("--mode", choices=["auto", "f32", "qemu-bf16"], default="auto")
+    parser.add_argument(
+        "--mode",
+        choices=["auto", "f32", "qemu-fp32", "qemu-bf16"],
+        default="auto",
+    )
     parser.add_argument("--atol", type=float, default=5.0e-5)
     parser.add_argument("--rtol", type=float, default=5.0e-5)
     return parser.parse_args()
@@ -191,22 +283,25 @@ def parse_args() -> argparse.Namespace:
 def run() -> int:
     args = parse_args()
     result_path = args.result.resolve()
-    input_path = args.input.resolve()
+    requested_input = args.input.resolve() if args.input is not None else None
+    input_path, manifest_path, _, input_record = resolve_input(
+        result_path, requested_input, args.manifest
+    )
     actual = read_f32(result_path)
     input_values = read_f32(input_path)
     if len(actual) != len(input_values):
         raise ValueError(f"element count mismatch: result={len(actual)} input={len(input_values)}")
 
-    row_width, manifest_path, _ = infer_row_width(
-        result_path, input_path, len(input_values), args.row_width
-    )
+    row_width = infer_row_width(len(input_values), args.row_width, input_record)
     if row_width <= 0 or len(input_values) % row_width != 0:
         raise ValueError(
             f"element count {len(input_values)} is not divisible by row width {row_width}"
         )
 
     mode = detect_mode(result_path, actual, args.mode)
-    if mode == "qemu-bf16":
+    if mode == "qemu-fp32":
+        expected = rms_norm_qemu_fp32(input_values, row_width, args.epsilon)
+    elif mode == "qemu-bf16":
         expected = rms_norm_qemu_bf16(input_values, row_width, args.epsilon)
     else:
         expected = rms_norm_f32(input_values, row_width, args.epsilon)

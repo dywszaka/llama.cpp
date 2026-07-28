@@ -21,16 +21,19 @@ prefill or decode graph. Edit and run `export.sh` in this directory to launch
 the export and record its artifacts under `experiments/`.
 
 For `OP=RMS_NORM`, each export directory contains an executable
-`verify-rms-norm.py`. Pass the result/dst binary first and the input/src0
-binary second:
+`verify-rms-norm.py`. Pass the result/dst binary; the script locates the same
+node's input/src0 in the adjacent manifest:
 
 ```bash
-./verify-rms-norm.py tensors/0-node1-dst-norm-0.bin tensors/1-node1-src0-CUDA0_inp_embd_0.bin
+./verify-rms-norm.py tensors/0-node1-dst-norm-0.bin
 ```
 
 The script reads shape information from the adjacent `tensors/manifest.json`.
+An explicit input/src0 path remains supported for exports without a manifest.
 It automatically selects the normal F32 algorithm or the deterministic QEMU
-BF16 algorithm used by `export.sh`; `--mode` can override detection.
+FP32-compute/BF16-I/O algorithm used by `export.sh`; `--mode` can override
+detection. The older all-BF16 reconstruction remains available explicitly as
+`--mode qemu-bf16` for legacy captures.
 
 For `OP=MUL_MAT`, the export directory instead contains
 `verify-mul-mat.py`. Pass only the result/dst binary; the script locates the
