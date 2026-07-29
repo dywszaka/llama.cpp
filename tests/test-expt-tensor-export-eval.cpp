@@ -494,6 +494,121 @@ static bool test_soft_max_export_writes_params_and_sinks() {
     return ok;
 }
 
+static bool test_rope_export_writes_params_and_positions() {
+    const char * env_names[] = {
+        "LLAMA_EXPT_TENSOR_EXPORT_DIR",
+        "LLAMA_EXPT_TENSOR_EXPORT_NAME",
+        "LLAMA_EXPT_TENSOR_EXPORT_OP",
+        "LLAMA_EXPT_TENSOR_EXPORT_TYPE",
+        "LLAMA_EXPT_TENSOR_EXPORT_LAYER",
+    };
+    std::vector<std::string> old_values;
+    std::vector<bool> old_present;
+    for (const char * env_name : env_names) {
+        const char * value = std::getenv(env_name);
+        old_present.push_back(value != nullptr);
+        old_values.emplace_back(value ? value : "");
+    }
+
+    const std::string dir = temp_dir() + "-rope";
+    std::filesystem::remove_all(dir);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", dir.c_str(), 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_NAME", "rope-export", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_OP", "ROPE", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_TYPE", "decode", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_LAYER", "0", 1);
+
+    ggml_init_params params = {};
+    params.mem_size = 1024 * 1024;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!expect(ctx != nullptr, "expected ggml context for ROPE export test")) {
+        return false;
+    }
+
+    ggml_tensor * input = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 128, 2, 2);
+    ggml_set_name(input, "rope-input-0");
+    ggml_tensor * positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
+    ggml_set_name(positions, "rope-pos-0");
+    ggml_tensor * dst = ggml_rope_ext(
+            ctx, input, positions, nullptr,
+            128, GGML_ROPE_TYPE_NEOX, 40960,
+            1000000.0f, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+    ggml_set_name(dst, "rope-export-0");
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, dst);
+    const bool retained = llama_expt::tensor_export_maybe_retain_graph(gf);
+
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_sched_t sched = ggml_backend_sched_new(&backend, nullptr, 1, 16, false, true);
+    bool ok = expect(retained, "expected ROPE graph retention") &&
+            expect((dst->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                    "ROPE dst must be retained") &&
+            expect((input->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                    "ROPE src0 must be retained") &&
+            expect((positions->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                    "ROPE src1 positions must be retained") &&
+            expect(backend != nullptr && sched != nullptr, "expected CPU scheduler for ROPE export test") &&
+            expect(ggml_backend_sched_alloc_graph(sched, gf), "expected graph allocation for ROPE export test");
+
+    if (ok) {
+        std::vector<float> input_data((size_t) ggml_nelements(input), 0.0f);
+        std::vector<float> dst_data((size_t) ggml_nelements(dst), 0.0f);
+        const std::vector<int32_t> position_data = { 17, 18 };
+        ggml_backend_tensor_set(input, input_data.data(), 0, input_data.size() * sizeof(float));
+        ggml_backend_tensor_set(positions, position_data.data(), 0, position_data.size() * sizeof(int32_t));
+        ggml_backend_tensor_set(dst, dst_data.data(), 0, dst_data.size() * sizeof(float));
+        ok = expect(llama_expt::tensor_export_graph(sched, gf, false),
+                    "expected ROPE graph export") && ok;
+    }
+
+    if (ok) {
+        std::ifstream in(dir + "/manifest.json", std::ios::binary);
+        const std::string manifest((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        ok = expect(manifest.find("\"op\": \"ROPE\"") != std::string::npos,
+                    "ROPE export must record the op") &&
+             expect(manifest.find("\"role\": \"src1\"") != std::string::npos,
+                    "ROPE export must contain src1 positions") &&
+             expect(manifest.find("\"n_dims\": 128") != std::string::npos,
+                    "ROPE export must record n_dims") &&
+             expect(manifest.find("\"mode\": 2") != std::string::npos,
+                    "ROPE export must record mode") &&
+             expect(manifest.find("\"n_ctx_orig\": 40960") != std::string::npos,
+                    "ROPE export must record n_ctx_orig") &&
+             expect(manifest.find("\"freq_base\": 1000000.0") != std::string::npos,
+                    "ROPE export must record freq_base") &&
+             expect(manifest.find("\"freq_scale\": 1.0") != std::string::npos,
+                    "ROPE export must record freq_scale") &&
+             expect(manifest.find("\"ext_factor\": 0.0") != std::string::npos,
+                    "ROPE export must record ext_factor") &&
+             expect(manifest.find("\"attn_factor\": 1.0") != std::string::npos,
+                    "ROPE export must record attn_factor") &&
+             expect(manifest.find("\"beta_fast\": 32.0") != std::string::npos,
+                    "ROPE export must record beta_fast") &&
+             expect(manifest.find("\"beta_slow\": 1.0") != std::string::npos,
+                    "ROPE export must record beta_slow") &&
+             expect(manifest.find("\"sections\": [") != std::string::npos,
+                    "ROPE export must record sections") && ok;
+    }
+
+    if (sched) {
+        ggml_backend_sched_free(sched);
+    }
+    if (backend) {
+        ggml_backend_free(backend);
+    }
+    ggml_free(ctx);
+    for (size_t i = 0; i < old_values.size(); ++i) {
+        if (old_present[i]) {
+            setenv(env_names[i], old_values[i].c_str(), 1);
+        } else {
+            unsetenv(env_names[i]);
+        }
+    }
+    return ok;
+}
+
 static bool test_manifest_eval_and_rejection() {
     const std::string dir = temp_dir();
     std::filesystem::remove_all(dir);
@@ -725,6 +840,9 @@ int main() {
         return 1;
     }
     if (!test_soft_max_export_writes_params_and_sinks()) {
+        return 1;
+    }
+    if (!test_rope_export_writes_params_and_positions()) {
         return 1;
     }
     if (!test_manifest_eval_and_rejection()) {

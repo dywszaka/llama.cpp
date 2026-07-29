@@ -234,7 +234,10 @@ optional `GGML_OP_` prefix. For the first graph selected by
 populated `dst->src[0..2]` tensors as raw binary spans and records their role,
 dtype, shape, strides, contiguity, and view offset in `manifest.json`. For
 `SOFT_MAX`, the dst record also stores `op_params.scale` and
-`op_params.max_bias`, while `src2` captures optional attention sinks. This mode
+`op_params.max_bias`, while `src2` captures optional attention sinks. For
+`ROPE`, the dst record stores the complete RoPE parameters needed to interpret
+the inputs and validate the output, including `n_dims`, `mode`, `n_ctx_orig`,
+the frequency/scaling values, and multi-RoPE sections. This mode
 marks the matching `dst` and populated `src0` through `src2` storage as graph
 outputs before allocation. During the selected execution, the scheduler also
 stops immediately after each matching node, synchronizes its backend, and

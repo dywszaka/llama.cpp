@@ -596,20 +596,54 @@ bool write_op_tensor(
 }
 
 json op_dst_metadata(const ggml_tensor * dst) {
-    if (!dst || dst->op != GGML_OP_SOFT_MAX) {
+    if (!dst) {
         return json::object();
     }
 
-    float scale = 1.0f;
-    float max_bias = 0.0f;
-    std::memcpy(&scale, (const float *) dst->op_params + 0, sizeof(scale));
-    std::memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(max_bias));
-    return {
-        { "op_params", {
-            { "scale", scale },
-            { "max_bias", max_bias },
-        } },
-    };
+    if (dst->op == GGML_OP_SOFT_MAX) {
+        float scale = 1.0f;
+        float max_bias = 0.0f;
+        std::memcpy(&scale, (const float *) dst->op_params + 0, sizeof(scale));
+        std::memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(max_bias));
+        return {
+            { "op_params", {
+                { "scale", scale },
+                { "max_bias", max_bias },
+            } },
+        };
+    }
+
+    if (dst->op == GGML_OP_ROPE) {
+        const int32_t * params = (const int32_t *) dst->op_params;
+        float freq_base = 0.0f;
+        float freq_scale = 0.0f;
+        float ext_factor = 0.0f;
+        float attn_factor = 0.0f;
+        float beta_fast = 0.0f;
+        float beta_slow = 0.0f;
+        std::memcpy(&freq_base,   params +  5, sizeof(freq_base));
+        std::memcpy(&freq_scale,  params +  6, sizeof(freq_scale));
+        std::memcpy(&ext_factor,  params +  7, sizeof(ext_factor));
+        std::memcpy(&attn_factor, params +  8, sizeof(attn_factor));
+        std::memcpy(&beta_fast,   params +  9, sizeof(beta_fast));
+        std::memcpy(&beta_slow,   params + 10, sizeof(beta_slow));
+        return {
+            { "op_params", {
+                { "n_dims", params[1] },
+                { "mode", params[2] },
+                { "n_ctx_orig", params[4] },
+                { "freq_base", freq_base },
+                { "freq_scale", freq_scale },
+                { "ext_factor", ext_factor },
+                { "attn_factor", attn_factor },
+                { "beta_fast", beta_fast },
+                { "beta_slow", beta_slow },
+                { "sections", { params[11], params[12], params[13], params[14] } },
+            } },
+        };
+    }
+
+    return json::object();
 }
 
 bool read_contiguous_tensor_f32(

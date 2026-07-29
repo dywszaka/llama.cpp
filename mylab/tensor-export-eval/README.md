@@ -72,3 +72,18 @@ deterministic QEMU BF16 algorithm selected by
 automatic detection. It also requires every exported `src0`/KQ F32 value to be
 BF16-representable (`f32_bits & 0xffff == 0`) and fails validation if any input
 value retains non-zero low 16 bits.
+
+For `OP=ROPE`, each export directory contains `verify-rope.py` together with
+the static 8192-position CUDA cos/sin table and its manifest. The default
+`export.sh` configuration captures the first decode graph's `Qcur-0` RoPE node:
+
+```bash
+./verify-rope.py tensors/0-node7-dst-Qcur-0.bin
+```
+
+The validator resolves `src0`, the I32 position tensor (`src1`), and all RoPE
+parameters from `tensors/manifest.json`. For each position and rotary pair it
+looks up cos/sin in `rope-cos-sin-f32.bin`; it does not recompute trigonometric
+values. The bundled table covers Qwen3-8B GPT-NeoX RoPE with positions
+`[0, 8192)`, `n_dims=128`, and `freq_base=1000000`, and the validator rejects
+incompatible parameters or frequency-factor inputs.
