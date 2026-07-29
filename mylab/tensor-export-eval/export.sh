@@ -28,7 +28,7 @@ RMS_NORM_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-rms-norm.
 MUL_MAT_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-mul-mat.py"
 SOFT_MAX_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-soft-max.py"
 ROPE_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-rope.py"
-ROPE_COS_SIN_DIR="${ROOT_DIR}/experiments/20260728T102936Z-rope-cos-sin-context-8192"
+ROPE_COS_SIN_DIR="${ROPE_COS_SIN_DIR:-${ROOT_DIR}/experiments/20260728T102936Z-rope-cos-sin-context-8192}"
 ROPE_COS_SIN_MANIFEST_SOURCE="${ROPE_COS_SIN_DIR}/manifest.json"
 ROPE_COS_SIN_DATA_SOURCE="${ROPE_COS_SIN_DIR}/rope-cos-sin-f32.bin"
 

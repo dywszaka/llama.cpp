@@ -87,3 +87,15 @@ looks up cos/sin in `rope-cos-sin-f32.bin`; it does not recompute trigonometric
 values. The bundled table covers Qwen3-8B GPT-NeoX RoPE with positions
 `[0, 8192)`, `n_dims=128`, and `freq_base=1000000`, and the validator rejects
 incompatible parameters or frequency-factor inputs.
+
+To generate a cos/sin table for another context size:
+
+```bash
+mylab/tensor-export-eval/export-rope-cos-sin.sh 8192
+```
+
+The script writes `rope-cos-sin-f32.bin` plus `manifest.json` under a timestamped
+`experiments/*-rope-cos-sin-context-N/` directory. It uses the CUDA `GGML_OP_ROPE`
+kernel with Qwen3-8B defaults; override `N_DIMS`, `FREQ_BASE`, `N_CTX_ORIG`, or
+other RoPE parameters through environment variables when validating a different
+model. `export.sh` can consume a generated table by setting `ROPE_COS_SIN_DIR`.
