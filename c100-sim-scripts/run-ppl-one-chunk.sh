@@ -2,7 +2,8 @@
 # ---------------------------------------------------------------------------
 # One-chunk PPL runner for the CUDA+C100 build, with two modes:
 #   baseline      CUDA-only baseline PPL run
-#   c100-softmax  C100 softmax run (LLAMA_EXPT_C100_SOFT_MAX=1)
+#   c100-softmax  C100 softmax smoke run (layer selected by
+#                 LLAMA_C100_SOFTMAX_LAYER, default: 0)
 #
 # Usage: run-ppl-one-chunk.sh <baseline|c100-softmax>
 #
@@ -44,6 +45,7 @@ case "${MODE}" in
     TIME_REL="${EXP_REL}/results/time.txt"
     DEVICE_ARGS=(--device CUDA0)
     SET_C100_SOFTMAX=0
+    C100_SOFTMAX_LAYER=""
     REGISTER_C100_DEVICE=0
     SCHED_DEBUG=0
     REQUIRE_PPL=0
@@ -54,6 +56,7 @@ case "${MODE}" in
     TIME_REL="${EXP_REL}/results/time-c100-softmax.txt"
     DEVICE_ARGS=(--device CUDA0,C100 --tensor-split 1,0)
     SET_C100_SOFTMAX=1
+    C100_SOFTMAX_LAYER="${LLAMA_C100_SOFTMAX_LAYER:-0}"
     REGISTER_C100_DEVICE=1
     SCHED_DEBUG=2
     REQUIRE_PPL=1
@@ -79,7 +82,8 @@ if [ -z "${LLAMA_IN_DOCKER:-}" ]; then
       C100_MAX_SIMULATION_CYCLES \
       C100_MAX_POLL_ITERATIONS \
       C100_POLL_INTERVAL_US \
-      C100_SOFTMAX_MAX_POLL_ITERATIONS; do
+      C100_SOFTMAX_MAX_POLL_ITERATIONS \
+      LLAMA_C100_SOFTMAX_LAYER; do
     if [ -n "${!env_name:-}" ]; then
       DOCKER_ENV_ARGS+=(-e "${env_name}=${!env_name}")
     fi
@@ -92,6 +96,7 @@ if [ -z "${LLAMA_IN_DOCKER:-}" ]; then
       -e CUDA_VISIBLE_DEVICES=0 \
       -e LLAMA_C100_REGISTER_DEVICE="${REGISTER_C100_DEVICE}" \
       -e LLAMA_PPL_MODE="${MODE}" \
+      -e LLAMA_C100_SOFTMAX_LAYER="${C100_SOFTMAX_LAYER}" \
       "${DOCKER_ENV_ARGS[@]}" \
       --entrypoint "" \
       "${RUNTIME_IMAGE}" \
@@ -140,14 +145,16 @@ status=0
 (
   export CUDA_VISIBLE_DEVICES=0
   # 在 compute_forward 计算时，把计算结果dst 中的 data 从 f32 round 到 bf16（仍然是 f32 表示）
-  #export GGML_CUDA_TRUNC_ENABLE=1
+  export GGML_CUDA_TRUNC_ENABLE=1
   export PROJECT_ROOT="${CONTAINER_ROOT}/build-cuda-c100"
   export LD_LIBRARY_PATH="${CONTAINER_ROOT}/build-cuda-c100/bin:/usr/local/cuda/lib64"
   export LLAMA_C100_REGISTER_DEVICE="${REGISTER_C100_DEVICE}"
   if [ "${SET_C100_SOFTMAX}" -eq 1 ]; then
     export LLAMA_EXPT_C100_SOFT_MAX=1
+    export LLAMA_C100_SOFTMAX_LAYER="${C100_SOFTMAX_LAYER}"
   else
     unset LLAMA_EXPT_C100_SOFT_MAX || true
+    unset LLAMA_C100_SOFTMAX_LAYER || true
   fi
   if [ "${SCHED_DEBUG}" -gt 0 ]; then
     export GGML_SCHED_DEBUG="${SCHED_DEBUG}"
@@ -165,7 +172,7 @@ status=0
       --batch-size 512 \
       --ubatch-size 512 \
       -t 32 \
-      -c 512 \
+      -c 256 \
       --kv-unified \
       --chunks 1
 ) 2>&1 | tee "${LOG}" || status="${PIPESTATUS[0]}"

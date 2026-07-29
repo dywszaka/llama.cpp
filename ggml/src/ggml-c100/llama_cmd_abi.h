@@ -1,7 +1,11 @@
 #ifndef LLAMA_CMD_ABI_H
 #define LLAMA_CMD_ABI_H
 
+#ifdef __KERNEL__
+#include <linux/types.h>
+#else
 #include <stdint.h>
+#endif
 
 // Shared llama.cpp CMD/RESULT ABI.
 // This file is intentionally duplicated in firmware/ and ext/llama.cpp/.
@@ -21,6 +25,8 @@ enum {
 #define LLAMA_CMD_ID_SILU 0x05
 #define LLAMA_CMD_ID_ROPE 0x06
 #define LLAMA_CMD_ID_EXT_PARAM_DEBUG 0x07
+#define LLAMA_CMD_ID_GLU 0x08
+#define LLAMA_CMD_ID_REDUCE_ADD 0x09
 
 #define LLAMA_CMD_ID_MUL_MAT 0x20
 
@@ -33,15 +39,33 @@ enum {
 #define LLAMA_CMD_ID_CONT 0x16
 
 #define LLAMA_SOFTMAX_FLAG_HAS_MASK 0x1u
+#define LLAMA_GLU_FLAG_HAS_SRC1 0x1u
+#define LLAMA_GLU_FLAG_SWAPPED 0x2u
 
 #define LLAMA_CMD_FLAG_EXT_PARAM 0x1u
+
+#define LLAMA_CPY_MODE_SHIFT 8u
+#define LLAMA_CPY_MODE_MASK (0x3u << LLAMA_CPY_MODE_SHIFT)
+#define LLAMA_CPY_MODE_CE 0u
+#define LLAMA_CPY_MODE_S2M 1u
+#define LLAMA_CPY_MODE_M2S 2u
+#define LLAMA_CPY_DMA_ID_MASK 0x3u
+
+static inline uint32_t llama_cmd_cpy_mode(uint32_t flags) {
+    return (flags & LLAMA_CPY_MODE_MASK) >> LLAMA_CPY_MODE_SHIFT;
+}
+
+static inline uint32_t llama_cmd_cpy_flags(uint32_t flags, uint32_t mode) {
+    return (flags & ~LLAMA_CPY_MODE_MASK) |
+           ((mode << LLAMA_CPY_MODE_SHIFT) & LLAMA_CPY_MODE_MASK);
+}
 
 #define LLAMA_STATUS_IDLE 0
 #define LLAMA_STATUS_RUNNING 1
 #define LLAMA_STATUS_DONE 2
 #define LLAMA_STATUS_ERROR 3
 
-#define LLAMA_CMD_STATUS_OFFSET 0x20
+#define LLAMA_CMD_STATUS_OFFSET 0x34
 
 #define LLAMA_ERROR_SUCCESS 0
 #define LLAMA_ERROR_INVALID_CMD_ID 1
@@ -128,15 +152,15 @@ static inline const void* llama_ext_param_payload(const llama_ext_param_header_t
 typedef struct {
     uint32_t cmd_magic;
     uint32_t cmd_id;
-    uint32_t src0_addr;
+    uint64_t src0_addr;
     uint32_t src0_size;
-    uint32_t src1_addr;
+    uint64_t src1_addr;
     uint32_t src1_size;
-    uint32_t dst_addr;
+    uint64_t dst_addr;
     uint32_t dst_size;
     uint32_t status;
     uint32_t flags;
-    uint32_t ext_param_addr;
+    uint64_t ext_param_addr;
     uint32_t ext_param_size;
     uint32_t params[8];
 } llama_cmd_header_t;

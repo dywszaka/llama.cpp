@@ -61,6 +61,17 @@ include `GGML_SCHED_DEBUG=2` and a device list that makes C100 visible to the
 scheduler, for example `--device CUDA0,C100`. If C100 should not receive model
 weights, also provide a split such as `--tensor-split 1,0`.
 
+### `LLAMA_C100_SOFTMAX_LAYER`
+
+Optional layer filter for `LLAMA_EXPT_C100_SOFT_MAX`. Default: unset, meaning
+all eligible non-flash attention SoftMax nodes are pinned when
+`LLAMA_EXPT_C100_SOFT_MAX=1`.
+
+When set to a non-negative layer index, only the matching
+`kq_soft_max_ext-<layer>` node is pinned to the scheduler's existing C100
+backend. This is useful for bounded smoke validation because full all-layer
+SoftMax simulation is very slow under Spike.
+
 ## Tensor Export and Offline Quantization Evaluation
 
 ### `LLAMA_EXPT_NVFP4_K_OFFLINE_CHANNEL_ORDER`

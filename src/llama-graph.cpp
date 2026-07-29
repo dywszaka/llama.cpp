@@ -13,6 +13,7 @@
 #include "expt/nvfp4-k-offline-channel-order.h"
 
 #include <cassert>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,21 @@ static bool llama_env_flag_enabled(const char * name) {
 
 static bool llama_expt_c100_soft_max_enabled() {
     return llama_env_flag_enabled("LLAMA_EXPT_C100_SOFT_MAX");
+}
+
+static int llama_expt_c100_soft_max_layer() {
+    const char * value = std::getenv("LLAMA_C100_SOFTMAX_LAYER");
+    if (value == nullptr || value[0] == '\0') {
+        return -1;
+    }
+
+    char * end = nullptr;
+    long layer = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || layer < 0 || layer > INT_MAX) {
+        return -1;
+    }
+
+    return (int) layer;
 }
 
 static ggml_backend_t llama_sched_find_backend_by_name(ggml_backend_sched_t sched, const char * name) {
@@ -45,8 +61,13 @@ static ggml_backend_t llama_sched_find_backend_by_name(ggml_backend_sched_t sche
     return nullptr;
 }
 
-static void llama_expt_pin_soft_max_to_c100(ggml_backend_sched_t sched, ggml_tensor * soft_max) {
+static void llama_expt_pin_soft_max_to_c100(ggml_backend_sched_t sched, ggml_tensor * soft_max, int il) {
     if (!llama_expt_c100_soft_max_enabled() || soft_max == nullptr) {
+        return;
+    }
+
+    const int target_layer = llama_expt_c100_soft_max_layer();
+    if (target_layer >= 0 && il != target_layer) {
         return;
     }
 
@@ -72,7 +93,12 @@ static void llama_expt_pin_soft_max_to_c100(ggml_backend_sched_t sched, ggml_ten
 
     ggml_backend_sched_set_tensor_backend(sched, soft_max, c100_backend);
     if (!logged_pinned) {
-        LLAMA_LOG_INFO("%s: LLAMA_EXPT_C100_SOFT_MAX=1, pinning non-flash attention SOFT_MAX nodes to C100\n", __func__);
+        if (target_layer >= 0) {
+            LLAMA_LOG_INFO("%s: LLAMA_EXPT_C100_SOFT_MAX=1, pinning layer %d non-flash attention SOFT_MAX nodes to C100\n",
+                    __func__, target_layer);
+        } else {
+            LLAMA_LOG_INFO("%s: LLAMA_EXPT_C100_SOFT_MAX=1, pinning non-flash attention SOFT_MAX nodes to C100\n", __func__);
+        }
         logged_pinned = true;
     }
 }
@@ -1449,7 +1475,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
 
         kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
-        llama_expt_pin_soft_max_to_c100(sched, kq);
+        llama_expt_pin_soft_max_to_c100(sched, kq, il);
         cb(kq, "kq_soft_max_ext", il);
         ggml_soft_max_add_sinks(kq, sinks);
 

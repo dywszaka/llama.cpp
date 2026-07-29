@@ -18,6 +18,8 @@ cat > "${FAKE_BIN_DIR}/llama-perplexity" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "LLAMA_C100_REGISTER_DEVICE=${LLAMA_C100_REGISTER_DEVICE:-}"
+echo "LLAMA_EXPT_C100_SOFT_MAX=${LLAMA_EXPT_C100_SOFT_MAX:-}"
+echo "LLAMA_C100_SOFTMAX_LAYER=${LLAMA_C100_SOFTMAX_LAYER:-}"
 echo "ARGS=$*"
 echo "Final estimate: PPL = 1.0"
 EOF
@@ -44,4 +46,6 @@ CONTAINER_ROOT="${FAKE_ROOT}" \
 "${SCRIPT}" c100-softmax > "${OUTPUT_LOG}" 2>&1
 
 grep -q '^LLAMA_C100_REGISTER_DEVICE=1$' "${OUTPUT_LOG}"
+grep -q '^LLAMA_EXPT_C100_SOFT_MAX=1$' "${OUTPUT_LOG}"
+grep -q '^LLAMA_C100_SOFTMAX_LAYER=0$' "${OUTPUT_LOG}"
 grep -q 'ARGS=--device CUDA0,C100 --tensor-split 1,0' "${OUTPUT_LOG}"

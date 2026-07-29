@@ -361,10 +361,20 @@ target_include_directories(c100_sim_ve INTERFACE ${C100_SIM_COMMON_INCLUDES})
 target_compile_definitions(c100_sim_ve INTERFACE SPDLOG_HEADER_ONLY)
 target_link_libraries(c100_sim_ve INTERFACE c100_sim_common)
 
+add_library(c100_sim_ctrl_cpu INTERFACE)
+target_include_directories(c100_sim_ctrl_cpu INTERFACE ${C100_SIM_COMMON_INCLUDES})
+target_compile_definitions(c100_sim_ctrl_cpu INTERFACE SPDLOG_HEADER_ONLY)
+target_link_libraries(c100_sim_ctrl_cpu INTERFACE c100_sim_common)
+
 add_library(c100_sim_simulator STATIC
-    "${C100_SIM_SRC_DIR}/top/simulator.cpp"
+    "${C100_SIM_SRC_DIR}/top/c100_address_router.cpp"
+    "${C100_SIM_SRC_DIR}/top/chip.cpp"
+    "${C100_SIM_SRC_DIR}/top/doorbell_int.cpp"
+    "${C100_SIM_SRC_DIR}/top/hcu.cpp"
     "${C100_SIM_SRC_DIR}/top/m2s_dma_bus_device.cpp"
-    "${C100_SIM_SRC_DIR}/top/ring_buffer_bus_device.cpp")
+    "${C100_SIM_SRC_DIR}/top/pcie_top.cpp"
+    "${C100_SIM_SRC_DIR}/top/ring_buffer_bus_device.cpp"
+    "${C100_SIM_SRC_DIR}/top/chip_noc.cpp")
 c100_sim_target_defaults(c100_sim_simulator)
 target_include_directories(c100_sim_simulator PUBLIC
     "${C100_SIM_SRC_DIR}/top"
@@ -379,6 +389,7 @@ target_link_libraries(c100_sim_simulator PUBLIC
     c100_sim_ring_buffer
     c100_sim_su
     c100_sim_ve
+    c100_sim_ctrl_cpu
     c100_sim_copy_engine
     c100_sim_gemm
     c100_sim_tensor_common
@@ -417,6 +428,11 @@ function(c100_add_firmware_target name cpu_type)
     set(build_dir "${C100_SIM_FIRMWARE_BUILD_DIR}/llama.cpp/${cpu_type}")
     set(out_elf "${build_dir}/firmware.elf")
     set(copied_elf "${C100_RUNTIME_FIRMWARE_DIR}/${cpu_type}.elf")
+    file(GLOB_RECURSE firmware_deps CONFIGURE_DEPENDS
+        "${src_dir}/*"
+        "${C100_SIM_ROOT}/firmware/llama.cpp/common/*"
+        "${C100_SIM_ROOT}/firmware/llama.cpp/operators/*"
+        "${C100_SIM_ROOT}/firmware/common/*")
 
     add_custom_command(
         OUTPUT "${copied_elf}"
@@ -430,6 +446,7 @@ function(c100_add_firmware_target name cpu_type)
                 all
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${C100_RUNTIME_FIRMWARE_DIR}"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${out_elf}" "${copied_elf}"
+        DEPENDS ${firmware_deps}
         WORKING_DIRECTORY "${src_dir}"
         COMMENT "Building C100 ${name} firmware")
 endfunction()

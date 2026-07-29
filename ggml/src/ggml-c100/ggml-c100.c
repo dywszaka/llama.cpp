@@ -471,6 +471,37 @@ static void c100_prepare_add_cmd(
     cmd->status = CMD_STATUS_RUNNING;
 }
 
+static void c100_dump_cmd_header(const LlamaCmdHeader* cmd) {
+    if (!cmd) {
+        return;
+    }
+
+    fprintf(stderr,
+            "[ERROR] C100: timeout cmd: magic=0x%08x cmd_id=%u status=%u flags=0x%x "
+            "src0=0x%llx/%u src1=0x%llx/%u dst=0x%llx/%u ext=0x%llx/%u "
+            "params=[0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x]\n",
+            cmd->cmd_magic,
+            cmd->cmd_id,
+            cmd->status,
+            cmd->flags,
+            (unsigned long long)cmd->src0_addr,
+            cmd->src0_size,
+            (unsigned long long)cmd->src1_addr,
+            cmd->src1_size,
+            (unsigned long long)cmd->dst_addr,
+            cmd->dst_size,
+            (unsigned long long)cmd->ext_param_addr,
+            cmd->ext_param_size,
+            cmd->params[0],
+            cmd->params[1],
+            cmd->params[2],
+            cmd->params[3],
+            cmd->params[4],
+            cmd->params[5],
+            cmd->params[6],
+            cmd->params[7]);
+}
+
 /**
  * @brief Prepare a CMD header for Mul operation (element-wise)
  */
@@ -843,6 +874,12 @@ static bool c100_poll_cmd_done_with_limit(uint32_t* cycles, int max_iterations) 
             "[ERROR] C100: command poll timeout after %d iterations "
             "(interval_us=%d, last_status=%u)\n",
             iterations, poll_interval_us, last_status);
+    if (c100_llama_read_cmd) {
+        LlamaCmdHeader cmd;
+        if (c100_llama_read_cmd(&cmd)) {
+            c100_dump_cmd_header(&cmd);
+        }
+    }
     return false;  // Timeout
 }
 

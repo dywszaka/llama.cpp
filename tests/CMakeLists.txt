@@ -142,6 +142,48 @@ if (NOT WIN32)
 
     llama_test_cmd(
         bash
+        NAME test-c100-cmd-abi
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-cmd-abi.sh
+    )
+
+    llama_test_cmd(
+        bash
+        NAME test-c100-spike-dram-remap
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-spike-dram-remap.sh
+    )
+
+    llama_test_cmd(
+        bash
+        NAME test-c100-scoreboard-scan
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-scoreboard-scan.sh
+    )
+
+    llama_test_cmd(
+        bash
+        NAME test-c100-firmware-cmake-deps
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-firmware-cmake-deps.sh
+    )
+
+    llama_test_cmd(
+        bash
+        NAME test-c100-poll-timeout-diagnostics
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-poll-timeout-diagnostics.sh
+    )
+
+    llama_test_cmd(
+        bash
+        NAME test-c100-softmax-layer-filter
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-softmax-layer-filter.sh
+    )
+
+    llama_test_cmd(
+        bash
         NAME test-c100-softmax-run-ppl-one-chunk
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         ARGS ${CMAKE_CURRENT_SOURCE_DIR}/test-c100-softmax-run-ppl-one-chunk.sh
