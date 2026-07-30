@@ -393,6 +393,20 @@ void ggml_cuda_nvfp4_log_vcache_batched_switch_once(const char * env, bool enabl
                     : "disabled, using the existing per-head native V-cache path");
 }
 
+void ggml_cuda_nvfp4_log_vcache_qemu_switch_once(const char * env, bool enabled) {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_INFO(
+            "%s: GGML_CUDA_NVFP4_VCACHE_QEMU=%s -> %s\n",
+            __func__,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, trying the qemu-cuda-ops V-cache P*V algorithm before native-slice"
+                    : "disabled, using the release CUDA NVFP4 V-cache path");
+}
+
 void ggml_cuda_nvfp4_log_vcache_batched_fallback_once() {
     static std::atomic<bool> logged(false);
     if (logged.exchange(true)) {

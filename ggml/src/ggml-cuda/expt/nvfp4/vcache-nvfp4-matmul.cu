@@ -16,6 +16,16 @@ static bool ggml_cuda_nvfp4_vcache_cublaslt_trace_enabled() {
     return cached != 0;
 }
 
+static bool ggml_cuda_nvfp4_vcache_qemu_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_VCACHE_QEMU");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+        ggml_cuda_nvfp4_log_vcache_qemu_switch_once(env, cached != 0);
+    }
+    return cached != 0;
+}
+
 static bool ggml_cuda_is_vcache_nvfp4_tensor(const ggml_tensor * src0) {
     if (src0 == nullptr || src0->type != GGML_TYPE_NVFP4) {
         return false;
@@ -207,6 +217,15 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
         return false;
     }
 
+    ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
+
+    if (ggml_cuda_nvfp4_vcache_qemu_enabled()) {
+        if (ggml_cuda_mul_mat_vcache_nvfp4_qemu(ctx, src0, src1, dst)) {
+            ggml_cuda_nvfp4_log_vcache_matmul_path_once("qemu-cuda-ops");
+            return true;
+        }
+    }
+
     const ggml_tensor * scale = ggml_tensor_get_nvfp4_scale(src0);
     int64_t rows = 0;
     int64_t kv_heads = 0;
@@ -245,7 +264,6 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
 
     const int64_t r2 = q_heads / kv_heads;
     const int64_t r3 = q_streams / kv_streams;
-    ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
 
     if (ggml_cuda_nvfp4_vcache_batched_enabled()) {
         if (ggml_cuda_mul_mat_vcache_nvfp4_batched(ctx, src0, src1, dst)) {

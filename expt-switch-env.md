@@ -107,6 +107,18 @@ nearest-neighbor NVFP4 activation quantizer. If the shape is unsupported or a
 conflicting quantizer/layout/custom-matmul experiment is enabled, the runtime
 logs once and falls back to the existing per-head native path.
 
+### `GGML_CUDA_NVFP4_VCACHE_QEMU`
+
+Enables the qemu-cuda-ops CUDA NVFP4 V-cache P*V algorithm. Default:
+unset/off, preserving the release CUDA NVFP4 V-cache path.
+
+When enabled, the V-cache dispatcher tries the qemu-cuda-ops algorithm before
+the batched or per-head native-slice release paths. This path supports the old
+per-block external-scale V-cache layout as well as the global-scale layout,
+quantizes dense F32 P rows to temporary NVFP4, then uses its cuBLASLt FP4 path
+when available and its custom CUDA FP4 kernel otherwise. If the qemu path does
+not accept the shape, execution continues to the existing release paths.
+
 ### `GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK`
 
 Validation switch for native CUDA NVFP4 matmul. Default: unset/off.
