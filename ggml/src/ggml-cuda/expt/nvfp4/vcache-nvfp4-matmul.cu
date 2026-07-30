@@ -276,6 +276,15 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
     } else {
         ggml_cuda_nvfp4_log_vcache_native_slice_failure_once(
                 rows, cols, kv_size, q_heads, q_streams);
+        GGML_ABORT(
+                "%s: native-slice NVFP4 V-cache p*v matmul failed; aborting before generic NVFP4 fallback "
+                "rows=%lld cols=%lld kv_size=%lld q_heads=%lld q_streams=%lld",
+                __func__,
+                (long long) rows,
+                (long long) cols,
+                (long long) kv_size,
+                (long long) q_heads,
+                (long long) q_streams);
     }
     return native_result;
 }

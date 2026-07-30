@@ -557,6 +557,57 @@ void ggml_cuda_nvfp4_log_fp4mulmat_native_path(
             used_dynamic_scale ? 1 : 0);
 }
 
+void ggml_cuda_nvfp4_log_native_cublaslt_kernel_path(
+        const char * caller,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        const ggml_tensor * dst,
+        int64_t ne01,
+        int64_t ne11,
+        int64_t ne10,
+        int64_t lt_k,
+        bool used_dynamic_scale,
+        bool row_split,
+        bool verbose) {
+    const char * dst_name = ggml_get_name(dst);
+    const bool is_vcache_pv = dst_name != nullptr && strcmp(dst_name, "nvfp4-vcache-native-pv") == 0;
+    const bool is_kq = dst_name != nullptr && strncmp(dst_name, "kq-", 3) == 0;
+    const bool is_decode = ne11 == 1;
+    static std::atomic<int> log_count_general(0);
+    static std::atomic<int> log_count_vcache(0);
+    static std::atomic<bool> logged_kq_prefill(false);
+    static std::atomic<bool> logged_kq_decode(false);
+    static std::atomic<bool> logged_vcache_prefill(false);
+    static std::atomic<bool> logged_vcache_decode(false);
+    const int seen = is_vcache_pv ? log_count_vcache.fetch_add(1) : log_count_general.fetch_add(1);
+    bool should_log = verbose ? (seen < 16) : (seen == 0);
+    if (is_kq) {
+        should_log = should_log || !(is_decode ? logged_kq_decode : logged_kq_prefill).exchange(true);
+    }
+    if (is_vcache_pv) {
+        should_log = should_log || !(is_decode ? logged_vcache_decode : logged_vcache_prefill).exchange(true);
+    }
+    if (!should_log) {
+        return;
+    }
+
+    GGML_LOG_INFO(
+            "%s: CUDA NVFP4 native FP4 matmul kernel=cublasLt-fp4 dst=%s phase=%s "
+            "graph_src0_type=%s graph_src1_type=%s kernel_a_type=nvfp4 kernel_b_type=nvfp4 "
+            "ne01=%lld ne11=%lld ne10=%lld lt_k=%lld dynamic_scale=%d row_split=%d\n",
+            caller,
+            dst_name,
+            is_decode ? "decode" : "prefill",
+            src0 != nullptr ? ggml_type_name(src0->type) : "(null)",
+            src1 != nullptr ? ggml_type_name(src1->type) : "(null)",
+            (long long) ne01,
+            (long long) ne11,
+            (long long) ne10,
+            (long long) lt_k,
+            used_dynamic_scale ? 1 : 0,
+            row_split ? 1 : 0);
+}
+
 void ggml_cuda_nvfp4_log_fp4mulmat_vcache_kernel_once(
         const char * kernel,
         int64_t rows,

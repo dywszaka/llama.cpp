@@ -168,6 +168,19 @@ void ggml_cuda_nvfp4_log_fp4mulmat_native_path(
         bool used_dynamic_scale,
         bool verbose);
 
+void ggml_cuda_nvfp4_log_native_cublaslt_kernel_path(
+        const char * caller,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        const ggml_tensor * dst,
+        int64_t ne01,
+        int64_t ne11,
+        int64_t ne10,
+        int64_t lt_k,
+        bool used_dynamic_scale,
+        bool row_split,
+        bool verbose);
+
 void ggml_cuda_nvfp4_log_fp4mulmat_vcache_kernel_once(
         const char * kernel,
         int64_t rows,

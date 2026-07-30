@@ -835,6 +835,9 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         return true;
     }
 
+    ggml_cuda_nvfp4_log_native_cublaslt_kernel_path(
+            __func__, src0, src1, dst, ne01, ne11, ne10, lt_k, used_dynamic_scale, row_split_mode, debug_enabled);
+
     ggml_cuda_nvfp4_split_blocks_cuda(
             src1_q_nvfp4.get(),
             src1_repacked_data.get(),
