@@ -5,7 +5,9 @@
 #include "nvfp4-log.cuh"
 #include "nvfp4-quantize.cuh"
 
+#include <algorithm>
 #include <cstdlib>
+#include <vector>
 
 // The implementation started from the detached all-head V-cache path. The experiment keeps
 // its low-overhead scheduling structure while matching the current native-slice scale semantics.
@@ -24,6 +26,16 @@ bool ggml_cuda_nvfp4_vcache_batched_enabled() {
         const char * env = std::getenv("GGML_CUDA_NVFP4_VCACHE_BATCHED");
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
         ggml_cuda_nvfp4_log_vcache_batched_switch_once(env, cached != 0);
+    }
+    return cached != 0;
+}
+
+bool ggml_cuda_nvfp4_vcache_parallel_lt_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = std::getenv("GGML_CUDA_NVFP4_VCACHE_PARALLEL_LT");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+        ggml_cuda_nvfp4_log_vcache_parallel_lt_switch_once(env, cached != 0);
     }
     return cached != 0;
 }
@@ -301,49 +313,12 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
             row_data_bytes, b_data_nbytes, scale_inner_padded, b_scale_nbytes);
     CUDA_CHECK(cudaGetLastError());
 
-    cublasLtMatmulDesc_t op_desc = nullptr;
     cublasLtMatrixLayout_t a_desc = nullptr;
     cublasLtMatrixLayout_t b_desc = nullptr;
     cublasLtMatrixLayout_t c_desc = nullptr;
-    const char * stage = "matmul_desc_create";
-    cublasStatus_t st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    const char * stage = "layout_create_a";
+    cublasStatus_t st = CUBLAS_STATUS_SUCCESS;
     if (st == CUBLAS_STATUS_SUCCESS) {
-        const cudaDataType_t scale_type = CUDA_R_32F;
-        stage = "matmul_desc_set_scale_type";
-        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_SCALE_TYPE, &scale_type, sizeof(scale_type));
-    }
-    if (st == CUBLAS_STATUS_SUCCESS) {
-        const cublasOperation_t op_t = CUBLAS_OP_T;
-        stage = "matmul_desc_set_transa";
-        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_t, sizeof(op_t));
-    }
-    if (st == CUBLAS_STATUS_SUCCESS) {
-        const cublasOperation_t op_n = CUBLAS_OP_N;
-        stage = "matmul_desc_set_transb";
-        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n));
-    }
-    if (st == CUBLAS_STATUS_SUCCESS) {
-        const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
-        stage = "matmul_desc_set_a_scale_mode";
-        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode, sizeof(scale_mode));
-    }
-    if (st == CUBLAS_STATUS_SUCCESS) {
-        const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
-        stage = "matmul_desc_set_b_scale_mode";
-        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode, sizeof(scale_mode));
-    }
-    if (st == CUBLAS_STATUS_SUCCESS) {
-        const void * a_scale_ptr = a_scale.get();
-        stage = "matmul_desc_set_a_scale_ptr";
-        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_ptr, sizeof(a_scale_ptr));
-    }
-    if (st == CUBLAS_STATUS_SUCCESS) {
-        const void * b_scale_ptr = b_scale.get();
-        stage = "matmul_desc_set_b_scale_ptr";
-        st = cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr));
-    }
-    if (st == CUBLAS_STATUS_SUCCESS) {
-        stage = "layout_create_a";
         st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) lt_k, (uint64_t) rows, (int64_t) lt_k);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
@@ -370,6 +345,65 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
         st = cublasLtMatrixLayoutSetAttribute(c_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
     }
 
+    const bool parallel_lt = ggml_cuda_nvfp4_vcache_parallel_lt_enabled();
+    const int64_t lt_stream_count = parallel_lt ? std::min<int64_t>(GGML_CUDA_MAX_STREAMS, lt_slices) : 1;
+    std::vector<cudaStream_t> lt_streams((size_t) lt_stream_count);
+    std::vector<cublasLtMatmulDesc_t> slice_descs((size_t) lt_slices, nullptr);
+    std::vector<cudaEvent_t> done_events;
+    cudaEvent_t staging_done = nullptr;
+
+    if (st == CUBLAS_STATUS_SUCCESS) {
+        for (int64_t i = 0; i < lt_stream_count; ++i) {
+            lt_streams[(size_t) i] = i == 0 ? stream : ctx.stream(ctx.device, (int) i);
+        }
+        for (int64_t i = 0; i < lt_slices && st == CUBLAS_STATUS_SUCCESS; ++i) {
+            stage = "slice_matmul_desc_create";
+            st = cublasLtMatmulDescCreate(&slice_descs[(size_t) i], CUBLAS_COMPUTE_32F, CUDA_R_32F);
+            if (st != CUBLAS_STATUS_SUCCESS) {
+                break;
+            }
+            const cudaDataType_t scale_type = CUDA_R_32F;
+            stage = "slice_matmul_desc_set_scale_type";
+            st = cublasLtMatmulDescSetAttribute(
+                    slice_descs[(size_t) i], CUBLASLT_MATMUL_DESC_SCALE_TYPE, &scale_type, sizeof(scale_type));
+            if (st != CUBLAS_STATUS_SUCCESS) {
+                break;
+            }
+            const cublasOperation_t op_t = CUBLAS_OP_T;
+            stage = "slice_matmul_desc_set_transa";
+            st = cublasLtMatmulDescSetAttribute(
+                    slice_descs[(size_t) i], CUBLASLT_MATMUL_DESC_TRANSA, &op_t, sizeof(op_t));
+            if (st != CUBLAS_STATUS_SUCCESS) {
+                break;
+            }
+            const cublasOperation_t op_n = CUBLAS_OP_N;
+            stage = "slice_matmul_desc_set_transb";
+            st = cublasLtMatmulDescSetAttribute(
+                    slice_descs[(size_t) i], CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n));
+            if (st != CUBLAS_STATUS_SUCCESS) {
+                break;
+            }
+            const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+            stage = "slice_matmul_desc_set_a_scale_mode";
+            st = cublasLtMatmulDescSetAttribute(
+                    slice_descs[(size_t) i], CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode, sizeof(scale_mode));
+            if (st != CUBLAS_STATUS_SUCCESS) {
+                break;
+            }
+            stage = "slice_matmul_desc_set_b_scale_mode";
+            st = cublasLtMatmulDescSetAttribute(
+                    slice_descs[(size_t) i], CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode, sizeof(scale_mode));
+        }
+    }
+
+    if (st == CUBLAS_STATUS_SUCCESS && lt_stream_count > 1) {
+        CUDA_CHECK(cudaEventCreateWithFlags(&staging_done, cudaEventDisableTiming));
+        CUDA_CHECK(cudaEventRecord(staging_done, stream));
+        for (int64_t i = 1; i < lt_stream_count; ++i) {
+            CUDA_CHECK(cudaStreamWaitEvent(lt_streams[(size_t) i], staging_done, 0));
+        }
+    }
+
     if (st == CUBLAS_STATUS_SUCCESS) {
         for (int64_t q_stream = 0; q_stream < q_streams && st == CUBLAS_STATUS_SUCCESS; ++q_stream) {
             const int64_t kv_stream = q_stream / r3;
@@ -377,27 +411,29 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
                 const int64_t kv_head = q_head / r2;
                 const int64_t kv_slice = kv_stream * kv_heads + kv_head;
                 const int64_t q_slice = q_stream * q_heads + q_head;
+                cublasLtMatmulDesc_t slice_desc = slice_descs[(size_t) q_slice];
                 const void * a_scale_ptr = a_scale.get() + (size_t) kv_slice * (size_t) a_scale_nbytes;
                 const void * b_scale_ptr = b_scale.get() + (size_t) q_slice * (size_t) b_scale_nbytes;
                 stage = "matmul_desc_set_a_scale_ptr_slice";
                 st = cublasLtMatmulDescSetAttribute(
-                        op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_ptr, sizeof(a_scale_ptr));
+                        slice_desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_ptr, sizeof(a_scale_ptr));
                 if (st != CUBLAS_STATUS_SUCCESS) {
                     break;
                 }
                 stage = "matmul_desc_set_b_scale_ptr_slice";
                 st = cublasLtMatmulDescSetAttribute(
-                        op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr));
+                        slice_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptr, sizeof(b_scale_ptr));
                 if (st != CUBLAS_STATUS_SUCCESS) {
                     break;
                 }
 
                 const float alpha = 1.0f;
                 const float beta = 0.0f;
+                cudaStream_t lt_stream = lt_streams[(size_t) (q_slice % lt_stream_count)];
                 stage = "matmul";
                 st = cublasLtMatmul(
                         ctx.cublaslt_handle(),
-                        op_desc,
+                        slice_desc,
                         &alpha,
                         a_data.get() + (size_t) kv_slice * (size_t) a_data_nbytes, a_desc,
                         b_data.get() + (size_t) q_slice * (size_t) b_data_nbytes, b_desc,
@@ -406,8 +442,17 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
                         lt_dst.get() + (size_t) q_slice * (size_t) rows * (size_t) lt_cols, c_desc,
                         nullptr,
                         nullptr, 0,
-                        stream);
+                        lt_stream);
             }
+        }
+    }
+
+    if (lt_stream_count > 1) {
+        done_events.resize((size_t) lt_stream_count - 1, nullptr);
+        for (int64_t i = 1; i < lt_stream_count; ++i) {
+            CUDA_CHECK(cudaEventCreateWithFlags(&done_events[(size_t) i - 1], cudaEventDisableTiming));
+            CUDA_CHECK(cudaEventRecord(done_events[(size_t) i - 1], lt_streams[(size_t) i]));
+            CUDA_CHECK(cudaStreamWaitEvent(stream, done_events[(size_t) i - 1], 0));
         }
     }
 
@@ -421,6 +466,19 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
         CUDA_CHECK(cudaGetLastError());
     }
 
+    for (cudaEvent_t event : done_events) {
+        if (event != nullptr) {
+            CUDA_CHECK(cudaEventDestroy(event));
+        }
+    }
+    if (staging_done != nullptr) {
+        CUDA_CHECK(cudaEventDestroy(staging_done));
+    }
+    for (cublasLtMatmulDesc_t desc : slice_descs) {
+        if (desc != nullptr) {
+            cublasLtMatmulDescDestroy(desc);
+        }
+    }
     if (c_desc != nullptr) {
         cublasLtMatrixLayoutDestroy(c_desc);
     }
@@ -430,10 +488,6 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
     if (a_desc != nullptr) {
         cublasLtMatrixLayoutDestroy(a_desc);
     }
-    if (op_desc != nullptr) {
-        cublasLtMatmulDescDestroy(op_desc);
-    }
-
     if (st != CUBLAS_STATUS_SUCCESS) {
         ggml_cuda_nvfp4_log_vcache_lt_failure_once(stage, (int) st, cublas_get_error_str(st));
         return false;

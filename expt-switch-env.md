@@ -107,6 +107,19 @@ nearest-neighbor NVFP4 activation quantizer. If the shape is unsupported or a
 conflicting quantizer/layout/custom-matmul experiment is enabled, the runtime
 logs once and falls back to the existing per-head native path.
 
+### `GGML_CUDA_NVFP4_VCACHE_PARALLEL_LT`
+
+Enables parallel cuBLASLt slice dispatch inside the experimental batched CUDA
+NVFP4 V-cache P*V path. Default: unset/off, preserving serial cuBLASLt dispatch
+inside `GGML_CUDA_NVFP4_VCACHE_BATCHED`.
+
+This switch only has an effect when `GGML_CUDA_NVFP4_VCACHE_BATCHED=1` selects
+the batched V-cache path and cuBLASLt FP4 scale-channel support is available.
+When enabled, the batched path keeps P quantization and V/P staging on the main
+CUDA stream, then dispatches independent query-head/stream P*V slices across
+the existing per-device CUDA streams and waits on the main stream before the
+final result-scale/store kernel. Numerical scale semantics are unchanged.
+
 ### `GGML_CUDA_NVFP4_VCACHE_QEMU`
 
 Enables the qemu-cuda-ops CUDA NVFP4 V-cache P*V algorithm. Default:

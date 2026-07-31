@@ -4,6 +4,8 @@
 
 #include "../ggml/src/ggml-quants.h"
 
+bool ggml_cuda_nvfp4_vcache_parallel_lt_enabled();
+
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
@@ -909,6 +911,29 @@ int main(int argc, char ** argv) {
             return 1;
         }
         std::puts("test-vcache-nvfp4-matmul: qemu per-block V-cache cases passed");
+        return 0;
+    }
+
+    if (argc > 1 && std::strcmp(argv[1], "--batched-parallel-only") == 0) {
+#if defined(_WIN32)
+        _putenv_s("GGML_CUDA_NVFP4_VCACHE_BATCHED", "1");
+        _putenv_s("GGML_CUDA_NVFP4_VCACHE_PARALLEL_LT", "1");
+        _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
+        _putenv_s("GGML_CUDA_NVFP4_FP4MULMAT", "0");
+#else
+        setenv("GGML_CUDA_NVFP4_VCACHE_BATCHED", "1", 1);
+        setenv("GGML_CUDA_NVFP4_VCACHE_PARALLEL_LT", "1", 1);
+        setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
+        setenv("GGML_CUDA_NVFP4_FP4MULMAT", "0", 1);
+#endif
+        if (!ggml_cuda_nvfp4_vcache_parallel_lt_enabled()) {
+            std::fprintf(stderr, "test-vcache-nvfp4-matmul: parallel LT switch did not enable\n");
+            return 1;
+        }
+        if (!run_real_vcache_view_case(512, true)) {
+            return 1;
+        }
+        std::puts("test-vcache-nvfp4-matmul: batched parallel V-cache cases passed");
         return 0;
     }
 

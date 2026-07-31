@@ -393,6 +393,20 @@ void ggml_cuda_nvfp4_log_vcache_batched_switch_once(const char * env, bool enabl
                     : "disabled, using the existing per-head native V-cache path");
 }
 
+void ggml_cuda_nvfp4_log_vcache_parallel_lt_switch_once(const char * env, bool enabled) {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_INFO(
+            "%s: GGML_CUDA_NVFP4_VCACHE_PARALLEL_LT=%s -> %s\n",
+            __func__,
+            env != nullptr ? env : "(unset)",
+            enabled ? "enabled, dispatching batched V-cache cuBLASLt slices across CUDA streams"
+                    : "disabled, using serial cuBLASLt slice dispatch inside the batched V-cache path");
+}
+
 void ggml_cuda_nvfp4_log_vcache_qemu_switch_once(const char * env, bool enabled) {
     static std::atomic<bool> logged(false);
     if (logged.exchange(true)) {
