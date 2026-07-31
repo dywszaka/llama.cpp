@@ -407,17 +407,17 @@ void ggml_cuda_nvfp4_log_vcache_parallel_lt_switch_once(const char * env, bool e
                     : "disabled, using serial cuBLASLt slice dispatch inside the batched V-cache path");
 }
 
-void ggml_cuda_nvfp4_log_vcache_qemu_switch_once(const char * env, bool enabled) {
+void ggml_cuda_nvfp4_log_vcache_mm_standalone_switch_once(const char * env, bool enabled) {
     static std::atomic<bool> logged(false);
     if (logged.exchange(true)) {
         return;
     }
 
     GGML_LOG_INFO(
-            "%s: GGML_CUDA_NVFP4_VCACHE_QEMU=%s -> %s\n",
+            "%s: GGML_CUDA_NVFP4_VCACHE_MM_STANDALONE=%s -> %s\n",
             __func__,
             env != nullptr ? env : "(unset)",
-            enabled ? "enabled, trying the qemu-cuda-ops V-cache P*V algorithm before native-slice"
+            enabled ? "enabled, trying the mm-standalone V-cache P*V algorithm before native-slice"
                     : "disabled, using the release CUDA NVFP4 V-cache path");
 }
 

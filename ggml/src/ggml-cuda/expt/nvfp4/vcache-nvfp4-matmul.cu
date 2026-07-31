@@ -16,12 +16,12 @@ static bool ggml_cuda_nvfp4_vcache_cublaslt_trace_enabled() {
     return cached != 0;
 }
 
-static bool ggml_cuda_nvfp4_vcache_qemu_enabled() {
+static bool ggml_cuda_nvfp4_vcache_mm_standalone_enabled() {
     static int cached = -1;
     if (cached < 0) {
-        const char * env = getenv("GGML_CUDA_NVFP4_VCACHE_QEMU");
+        const char * env = getenv("GGML_CUDA_NVFP4_VCACHE_MM_STANDALONE");
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-        ggml_cuda_nvfp4_log_vcache_qemu_switch_once(env, cached != 0);
+        ggml_cuda_nvfp4_log_vcache_mm_standalone_switch_once(env, cached != 0);
     }
     return cached != 0;
 }
@@ -219,9 +219,9 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
 
     ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
 
-    if (ggml_cuda_nvfp4_vcache_qemu_enabled()) {
-        if (ggml_cuda_mul_mat_vcache_nvfp4_qemu(ctx, src0, src1, dst)) {
-            ggml_cuda_nvfp4_log_vcache_matmul_path_once("qemu-cuda-ops");
+    if (ggml_cuda_nvfp4_vcache_mm_standalone_enabled()) {
+        if (ggml_cuda_mul_mat_vcache_nvfp4_mm_standalone(ctx, src0, src1, dst)) {
+            ggml_cuda_nvfp4_log_vcache_matmul_path_once("mm-standalone");
             return true;
         }
     }

@@ -63,7 +63,7 @@ void ggml_cuda_nvfp4_log_kcache_outlier_fingerprint(
 
 void ggml_cuda_nvfp4_log_vcache_fast_update_once(bool enabled);
 void ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
-void ggml_cuda_nvfp4_log_vcache_qemu_switch_once(const char * env, bool enabled);
+void ggml_cuda_nvfp4_log_vcache_mm_standalone_switch_once(const char * env, bool enabled);
 void ggml_cuda_nvfp4_log_vcache_batched_switch_once(const char * env, bool enabled);
 void ggml_cuda_nvfp4_log_vcache_parallel_lt_switch_once(const char * env, bool enabled);
 void ggml_cuda_nvfp4_log_vcache_batched_fallback_once();

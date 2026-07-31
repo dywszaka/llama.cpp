@@ -613,7 +613,7 @@ static bool ggml_cuda_vcache_nvfp4_matmul_fp4_p_lt(
 }
 #endif
 
-bool ggml_cuda_mul_mat_vcache_nvfp4_qemu(
+bool ggml_cuda_mul_mat_vcache_nvfp4_mm_standalone(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,
         const ggml_tensor * src1,

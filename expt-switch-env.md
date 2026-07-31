@@ -120,17 +120,17 @@ CUDA stream, then dispatches independent query-head/stream P*V slices across
 the existing per-device CUDA streams and waits on the main stream before the
 final result-scale/store kernel. Numerical scale semantics are unchanged.
 
-### `GGML_CUDA_NVFP4_VCACHE_QEMU`
+### `GGML_CUDA_NVFP4_VCACHE_MM_STANDALONE`
 
-Enables the qemu-cuda-ops CUDA NVFP4 V-cache P*V algorithm. Default:
+Enables the mm-standalone CUDA NVFP4 V-cache P*V algorithm. Default:
 unset/off, preserving the release CUDA NVFP4 V-cache path.
 
-When enabled, the V-cache dispatcher tries the qemu-cuda-ops algorithm before
+When enabled, the V-cache dispatcher tries the mm-standalone algorithm before
 the batched or per-head native-slice release paths. This path supports the old
 per-block external-scale V-cache layout as well as the global-scale layout,
 quantizes dense F32 P rows to temporary NVFP4, then uses its cuBLASLt FP4 path
-when available and its custom CUDA FP4 kernel otherwise. If the qemu path does
-not accept the shape, execution continues to the existing release paths.
+when available and its custom CUDA FP4 kernel otherwise. If this path does not
+accept the shape, execution continues to the existing release paths.
 
 ### `GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK`
 

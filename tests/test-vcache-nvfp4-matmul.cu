@@ -897,20 +897,20 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
-    if (argc > 1 && std::strcmp(argv[1], "--qemu-per-block-only") == 0) {
+    if (argc > 1 && std::strcmp(argv[1], "--mm-standalone-per-block-only") == 0) {
 #if defined(_WIN32)
-        _putenv_s("GGML_CUDA_NVFP4_VCACHE_QEMU", "1");
+        _putenv_s("GGML_CUDA_NVFP4_VCACHE_MM_STANDALONE", "1");
         _putenv_s("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1");
         _putenv_s("GGML_CUDA_NVFP4_FP4MULMAT", "0");
 #else
-        setenv("GGML_CUDA_NVFP4_VCACHE_QEMU", "1", 1);
+        setenv("GGML_CUDA_NVFP4_VCACHE_MM_STANDALONE", "1", 1);
         setenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK", "1", 1);
         setenv("GGML_CUDA_NVFP4_FP4MULMAT", "0", 1);
 #endif
         if (!run_real_vcache_view_case(512, false) || !run_set_rows_then_matmul_case(false)) {
             return 1;
         }
-        std::puts("test-vcache-nvfp4-matmul: qemu per-block V-cache cases passed");
+        std::puts("test-vcache-nvfp4-matmul: mm-standalone per-block V-cache cases passed");
         return 0;
     }
 
