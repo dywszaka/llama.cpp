@@ -379,34 +379,6 @@ void ggml_cuda_nvfp4_log_vcache_fp4_pv_once() {
             __func__);
 }
 
-void ggml_cuda_nvfp4_log_vcache_batched_switch_once(const char * env, bool enabled) {
-    static std::atomic<bool> logged(false);
-    if (logged.exchange(true)) {
-        return;
-    }
-
-    GGML_LOG_INFO(
-            "%s: GGML_CUDA_NVFP4_VCACHE_BATCHED=%s -> %s\n",
-            __func__,
-            env != nullptr ? env : "(unset)",
-            enabled ? "enabled, batching P quantization and cuBLASLt resources across V-cache heads"
-                    : "disabled, using the existing per-head native V-cache path");
-}
-
-void ggml_cuda_nvfp4_log_vcache_parallel_lt_switch_once(const char * env, bool enabled) {
-    static std::atomic<bool> logged(false);
-    if (logged.exchange(true)) {
-        return;
-    }
-
-    GGML_LOG_INFO(
-            "%s: GGML_CUDA_NVFP4_VCACHE_PARALLEL_LT=%s -> %s\n",
-            __func__,
-            env != nullptr ? env : "(unset)",
-            enabled ? "enabled, dispatching batched V-cache cuBLASLt slices across CUDA streams"
-                    : "disabled, using serial cuBLASLt slice dispatch inside the batched V-cache path");
-}
-
 void ggml_cuda_nvfp4_log_vcache_mm_standalone_switch_once(const char * env, bool enabled) {
     static std::atomic<bool> logged(false);
     if (logged.exchange(true)) {
@@ -419,18 +391,6 @@ void ggml_cuda_nvfp4_log_vcache_mm_standalone_switch_once(const char * env, bool
             env != nullptr ? env : "(unset)",
             enabled ? "enabled, trying the mm-standalone V-cache P*V algorithm before native-slice"
                     : "disabled, using the release CUDA NVFP4 V-cache path");
-}
-
-void ggml_cuda_nvfp4_log_vcache_batched_fallback_once() {
-    static std::atomic<bool> logged(false);
-    if (logged.exchange(true)) {
-        return;
-    }
-
-    GGML_LOG_WARN(
-            "%s: batched NVFP4 V-cache path was requested but is incompatible with this shape or another NVFP4 experiment; "
-            "falling back to the existing per-head native path\n",
-            __func__);
 }
 
 void ggml_cuda_nvfp4_log_vcache_native_slice_active_once(
