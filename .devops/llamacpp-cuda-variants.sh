@@ -249,9 +249,15 @@ configure_and_build_cuda_c100() {
     local -a mode_extra=("$@")
     local -a user_extra=()
     local -a gpu_args=()
+    local -a riscv_mount_args=()
+    local -a riscv_env_args=()
     local args_dir
     local args_file
     local container_args_file
+    local host_riscv_toolchain_dir
+    local host_riscv_prefix
+    local docker_riscv_toolchain_dir
+    local docker_riscv_prefix
 
     if [[ -n "${CMAKE_EXTRA_ARGS:-}" ]]; then
         read -r -a user_extra <<< "${CMAKE_EXTRA_ARGS}"
@@ -273,15 +279,45 @@ configure_and_build_cuda_c100() {
     container_args_file="/workspace/llama.cpp/.cache/llamacpp-cuda-variants/cmake-extra-args.txt"
     make_cmake_args_file "${args_file}" "${extra[@]}"
 
+    host_riscv_toolchain_dir="${C100_RISCV_TOOLCHAIN_DIR:-${RISCV_PATH:-${RISCV_TOOLCHAIN:-${RISCV:-}}}}"
+    host_riscv_prefix="${C100_RISCV_PREFIX:-${RISCV_PREFIX:-}}"
+    if [[ -n "${host_riscv_toolchain_dir}" ]]; then
+        host_riscv_toolchain_dir="$(docker_mount_path "${host_riscv_toolchain_dir}")"
+        require_dir "RISC-V toolchain root" "${host_riscv_toolchain_dir}"
+        if [[ -z "${host_riscv_prefix}" ]]; then
+            host_riscv_prefix="${host_riscv_toolchain_dir}/bin/riscv64-unknown-elf-"
+        fi
+
+        docker_riscv_toolchain_dir="$(rewrite_mount_path "${host_riscv_toolchain_dir}")"
+        case "${host_riscv_prefix}" in
+            "${host_riscv_toolchain_dir}"*)
+                docker_riscv_prefix="${docker_riscv_toolchain_dir}${host_riscv_prefix#"${host_riscv_toolchain_dir}"}"
+                ;;
+            *)
+                docker_riscv_prefix="$(rewrite_mount_path "${host_riscv_prefix}")"
+                ;;
+        esac
+
+        riscv_mount_args=(-v "${host_riscv_toolchain_dir}:${docker_riscv_toolchain_dir}:ro")
+        riscv_env_args=(
+            -e "RISCV=${docker_riscv_toolchain_dir}"
+            -e "RISCV_PATH=${docker_riscv_toolchain_dir}"
+            -e "RISCV_TOOLCHAIN=${docker_riscv_toolchain_dir}"
+            -e "RISCV_PREFIX=${docker_riscv_prefix}"
+        )
+    fi
+
     if ! docker run --rm \
         "${gpu_args[@]}" \
         -v "${LLAMA_CPP_DOCKER_ROOT}:/workspace/llama.cpp" \
         -v "${C100_SIM_DOCKER_ROOT}:/workspace/llama.cpp/c100-sim" \
+        "${riscv_mount_args[@]}" \
         -e GIT_CONFIG_COUNT=1 \
         -e GIT_CONFIG_KEY_0=safe.directory \
         -e GIT_CONFIG_VALUE_0=/workspace/llama.cpp \
         -e LLAMA_CPP_ROOT=/workspace/llama.cpp \
         -e C100_SIM_ROOT=/workspace/llama.cpp/c100-sim \
+        "${riscv_env_args[@]}" \
         -e BUILD_DIR="${CUDA_C100_BUILD_DIR}" \
         -e BUILD_TARGET="${BUILD_TARGET}" \
         -e BUILD_TYPE="${BUILD_TYPE}" \

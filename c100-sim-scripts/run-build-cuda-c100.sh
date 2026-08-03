@@ -25,6 +25,21 @@ cd "${ROOT_DIR}"
 C100_SIM_ROOT="${C100_SIM_ROOT:-${ROOT_DIR}/c100-sim}"
 export C100_SIM_ROOT
 
+if command -v module >/dev/null 2>&1; then
+    if ! module load riscv-toolchain/nuclei; then
+        if [[ -z "${RISCV_PREFIX:-}" && -z "${RISCV_PATH:-}" && -z "${RISCV_TOOLCHAIN:-}" && -z "${RISCV:-}" ]]; then
+            echo "failed to load riscv-toolchain/nuclei and no RISCV toolchain environment is set" >&2
+            exit 1
+        fi
+        echo "warning: failed to load riscv-toolchain/nuclei; using existing RISCV toolchain environment" >&2
+    fi
+fi
+
+RISCV_TOOLCHAIN_ROOT="${RISCV_PATH:-${RISCV_TOOLCHAIN:-${RISCV:-}}}"
+if [[ -z "${RISCV_PREFIX:-}" && -n "${RISCV_TOOLCHAIN_ROOT}" ]]; then
+    export RISCV_PREFIX="${RISCV_TOOLCHAIN_ROOT}/bin/riscv64-unknown-elf-"
+fi
+
 mode="${1:-release}"
 variant=
 
