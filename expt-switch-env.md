@@ -84,28 +84,17 @@ flash attention is not supported, and KQ/V offload must be enabled.
 
 ## NVFP4 CUDA Native Matmul
 
-### `GGML_CUDA_NVFP4_VCACHE_BATCHED`
+### `GGML_CUDA_NVFP4_VCACHE_MM_STANDALONE`
 
-Enables the experimental batched CUDA NVFP4 V-cache P*V path. Default:
-unset/off, preserving the existing per-query-head native-slice implementation.
+Enables the mm-standalone CUDA NVFP4 V-cache P*V algorithm. Default:
+unset/off, preserving the release CUDA NVFP4 V-cache path.
 
-The batched path keeps the current global-scale numerical contract: V block
-scales enter the cuBLASLt A scale channel unchanged, while each P row uses the
-combined F32 output compensation `1 / (V_global_scale * P_global_scale)`. It
-reduces host and launch overhead by quantizing all dense P rows together,
-repacking each unique KV-head/stream V slice once, repacking all quantized P
-slices once, allocating staging/output scratch once, creating cuBLASLt
-descriptors/layouts once per P*V operation, and applying the result scales for
-all heads in one kernel. This trades additional temporary device memory,
-proportional to the packed logical V and P operands, for fewer kernels and less
-host-side setup. If allocation pressure is unacceptable, leave the switch
-unset to retain the lower-scratch per-head path.
-
-Initial scope: CUDA, non-flash attention, unified NVFP4 V-cache with one global
-V scale per KV stream, dense F32 P layout, F32 output, and the default FP32
-nearest-neighbor NVFP4 activation quantizer. If the shape is unsupported or a
-conflicting quantizer/layout/custom-matmul experiment is enabled, the runtime
-logs once and falls back to the existing per-head native path.
+When enabled, the V-cache dispatcher tries the mm-standalone algorithm before
+the batched or per-head native-slice release paths. This path supports the old
+per-block external-scale V-cache layout as well as the global-scale layout,
+quantizes dense F32 P rows to temporary NVFP4, then uses its cuBLASLt FP4 path
+when available and its custom CUDA FP4 kernel otherwise. If this path does not
+accept the shape, execution continues to the existing release paths.
 
 ### `GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK`
 

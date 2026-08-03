@@ -9,10 +9,12 @@
 #include "../../../ggml-quants.h"
 
 #include <atomic>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -220,6 +222,74 @@ struct ggml_cuda_nvfp4_split_matrix {
     int64_t scale_outer_padded = 0;
 };
 
+template<typename T>
+static T * ggml_cuda_nvfp4_alloc_or_reuse(ggml_cuda_pool_alloc<T> & alloc, size_t size) {
+    if (alloc.get() == nullptr) {
+        return alloc.alloc(size);
+    }
+    GGML_ASSERT(alloc.actual_size >= size * sizeof(T));
+    return alloc.get();
+}
+
+struct ggml_cuda_nvfp4_parallel_events {
+    cudaEvent_t main_ready = nullptr;
+    cudaEvent_t done[GGML_CUDA_MAX_STREAMS] = { nullptr };
+    int n_streams = 1;
+
+    ~ggml_cuda_nvfp4_parallel_events() {
+        if (main_ready != nullptr) {
+            CUDA_CHECK(cudaEventDestroy(main_ready));
+        }
+        for (int i = 1; i < n_streams; ++i) {
+            if (done[i] != nullptr) {
+                CUDA_CHECK(cudaEventDestroy(done[i]));
+            }
+        }
+    }
+};
+
+struct ggml_cuda_nvfp4_native_slice_lane {
+    ggml_cuda_pool_alloc<char> src0_contig;
+    ggml_cuda_pool_alloc<char> src1_contig;
+    ggml_cuda_nvfp4_native_scratch scratch;
+
+    explicit ggml_cuda_nvfp4_native_slice_lane(ggml_cuda_pool & pool) :
+        src0_contig(pool),
+        src1_contig(pool),
+        scratch(pool) {
+    }
+};
+
+static bool ggml_cuda_nvfp4_begin_parallel_streams(
+        ggml_backend_cuda_context & ctx,
+        int64_t slices,
+        cudaStream_t main_stream,
+        ggml_cuda_nvfp4_parallel_events & events) {
+    events.n_streams = (int) std::min<int64_t>(std::max<int64_t>(slices, 1), GGML_CUDA_MAX_STREAMS);
+    if (events.n_streams <= 1) {
+        return true;
+    }
+
+    CUDA_CHECK(cudaEventCreateWithFlags(&events.main_ready, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventRecord(events.main_ready, main_stream));
+    for (int i = 1; i < events.n_streams; ++i) {
+        CUDA_CHECK(cudaEventCreateWithFlags(&events.done[i], cudaEventDisableTiming));
+        CUDA_CHECK(cudaStreamWaitEvent(ctx.stream(ctx.device, i), events.main_ready, 0));
+    }
+    return true;
+}
+
+static void ggml_cuda_nvfp4_end_parallel_streams(
+        ggml_backend_cuda_context & ctx,
+        ggml_cuda_nvfp4_parallel_events & events,
+        cudaStream_t main_stream) {
+    for (int i = 1; i < events.n_streams; ++i) {
+        cudaStream_t stream = ctx.stream(ctx.device, i);
+        CUDA_CHECK(cudaEventRecord(events.done[i], stream));
+        CUDA_CHECK(cudaStreamWaitEvent(main_stream, events.done[i], 0));
+    }
+}
+
 static __device__ __forceinline__ uint8_t ggml_cuda_nvfp4_lt_scale_from_ggml_scale_byte(uint8_t ggml_e) {
     const float scale_f = ggml_cuda_e4m3_to_fp32(ggml_e);
     return ggml_cuda_nvfp4_lt_scale_from_f32(scale_f);
@@ -390,8 +460,8 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
             return false;
         }
     } else {
-        data_repacked = transient_data.alloc(ctx.pool(), data_nbytes);
-        scale_repacked = transient_scale.alloc(ctx.pool(), scale_nbytes);
+        data_repacked = ggml_cuda_nvfp4_alloc_or_reuse(transient_data, data_nbytes);
+        scale_repacked = ggml_cuda_nvfp4_alloc_or_reuse(transient_scale, scale_nbytes);
     }
 
     int64_t scale_inner_padded = 0;
@@ -463,7 +533,7 @@ static void ggml_cuda_nvfp4_materialize_contiguous_matrix(
 
     const size_t row_bytes = ggml_row_size(slice.type, slice.ne[0]);
     const size_t total_bytes = row_bytes * (size_t) slice.ne[1];
-    storage.alloc(ctx.pool(), total_bytes);
+    ggml_cuda_nvfp4_alloc_or_reuse(storage, total_bytes);
 
     CUDA_CHECK(cudaMemcpy2DAsync(
             storage.get(),
@@ -538,7 +608,9 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         ggml_tensor * dst,
         bool apply_outlier_correction,
         const float * device_weight_scale = nullptr,
-        bool reciprocal_device_weight_scale = false) {
+        bool reciprocal_device_weight_scale = false,
+        cudaStream_t stream_override = nullptr,
+        ggml_cuda_nvfp4_native_scratch * scratch = nullptr) {
 #if GGML_CUDA_HAS_CUBLASLT && GGML_CUDA_HAS_FP4 && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     GGML_ASSERT(src0 != nullptr);
     GGML_ASSERT(src1 != nullptr);
@@ -582,21 +654,42 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
 
         const int64_t r2 = src1->ne[2] / src0->ne[2];
         const int64_t r3 = src1->ne[3] / src0->ne[3];
-        cudaStream_t stream = ctx.stream();
+        cudaStream_t stream = stream_override != nullptr ? stream_override : ctx.stream();
+        const int64_t total_slices = src1->ne[2] * src1->ne[3];
+        ggml_cuda_nvfp4_parallel_events events = {};
+        ggml_cuda_nvfp4_begin_parallel_streams(ctx, total_slices, stream, events);
+        std::vector<std::unique_ptr<ggml_cuda_nvfp4_native_slice_lane>> lanes;
+        if (events.n_streams > 1) {
+            lanes.reserve((size_t) events.n_streams);
+            for (int i = 0; i < events.n_streams; ++i) {
+                lanes.emplace_back(new ggml_cuda_nvfp4_native_slice_lane(ctx.pool()));
+            }
+        }
+        bool ok = true;
 
-        for (int64_t i3 = 0; i3 < src1->ne[3]; ++i3) {
-            for (int64_t i2 = 0; i2 < src1->ne[2]; ++i2) {
+        for (int64_t i3 = 0, slice = 0; i3 < src1->ne[3] && ok; ++i3) {
+            for (int64_t i2 = 0; i2 < src1->ne[2]; ++i2, ++slice) {
+                const int stream_idx = events.n_streams > 1 ? (int) (slice % events.n_streams) : 0;
+                cudaStream_t slice_stream = stream_idx == 0 ? stream : ctx.stream(ctx.device, stream_idx);
                 ggml_tensor src0_slice = ggml_cuda_nvfp4_make_matrix_slice(src0, i2 / r2, i3 / r3);
                 ggml_tensor src1_slice = ggml_cuda_nvfp4_make_matrix_slice(src1, i2, i3);
                 ggml_tensor dst_slice  = ggml_cuda_nvfp4_make_matrix_slice(dst,  i2, i3);
+                if (events.n_streams > 1) {
+                    src0_slice.buffer = nullptr;
+                }
                 ggml_cuda_pool_alloc<char> src0_contig(ctx.pool());
                 ggml_cuda_pool_alloc<char> src1_contig(ctx.pool());
+                ggml_cuda_pool_alloc<char> & src0_contig_ref = events.n_streams > 1 ? lanes[(size_t) stream_idx]->src0_contig : src0_contig;
+                ggml_cuda_pool_alloc<char> & src1_contig_ref = events.n_streams > 1 ? lanes[(size_t) stream_idx]->src1_contig : src1_contig;
+                ggml_cuda_nvfp4_native_scratch * slice_scratch_ptr = events.n_streams > 1 ? &lanes[(size_t) stream_idx]->scratch : nullptr;
 
-                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src0_slice, src0_contig, stream);
-                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src1_slice, src1_contig, stream);
+                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src0_slice, src0_contig_ref, slice_stream);
+                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src1_slice, src1_contig_ref, slice_stream);
 
-                if (!ggml_cuda_mul_mat_nvfp4_native_impl(ctx, &src0_slice, &src1_slice, &dst_slice, false)) {
-                    return false;
+                if (!ggml_cuda_mul_mat_nvfp4_native_impl(ctx, &src0_slice, &src1_slice, &dst_slice, false,
+                            nullptr, false, slice_stream, slice_scratch_ptr)) {
+                    ok = false;
+                    break;
                 }
 
                 const ggml_tensor * outlier_counts = ggml_tensor_get_nvfp4_kcache_outlier_counts(src0);
@@ -631,12 +724,16 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                             src1_slice.nb[1] / (int64_t) sizeof(float),
                             dst_slice.nb[0] / (int64_t) sizeof(float),
                             dst_slice.nb[1] / (int64_t) sizeof(float),
-                            stream);
+                            slice_stream);
                 }
             }
         }
 
-        return true;
+        ggml_cuda_nvfp4_end_parallel_streams(ctx, events, stream);
+        for (int i = (int) lanes.size() - 1; i >= 0; --i) {
+            lanes[(size_t) i].reset();
+        }
+        return ok;
     }
 
     if (ggml_is_transposed(src0) || ggml_is_transposed(src1) || !ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
@@ -689,7 +786,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         return false;
     }
 
-    cudaStream_t stream = ctx.stream();
+    cudaStream_t stream = stream_override != nullptr ? stream_override : ctx.stream();
     const int64_t nblk_k = ne10 / QK_NVFP4;
     const int64_t lt_k = pad_k ? ggml_cuda_nvfp4_pad_i64(ne10, 32) : ne10;
     if (pad_k) {
@@ -706,11 +803,21 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         }
     }
 
-    ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4(ctx.pool(), (size_t) nblk_k * (size_t) ne11);
-    ggml_cuda_pool_alloc<uint8_t> src1_repacked_data(ctx.pool(), (size_t) ne11_padded * (size_t) lt_k / 2);
-    ggml_cuda_pool_alloc<uint8_t> src1_repacked_scale(ctx.pool(), (size_t) scale_outer_padded_b * (size_t) scale_inner_padded);
-    ggml_cuda_pool_alloc<float> dynamic_amax_rows(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
-    ggml_cuda_pool_alloc<float> dynamic_input_scales(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
+    ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4_local(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src1_repacked_data_local(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src1_repacked_scale_local(ctx.pool());
+    ggml_cuda_pool_alloc<float> dynamic_amax_rows_local(ctx.pool());
+    ggml_cuda_pool_alloc<float> dynamic_input_scales_local(ctx.pool());
+    ggml_cuda_pool_alloc<block_nvfp4> & src1_q_nvfp4 = scratch != nullptr ? scratch->src1_q_nvfp4 : src1_q_nvfp4_local;
+    ggml_cuda_pool_alloc<uint8_t> & src1_repacked_data = scratch != nullptr ? scratch->src1_repacked_data : src1_repacked_data_local;
+    ggml_cuda_pool_alloc<uint8_t> & src1_repacked_scale = scratch != nullptr ? scratch->src1_repacked_scale : src1_repacked_scale_local;
+    ggml_cuda_pool_alloc<float> & dynamic_amax_rows = scratch != nullptr ? scratch->dynamic_amax_rows : dynamic_amax_rows_local;
+    ggml_cuda_pool_alloc<float> & dynamic_input_scales = scratch != nullptr ? scratch->dynamic_input_scales : dynamic_input_scales_local;
+    ggml_cuda_nvfp4_alloc_or_reuse(src1_q_nvfp4, (size_t) nblk_k * (size_t) ne11);
+    ggml_cuda_nvfp4_alloc_or_reuse(src1_repacked_data, (size_t) ne11_padded * (size_t) lt_k / 2);
+    ggml_cuda_nvfp4_alloc_or_reuse(src1_repacked_scale, (size_t) scale_outer_padded_b * (size_t) scale_inner_padded);
+    ggml_cuda_nvfp4_alloc_or_reuse(dynamic_amax_rows, (size_t) std::max<int64_t>(ne11, 1));
+    ggml_cuda_nvfp4_alloc_or_reuse(dynamic_input_scales, (size_t) std::max<int64_t>(ne11, 1));
 
     bool used_dynamic_scale = ggml_mul_mat_get_nvfp4_input_scale(dst) == nullptr;
     float global_scale = ggml_cuda_nvfp4_input_global_scale(dst, &used_dynamic_scale);
@@ -854,8 +961,10 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             stream);
 
     ggml_cuda_nvfp4_split_matrix src0_repacked = {};
-    ggml_cuda_pool_alloc<uint8_t> src0_repacked_data_tmp(ctx.pool());
-    ggml_cuda_pool_alloc<uint8_t> src0_repacked_scale_tmp(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src0_repacked_data_tmp_local(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src0_repacked_scale_tmp_local(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> & src0_repacked_data_tmp = scratch != nullptr ? scratch->src0_repacked_data_tmp : src0_repacked_data_tmp_local;
+    ggml_cuda_pool_alloc<uint8_t> & src0_repacked_scale_tmp = scratch != nullptr ? scratch->src0_repacked_scale_tmp : src0_repacked_scale_tmp_local;
     if (!ggml_cuda_nvfp4_get_repacked_src0(
                 ctx, src0, lt_k, linear_scale_layout, stream,
                 src0_repacked_data_tmp, src0_repacked_scale_tmp,
@@ -898,7 +1007,9 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     cublasLtMatrixLayout_t b_desc = nullptr;
     cublasLtMatrixLayout_t c_desc = nullptr;
     const bool use_temp_dst = pad_n || row_split_mode;
-    ggml_cuda_pool_alloc<float> dst_padded(ctx.pool(), use_temp_dst ? (size_t) ne01 * (size_t) lt_n : 1);
+    ggml_cuda_pool_alloc<float> dst_padded_local(ctx.pool());
+    ggml_cuda_pool_alloc<float> & dst_padded = scratch != nullptr ? scratch->dst_padded : dst_padded_local;
+    ggml_cuda_nvfp4_alloc_or_reuse(dst_padded, use_temp_dst ? (size_t) ne01 * (size_t) lt_n : 1);
     void * dst_data = use_temp_dst ? (void *) dst_padded.get() : dst->data;
 
     const char * stage = "matmul_desc_create";
@@ -2603,6 +2714,8 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     GGML_UNUSED(apply_outlier_correction);
     GGML_UNUSED(device_weight_scale);
     GGML_UNUSED(reciprocal_device_weight_scale);
+    GGML_UNUSED(stream_override);
+    GGML_UNUSED(scratch);
     return false;
 #endif
 }
@@ -2624,4 +2737,17 @@ bool ggml_cuda_mul_mat_nvfp4_native_device_weight_scale(
         bool reciprocal_weight_scale) {
     return ggml_cuda_mul_mat_nvfp4_native_impl(
             ctx, src0, src1, dst, true, device_weight_scale, reciprocal_weight_scale);
+}
+
+bool ggml_cuda_mul_mat_nvfp4_native_device_weight_scale_stream(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst,
+        const float * device_weight_scale,
+        bool reciprocal_weight_scale,
+        cudaStream_t stream,
+        ggml_cuda_nvfp4_native_scratch * scratch) {
+    return ggml_cuda_mul_mat_nvfp4_native_impl(
+            ctx, src0, src1, dst, true, device_weight_scale, reciprocal_weight_scale, stream, scratch);
 }

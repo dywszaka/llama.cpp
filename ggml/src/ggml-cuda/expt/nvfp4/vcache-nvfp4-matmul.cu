@@ -4,7 +4,79 @@
 #include "nvfp4-log.cuh"
 #include "nvfp4-matmul.cuh"
 
+#include <algorithm>
 #include <cstdlib>
+#include <memory>
+#include <vector>
+
+namespace {
+
+template<typename T>
+static T * ggml_cuda_vcache_nvfp4_alloc_or_reuse(ggml_cuda_pool_alloc<T> & alloc, size_t size) {
+    if (alloc.get() == nullptr) {
+        return alloc.alloc(size);
+    }
+    GGML_ASSERT(alloc.actual_size >= size * sizeof(T));
+    return alloc.get();
+}
+
+struct ggml_cuda_vcache_nvfp4_parallel_events {
+    cudaEvent_t main_ready = nullptr;
+    cudaEvent_t done[GGML_CUDA_MAX_STREAMS] = { nullptr };
+    int n_streams = 1;
+
+    ~ggml_cuda_vcache_nvfp4_parallel_events() {
+        if (main_ready != nullptr) {
+            CUDA_CHECK(cudaEventDestroy(main_ready));
+        }
+        for (int i = 1; i < n_streams; ++i) {
+            if (done[i] != nullptr) {
+                CUDA_CHECK(cudaEventDestroy(done[i]));
+            }
+        }
+    }
+};
+
+struct ggml_cuda_vcache_nvfp4_slice_lane {
+    ggml_cuda_pool_alloc<char> v_contig;
+    ggml_cuda_nvfp4_native_scratch native_scratch;
+
+    explicit ggml_cuda_vcache_nvfp4_slice_lane(ggml_cuda_pool & pool) :
+        v_contig(pool),
+        native_scratch(pool) {
+    }
+};
+
+static void ggml_cuda_vcache_nvfp4_begin_parallel_streams(
+        ggml_backend_cuda_context & ctx,
+        int64_t slices,
+        cudaStream_t main_stream,
+        ggml_cuda_vcache_nvfp4_parallel_events & events) {
+    events.n_streams = (int) std::min<int64_t>(std::max<int64_t>(slices, 1), GGML_CUDA_MAX_STREAMS);
+    if (events.n_streams <= 1) {
+        return;
+    }
+
+    CUDA_CHECK(cudaEventCreateWithFlags(&events.main_ready, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventRecord(events.main_ready, main_stream));
+    for (int i = 1; i < events.n_streams; ++i) {
+        CUDA_CHECK(cudaEventCreateWithFlags(&events.done[i], cudaEventDisableTiming));
+        CUDA_CHECK(cudaStreamWaitEvent(ctx.stream(ctx.device, i), events.main_ready, 0));
+    }
+}
+
+static void ggml_cuda_vcache_nvfp4_end_parallel_streams(
+        ggml_backend_cuda_context & ctx,
+        ggml_cuda_vcache_nvfp4_parallel_events & events,
+        cudaStream_t main_stream) {
+    for (int i = 1; i < events.n_streams; ++i) {
+        cudaStream_t stream = ctx.stream(ctx.device, i);
+        CUDA_CHECK(cudaEventRecord(events.done[i], stream));
+        CUDA_CHECK(cudaStreamWaitEvent(main_stream, events.done[i], 0));
+    }
+}
+
+} // namespace
 
 static bool ggml_cuda_nvfp4_vcache_cublaslt_trace_enabled() {
     static int cached = -1;
@@ -12,6 +84,16 @@ static bool ggml_cuda_nvfp4_vcache_cublaslt_trace_enabled() {
         const char * env = getenv("GGML_CUDA_NVFP4_VCACHE_CUBLASLT_TRACE");
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
         ggml_cuda_nvfp4_log_vcache_cublaslt_trace_switch_once(env, cached != 0);
+    }
+    return cached != 0;
+}
+
+static bool ggml_cuda_nvfp4_vcache_mm_standalone_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_VCACHE_MM_STANDALONE");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+        ggml_cuda_nvfp4_log_vcache_mm_standalone_switch_once(env, cached != 0);
     }
     return cached != 0;
 }
@@ -96,7 +178,7 @@ static void ggml_cuda_vcache_nvfp4_materialize_v_slice(
         return;
     }
 
-    storage.alloc(ctx.pool(), (size_t) row_bytes * (size_t) rows);
+    ggml_cuda_vcache_nvfp4_alloc_or_reuse(storage, (size_t) row_bytes * (size_t) rows);
     CUDA_CHECK(cudaMemcpy2DAsync(
             storage.get(),
             (size_t) row_bytes,
@@ -144,22 +226,40 @@ static bool ggml_cuda_vcache_nvfp4_matmul_global_native_slices(
         return false;
     }
 
-    for (int64_t q_stream = 0; q_stream < q_streams; ++q_stream) {
+    cudaStream_t main_stream = ctx.stream();
+    const int64_t total_slices = q_heads * q_streams;
+    ggml_cuda_vcache_nvfp4_parallel_events events = {};
+    ggml_cuda_vcache_nvfp4_begin_parallel_streams(ctx, total_slices, main_stream, events);
+    std::vector<std::unique_ptr<ggml_cuda_vcache_nvfp4_slice_lane>> lanes;
+    if (events.n_streams > 1) {
+        lanes.reserve((size_t) events.n_streams);
+        for (int i = 0; i < events.n_streams; ++i) {
+            lanes.emplace_back(new ggml_cuda_vcache_nvfp4_slice_lane(ctx.pool()));
+        }
+    }
+
+    bool ok = true;
+    for (int64_t q_stream = 0, slice = 0; q_stream < q_streams && ok; ++q_stream) {
         const int64_t kv_stream = q_stream / r3;
         if (kv_stream >= kv_streams) {
-            return false;
+            ok = false;
+            break;
         }
 
-        for (int64_t q_head = 0; q_head < q_heads; ++q_head) {
+        for (int64_t q_head = 0; q_head < q_heads; ++q_head, ++slice) {
             const int64_t kv_head = q_head / r2;
             if (kv_head >= kv_heads) {
-                return false;
+                ok = false;
+                break;
             }
+            const int stream_idx = events.n_streams > 1 ? (int) (slice % events.n_streams) : 0;
+            cudaStream_t slice_stream = stream_idx == 0 ? main_stream : ctx.stream(ctx.device, stream_idx);
 
             void * v_ptr = (char *) src0->data + kv_head * src0->nb[2] + kv_stream * src0->nb[3];
             void * p_ptr = (char *) src1->data + q_head * src1->nb[2] + q_stream * src1->nb[3];
             float * dst_ptr = (float *) ((char *) dst->data + q_head * dst->nb[2] + q_stream * dst->nb[3]);
             ggml_cuda_pool_alloc<char> v_contig(ctx.pool());
+            ggml_cuda_pool_alloc<char> & v_contig_ref = events.n_streams > 1 ? lanes[(size_t) stream_idx]->v_contig : v_contig;
             void * v_slice_ptr = nullptr;
             ggml_cuda_vcache_nvfp4_materialize_v_slice(
                     ctx,
@@ -167,8 +267,8 @@ static bool ggml_cuda_vcache_nvfp4_matmul_global_native_slices(
                     (int64_t) src0->nb[1],
                     v_row_bytes,
                     rows,
-                    v_contig,
-                    ctx.stream(),
+                    v_contig_ref,
+                    slice_stream,
                     v_slice_ptr);
 
             ggml_tensor v_slice = ggml_cuda_vcache_nvfp4_make_temp_tensor_2d(GGML_TYPE_NVFP4, v_slice_ptr, kv_size, rows);
@@ -179,11 +279,20 @@ static bool ggml_cuda_vcache_nvfp4_matmul_global_native_slices(
             ggml_set_name(&out_slice, "nvfp4-vcache-native-pv");
 
             const float * scale_ptr = (const float *) ((const char *) scale->data + kv_stream * scale_stream_nb);
-            if (!ggml_cuda_mul_mat_nvfp4_native_device_weight_scale(
-                        ctx, &v_slice, &p_slice, &out_slice, scale_ptr, true)) {
-                return false;
+            ggml_cuda_nvfp4_native_scratch * native_scratch_ptr = events.n_streams > 1 ? &lanes[(size_t) stream_idx]->native_scratch : nullptr;
+            if (!ggml_cuda_mul_mat_nvfp4_native_device_weight_scale_stream(
+                        ctx, &v_slice, &p_slice, &out_slice, scale_ptr, true, slice_stream, native_scratch_ptr)) {
+                ok = false;
+                break;
             }
         }
+    }
+    ggml_cuda_vcache_nvfp4_end_parallel_streams(ctx, events, main_stream);
+    for (int i = (int) lanes.size() - 1; i >= 0; --i) {
+        lanes[(size_t) i].reset();
+    }
+    if (!ok) {
+        return false;
     }
 
     ggml_cuda_nvfp4_log_vcache_native_slice_active_once(rows, cols, kv_size, q_heads, q_streams);
@@ -205,6 +314,15 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
 
     if (src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
         return false;
+    }
+
+    ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
+
+    if (ggml_cuda_nvfp4_vcache_mm_standalone_enabled()) {
+        if (ggml_cuda_mul_mat_vcache_nvfp4_mm_standalone(ctx, src0, src1, dst)) {
+            ggml_cuda_nvfp4_log_vcache_matmul_path_once("mm-standalone");
+            return true;
+        }
     }
 
     const ggml_tensor * scale = ggml_tensor_get_nvfp4_scale(src0);
@@ -245,15 +363,6 @@ bool ggml_cuda_mul_mat_vcache_nvfp4(
 
     const int64_t r2 = q_heads / kv_heads;
     const int64_t r3 = q_streams / kv_streams;
-    ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
-
-    if (ggml_cuda_nvfp4_vcache_batched_enabled()) {
-        if (ggml_cuda_mul_mat_vcache_nvfp4_batched(ctx, src0, src1, dst)) {
-            ggml_cuda_nvfp4_log_vcache_matmul_path_once("batched-native-dynamic-p-global-scale");
-            return true;
-        }
-        ggml_cuda_nvfp4_log_vcache_batched_fallback_once();
-    }
 
     const bool native_result = ggml_cuda_vcache_nvfp4_matmul_global_native_slices(
             ctx,
