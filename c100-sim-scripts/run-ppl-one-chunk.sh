@@ -172,7 +172,7 @@ status=0
       --batch-size 512 \
       --ubatch-size 512 \
       -t 32 \
-      -c 256 \
+      -c 128 \
       --kv-unified \
       --chunks 1
 ) 2>&1 | tee "${LOG}" || status="${PIPESTATUS[0]}"
