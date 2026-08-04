@@ -34,6 +34,7 @@ struct tensor_export_observer {
     void * user_data = nullptr;
     std::vector<tensor_export_observed_node> nodes;
     std::unordered_map<const ggml_tensor *, size_t> node_lookup;
+    std::unordered_map<const ggml_tensor *, std::vector<size_t>> source_lookup;
     std::unordered_map<const ggml_tensor *, uint8_t> pending;
 };
 
@@ -594,6 +595,57 @@ bool write_op_tensor(
     return true;
 }
 
+json op_dst_metadata(const ggml_tensor * dst) {
+    if (!dst) {
+        return json::object();
+    }
+
+    if (dst->op == GGML_OP_SOFT_MAX) {
+        float scale = 1.0f;
+        float max_bias = 0.0f;
+        std::memcpy(&scale, (const float *) dst->op_params + 0, sizeof(scale));
+        std::memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(max_bias));
+        return {
+            { "op_params", {
+                { "scale", scale },
+                { "max_bias", max_bias },
+            } },
+        };
+    }
+
+    if (dst->op == GGML_OP_ROPE) {
+        const int32_t * params = (const int32_t *) dst->op_params;
+        float freq_base = 0.0f;
+        float freq_scale = 0.0f;
+        float ext_factor = 0.0f;
+        float attn_factor = 0.0f;
+        float beta_fast = 0.0f;
+        float beta_slow = 0.0f;
+        std::memcpy(&freq_base,   params +  5, sizeof(freq_base));
+        std::memcpy(&freq_scale,  params +  6, sizeof(freq_scale));
+        std::memcpy(&ext_factor,  params +  7, sizeof(ext_factor));
+        std::memcpy(&attn_factor, params +  8, sizeof(attn_factor));
+        std::memcpy(&beta_fast,   params +  9, sizeof(beta_fast));
+        std::memcpy(&beta_slow,   params + 10, sizeof(beta_slow));
+        return {
+            { "op_params", {
+                { "n_dims", params[1] },
+                { "mode", params[2] },
+                { "n_ctx_orig", params[4] },
+                { "freq_base", freq_base },
+                { "freq_scale", freq_scale },
+                { "ext_factor", ext_factor },
+                { "attn_factor", attn_factor },
+                { "beta_fast", beta_fast },
+                { "beta_slow", beta_slow },
+                { "sections", { params[11], params[12], params[13], params[14] } },
+            } },
+        };
+    }
+
+    return json::object();
+}
+
 bool read_contiguous_tensor_f32(
         const ggml_tensor * tensor,
         std::vector<float> & values,
@@ -813,7 +865,7 @@ bool export_op_graph(
     manifest["type"] = type;
     manifest["op"] = requested_op;
     manifest["layer"] = layer;
-    manifest["snapshot_timing"] = observer ? "node_completion" : "post_graph";
+    manifest["snapshot_timing"] = observer ? "source_producer_and_node_completion" : "post_graph";
     manifest["selection"] = {
         { "priority", requested_name.empty() ? "op" : "tensor_name" },
         { "requested_name", requested_name },
@@ -837,7 +889,7 @@ bool export_op_graph(
             return false;
         }
         if (observer) {
-            for (const ggml_tensor * tensor : { dst, dst->src[0], dst->src[1] }) {
+            for (const ggml_tensor * tensor : { dst, dst->src[0], dst->src[1], dst->src[2] }) {
                 if (tensor && !observed_tensor(observed, tensor)) {
                     LLAMA_LOG_ERROR("%s: missing tensor snapshot for node=%d tensor='%s'\n",
                             __func__, i, ggml_get_name(tensor));
@@ -847,7 +899,7 @@ bool export_op_graph(
         }
         const std::string actual_op = normalize_op_name(ggml_op_name(dst->op));
         if (write_op_tensor(dir, dst, i, actual_op, "dst", record_index, manifest["records"],
-                    json::object(), observed_tensor(observed, dst))) {
+                    op_dst_metadata(dst), observed_tensor(observed, dst))) {
             ++record_index;
         }
         if (write_op_tensor(dir, dst->src[0], i, actual_op, "src0", record_index, manifest["records"],
@@ -857,6 +909,10 @@ bool export_op_graph(
         }
         if (write_op_tensor(dir, dst->src[1], i, actual_op, "src1", record_index, manifest["records"],
                     { { "effective_role", "b_original" } }, observed_tensor(observed, dst->src[1]))) {
+            ++record_index;
+        }
+        if (write_op_tensor(dir, dst->src[2], i, actual_op, "src2", record_index, manifest["records"],
+                    json::object(), observed_tensor(observed, dst->src[2]))) {
             ++record_index;
         }
 
@@ -940,8 +996,9 @@ bool export_op_graph(
             const char * scale_role = captures_final_scale ? "matmul_scale" : "src1_global_scale";
             if (write_op_tensor(dir, b_scale_capture, i, actual_op, scale_role, record_index,
                         manifest["records"], captures_final_scale ? json {
-                            { "scale_encoding", "bf16_rne_rounded_f32" },
+                            { "scale_encoding", "f32" },
                             { "scale_semantics", "final_output_multiplier" },
+                            { "operand_rounding", "bf16_rne" },
                             { "scale_axis", (flags & GGML_NVFP4_MUL_MAT_CAPTURE_DYNAMIC) != 0 ? 1 : -1 },
                         } : json {
                             { "scale_encoding", "global_scale" },
@@ -1040,6 +1097,7 @@ bool tensor_export_maybe_retain_graph(ggml_cgraph * gf) {
             retain(dst);
             retain(dst->src[0]);
             retain(dst->src[1]);
+            retain(dst->src[2]);
         }
     } else {
         const auto kinds = selected_kinds();
@@ -1107,8 +1165,14 @@ tensor_export_observer * tensor_export_observer_create(
         tensor_export_observed_node node;
         node.node_index = i;
         node.dst = dst;
-        observer->node_lookup.emplace(dst, observer->nodes.size());
+        const size_t observed_index = observer->nodes.size();
+        observer->node_lookup.emplace(dst, observed_index);
         observer->nodes.push_back(std::move(node));
+        for (const ggml_tensor * src : { dst->src[0], dst->src[1], dst->src[2] }) {
+            if (src) {
+                observer->source_lookup[src].push_back(observed_index);
+            }
+        }
     }
 
     if (observer->nodes.empty()) {
@@ -1125,7 +1189,9 @@ bool tensor_export_observer_callback(ggml_tensor * tensor, bool ask, void * user
     }
 
     if (ask) {
-        uint8_t pending = observer->node_lookup.count(tensor) != 0 ? UINT8_C(1) : UINT8_C(0);
+        const bool observes_tensor = observer->node_lookup.count(tensor) != 0 ||
+                observer->source_lookup.count(tensor) != 0;
+        uint8_t pending = observes_tensor ? UINT8_C(1) : UINT8_C(0);
         if (observer->user_callback && observer->user_callback(tensor, true, observer->user_data)) {
             pending |= UINT8_C(2);
         }
@@ -1138,8 +1204,7 @@ bool tensor_export_observer_callback(ggml_tensor * tensor, bool ask, void * user
     const auto pending_it = observer->pending.find(tensor);
     const uint8_t pending = pending_it == observer->pending.end() ? UINT8_C(0) : pending_it->second;
     if ((pending & UINT8_C(1)) != 0) {
-        tensor_export_observed_node & node = observer->nodes.at(observer->node_lookup.at(tensor));
-        auto snapshot = [&](const ggml_tensor * value) {
+        auto snapshot = [&](tensor_export_observed_node & node, const ggml_tensor * value) {
             if (!value || node.snapshots.count(value) != 0) {
                 return;
             }
@@ -1154,18 +1219,30 @@ bool tensor_export_observer_callback(ggml_tensor * tensor, bool ask, void * user
             node.snapshots.emplace(value, std::move(bytes));
         };
 
-        snapshot(node.dst);
-        snapshot(node.dst->src[0]);
-        snapshot(node.dst->src[1]);
-        if (node.dst->op == GGML_OP_MUL_MAT && node.dst->src[0] &&
-                node.dst->src[0]->type == GGML_TYPE_NVFP4) {
-            const ggml_tensor * a_scale = ggml_tensor_get_nvfp4_scale(node.dst->src[0]);
-            if (!a_scale) {
-                a_scale = ggml_mul_mat_get_nvfp4_weight_scale(node.dst);
+        const auto source_it = observer->source_lookup.find(tensor);
+        if (source_it != observer->source_lookup.end()) {
+            for (size_t observed_index : source_it->second) {
+                snapshot(observer->nodes.at(observed_index), tensor);
             }
-            snapshot(a_scale);
-            snapshot(ggml_mul_mat_get_nvfp4_rhs_capture(node.dst));
-            snapshot(ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(node.dst));
+        }
+
+        const auto node_it = observer->node_lookup.find(tensor);
+        if (node_it != observer->node_lookup.end()) {
+            tensor_export_observed_node & node = observer->nodes.at(node_it->second);
+            snapshot(node, node.dst);
+            snapshot(node, node.dst->src[0]);
+            snapshot(node, node.dst->src[1]);
+            snapshot(node, node.dst->src[2]);
+            if (node.dst->op == GGML_OP_MUL_MAT && node.dst->src[0] &&
+                    node.dst->src[0]->type == GGML_TYPE_NVFP4) {
+                const ggml_tensor * a_scale = ggml_tensor_get_nvfp4_scale(node.dst->src[0]);
+                if (!a_scale) {
+                    a_scale = ggml_mul_mat_get_nvfp4_weight_scale(node.dst);
+                }
+                snapshot(node, a_scale);
+                snapshot(node, ggml_mul_mat_get_nvfp4_rhs_capture(node.dst));
+                snapshot(node, ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(node.dst));
+            }
         }
     }
 

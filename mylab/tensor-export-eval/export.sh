@@ -8,8 +8,8 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 TYPE="${TYPE:-decode}" # decode or prefill
 PROMPT="${PROMPT:-$(cat "${ROOT_DIR}/mylab/tensor-export-eval/wikitext-chunk-512.txt")}"
 echo "PROMPT=${PROMPT}"
-OP="${OP-GGML_OP_MUL_MAT}"
-NAME="${NAME-Qcur-scaled}"
+OP="${OP-GGML_OP_ROPE}"
+NAME="${NAME-Qcur}"
 LAYER="${LAYER:-0}"
 CUDA_DEVICE="${CUDA_DEVICE:-1}"
 MODEL_PATH="${MODEL_PATH:-${ROOT_DIR}/models/qwen3-8b-nvfp4.gguf}"
@@ -26,6 +26,11 @@ EXTRA_ARGS=()
 LLAMA_CLI="${ROOT_DIR}/build_cuda/bin/llama-cli"
 RMS_NORM_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-rms-norm.py"
 MUL_MAT_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-mul-mat.py"
+SOFT_MAX_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-soft-max.py"
+ROPE_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-rope.py"
+ROPE_COS_SIN_DIR="${ROPE_COS_SIN_DIR:-${ROOT_DIR}/experiments/20260728T102936Z-rope-cos-sin-context-8192}"
+ROPE_COS_SIN_MANIFEST_SOURCE="${ROPE_COS_SIN_DIR}/manifest.json"
+ROPE_COS_SIN_DATA_SOURCE="${ROPE_COS_SIN_DIR}/rope-cos-sin-f32.bin"
 
 TYPE="${TYPE,,}"
 OP="${OP^^}"
@@ -42,6 +47,14 @@ case "${OP}" in
     MUL_MAT)
         VALIDATOR_SOURCE="${MUL_MAT_VALIDATOR_SOURCE}"
         VALIDATOR_NAME="verify-mul-mat.py"
+        ;;
+    SOFT_MAX)
+        VALIDATOR_SOURCE="${SOFT_MAX_VALIDATOR_SOURCE}"
+        VALIDATOR_NAME="verify-soft-max.py"
+        ;;
+    ROPE)
+        VALIDATOR_SOURCE="${ROPE_VALIDATOR_SOURCE}"
+        VALIDATOR_NAME="verify-rope.py"
         ;;
 esac
 
@@ -89,6 +102,12 @@ if [[ -n "${VALIDATOR_SOURCE}" && ! -f "${VALIDATOR_SOURCE}" ]]; then
     exit 1
 fi
 
+if [[ "${OP}" == "ROPE" &&
+      ( ! -f "${ROPE_COS_SIN_MANIFEST_SOURCE}" || ! -f "${ROPE_COS_SIN_DATA_SOURCE}" ) ]]; then
+    echo "ROPE cos/sin table is incomplete: ${ROPE_COS_SIN_DIR}" >&2
+    exit 1
+fi
+
 if [[ -z "${RUN_DIR}" ]]; then
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
     if [[ -n "${NAME}" ]]; then
@@ -112,6 +131,10 @@ TENSOR_DIR="${RUN_DIR}/tensors"
 mkdir -p "${TENSOR_DIR}"
 if [[ -n "${VALIDATOR_SOURCE}" ]]; then
     install -m 0755 "${VALIDATOR_SOURCE}" "${RUN_DIR}/${VALIDATOR_NAME}"
+fi
+if [[ "${OP}" == "ROPE" ]]; then
+    install -m 0644 "${ROPE_COS_SIN_MANIFEST_SOURCE}" "${RUN_DIR}/rope-cos-sin-manifest.json"
+    install -m 0644 "${ROPE_COS_SIN_DATA_SOURCE}" "${RUN_DIR}/rope-cos-sin-f32.bin"
 fi
 
 COMMAND=(
@@ -175,6 +198,8 @@ GGML_CUDA_DISABLE_GRAPHS=0 \
 GGML_CUDA_TRUNC_ENABLE=1 \
 GGML_CUDA_TRUNC_LOG=1 \
 GGML_CUDA_NVFP4_FP4MULMAT=1 \
+GGML_CUDA_NVFP4_BF16_QUANT=1 \
+GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=1 \
 LLAMA_EXPT_TENSOR_EXPORT_DIR="${TENSOR_DIR}" \
 LLAMA_EXPT_TENSOR_EXPORT_OP="${OP}" \
 LLAMA_EXPT_TENSOR_EXPORT_NAME="${NAME}" \
@@ -224,6 +249,7 @@ requested_name="$(sed -nE 's/^[[:space:]]*"requested_name":[[:space:]]*"([^"]*)"
 dst_records="$(grep -c '"role": "dst"' "${MANIFEST_PATH}" || true)"
 src0_records="$(grep -c '"role": "src0"' "${MANIFEST_PATH}" || true)"
 src1_records="$(grep -c '"role": "src1"' "${MANIFEST_PATH}" || true)"
+src2_records="$(grep -c '"role": "src2"' "${MANIFEST_PATH}" || true)"
 first_dst_path="$(awk '
     /"role": "dst"/ { selected = 1; next }
     selected && /"path":/ {
@@ -234,17 +260,20 @@ first_dst_path="$(awk '
         exit
     }
 ' "${MANIFEST_PATH}")"
-first_src0_path="$(awk '
-    /"role": "src0"/ { selected = 1; next }
-    selected && /"path":/ {
-        path = $0
-        sub(/^[[:space:]]*"path":[[:space:]]*"/, "", path)
-        sub(/",?[[:space:]]*$/, "", path)
-        print path
-        exit
-    }
-' "${MANIFEST_PATH}")"
-
+validator_exit_code=""
+validator_valid=""
+if [[ -n "${VALIDATOR_NAME}" && -n "${first_dst_path}" ]]; then
+    set +e
+    "${RUN_DIR}/${VALIDATOR_NAME}" "${TENSOR_DIR}/${first_dst_path}" \
+        > "${RUN_DIR}/validator.log" 2>&1
+    validator_exit_code=$?
+    set -e
+    if [[ ${validator_exit_code} -eq 0 ]]; then
+        validator_valid=true
+    else
+        validator_valid=false
+    fi
+fi
 resolved_name=""
 dst_name_mismatches=0
 if [[ -n "${NAME}" ]]; then
@@ -299,7 +328,10 @@ fi
     printf 'DST_RECORDS=%q\n' "${dst_records}"
     printf 'SRC0_RECORDS=%q\n' "${src0_records}"
     printf 'SRC1_RECORDS=%q\n' "${src1_records}"
+    printf 'SRC2_RECORDS=%q\n' "${src2_records}"
     printf 'VALIDATOR=%q\n' "${VALIDATOR_NAME}"
+    printf 'VALIDATOR_EXIT_CODE=%q\n' "${validator_exit_code}"
+    printf 'VALIDATOR_VALID=%q\n' "${validator_valid}"
     printf 'VALID=%q\n' "${valid}"
 } > "${RUN_DIR}/validation.env"
 
@@ -319,18 +351,20 @@ fi
     echo "- dst records: ${dst_records}"
     echo "- src0 records: ${src0_records}"
     echo "- src1 records: ${src1_records}"
+    echo "- src2 records: ${src2_records}"
     if [[ -n "${VALIDATOR_NAME}" ]]; then
         echo "- Bundled validator: \`${VALIDATOR_NAME}\`"
+        echo "- Validator result: \`${validator_valid}\` (exit ${validator_exit_code})"
     fi
     echo "- Validation: \`${valid}\`"
-    if [[ "${OP}" == "RMS_NORM" && -n "${first_dst_path}" && -n "${first_src0_path}" ]]; then
+    if [[ "${OP}" == "RMS_NORM" && -n "${first_dst_path}" ]]; then
         echo
         echo "## RMSNorm data validation"
         echo
-        echo "Pass the result file first and the input file second:"
+        echo "Pass one result file; its input is resolved from manifest.json:"
         echo
         echo '```bash'
-        printf './%s tensors/%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}" "${first_src0_path}"
+        printf './%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}"
         echo '```'
     elif [[ "${OP}" == "MUL_MAT" && -n "${first_dst_path}" ]]; then
         echo
@@ -341,12 +375,35 @@ fi
         echo '```bash'
         printf './%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}"
         echo '```'
+    elif [[ "${OP}" == "SOFT_MAX" && -n "${first_dst_path}" ]]; then
+        echo
+        echo "## SOFT_MAX data validation"
+        echo
+        echo "Pass one result file; its inputs and op parameters are resolved from manifest.json:"
+        echo
+        echo '```bash'
+        printf './%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}"
+        echo '```'
+    elif [[ "${OP}" == "ROPE" && -n "${first_dst_path}" ]]; then
+        echo
+        echo "## ROPE data validation"
+        echo
+        echo "The validator resolves src0, positions, and op parameters from the manifest and looks up cos/sin from the bundled static table:"
+        echo
+        echo '```bash'
+        printf './%s tensors/%s\n' "${VALIDATOR_NAME}" "${first_dst_path}"
+        echo '```'
     fi
 } > "${RUN_DIR}/summary.md"
 
 if [[ "${valid}" != true ]]; then
     echo "manifest validation failed: ${RUN_DIR}" >&2
     exit 3
+fi
+
+if [[ -n "${VALIDATOR_NAME}" && "${validator_valid}" != true ]]; then
+    echo "tensor value validation failed: ${RUN_DIR}" >&2
+    exit 4
 fi
 
 echo "export completed: ${RUN_DIR}"

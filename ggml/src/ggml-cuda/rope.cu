@@ -502,7 +502,10 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
     }
 }
 
-void ggml_cuda_op_rope(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void ggml_cuda_op_rope(ggml_backend_cuda_context & ctx, ggml_tensor * dst, bool qemu_enabled) {
+    if (qemu_enabled && ggml_cuda_rope_qemu_try_run(ctx, dst)) {
+        return;
+    }
     ggml_cuda_op_rope_impl<true>(ctx, dst);
 }
 

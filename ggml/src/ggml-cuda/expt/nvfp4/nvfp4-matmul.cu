@@ -90,17 +90,6 @@ static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_bf16_round_f32(
     return v.f;
 }
 
-static __global__ void ggml_cuda_nvfp4_bf16_round_scales_kernel(
-        float * __restrict__ scales,
-        const int64_t nrows) {
-    const int64_t row = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= nrows) {
-        return;
-    }
-
-    scales[row] = ggml_cuda_nvfp4_bf16_round_f32(scales[row]);
-}
-
 static __global__ void ggml_cuda_nvfp4_set_scalar_kernel(float * dst, float value) {
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         dst[0] = value;
@@ -1216,20 +1205,13 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                 use_outlier_q_tensor_scale,
                 stream);
         CUDA_CHECK(cudaGetLastError());
-        if (use_fp4mulmat) {
-            const int block_size = 256;
-            const int grid_size = (int) ((ne11 + block_size - 1) / block_size);
-            ggml_cuda_nvfp4_bf16_round_scales_kernel<<<grid_size, block_size, 0, stream>>>(
-                    dynamic_input_scales.get(), ne11);
-            CUDA_CHECK(cudaGetLastError());
-            if (capture_active) {
-                CUDA_CHECK(cudaMemcpyAsync(
-                        rhs_scale_capture->data,
-                        dynamic_input_scales.get(),
-                        (size_t) ne11 * sizeof(float),
-                        cudaMemcpyDeviceToDevice,
-                        stream));
-            }
+        if (capture_active && use_fp4mulmat) {
+            CUDA_CHECK(cudaMemcpyAsync(
+                    rhs_scale_capture->data,
+                    dynamic_input_scales.get(),
+                    (size_t) ne11 * sizeof(float),
+                    cudaMemcpyDeviceToDevice,
+                    stream));
         }
 
         if (use_bf16_trunc_nn) {

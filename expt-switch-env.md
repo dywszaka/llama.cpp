@@ -372,17 +372,27 @@ Selects op-oriented tensor export mode. Default: unset/off.
 When set together with `LLAMA_EXPT_TENSOR_EXPORT_DIR`, the export pass matches
 all graph nodes whose `ggml_op_name()` equals this value, ignoring case and an
 optional `GGML_OP_` prefix. For the first graph selected by
-`LLAMA_EXPT_TENSOR_EXPORT_TYPE`, it writes each matching node's `dst`,
-`dst->src[0]`, and `dst->src[1]` as raw binary spans and records their role,
-dtype, shape, strides, contiguity, and view offset in `manifest.json`. This mode
-marks the matching `dst`, `src0`, and `src1` storage as graph outputs before
-allocation. During the selected execution, the scheduler also stops immediately
-after each matching node, synchronizes its backend, and copies `dst`, `src0`,
-and `src1` into host snapshots before later nodes can overwrite aliased storage.
-The v2 manifest records `snapshot_timing: node_completion`. Existing user eval
-callbacks are chained through the export observer. Retention is applied when the
-graph is built even if a compatible prefill graph is later reused for the
-selected decode execution. This mode does not use
+`LLAMA_EXPT_TENSOR_EXPORT_TYPE`, it writes each matching node's `dst` and
+populated `dst->src[0..2]` tensors as raw binary spans and records their role,
+dtype, shape, strides, contiguity, and view offset in `manifest.json`. For
+`SOFT_MAX`, the dst record also stores `op_params.scale` and
+`op_params.max_bias`, while `src2` captures optional attention sinks. For
+`ROPE`, the dst record stores the complete RoPE parameters needed to interpret
+the inputs and validate the output, including `n_dims`, `mode`, `n_ctx_orig`,
+the frequency/scaling values, and multi-RoPE sections. This mode
+marks the matching `dst` and populated `src0` through `src2` storage as graph
+outputs before allocation. During the selected execution, the scheduler also
+stops immediately after each matching node, synchronizes its backend, and
+copies those tensors into host snapshots before later nodes can overwrite
+aliased storage.
+The v2 manifest records
+`snapshot_timing: source_producer_and_node_completion`: graph-produced inputs
+are copied when their producer finishes so in-place selected ops cannot
+overwrite them, while the selected dst and any remaining inputs are copied when
+the selected node finishes. Existing user eval callbacks are chained through
+the export observer. Retention is applied when the graph is built even if a
+compatible prefill graph is later reused for the selected decode execution.
+This mode does not use
 `LLAMA_EXPT_TENSOR_EXPORT_KINDS`. If
 `LLAMA_EXPT_TENSOR_EXPORT_NAME` is also set, tensor-name selection takes
 priority and this op value is recorded but ignored for node selection.
@@ -406,7 +416,9 @@ cuBLASLt variant, the v2 manifest exports the original NVFP4 A tensor, A's raw
 inverse-global scale and canonical global scale, the original F32 B tensor, the
 effective NVFP4 B tensor, and B's canonical global scale. For the FP4MULMAT
 variant, it instead exports only one scale record named `matmul_scale`: the
-BF16-RNE-rounded final multiplier actually applied to the accumulator output.
+original FP32 final multiplier supplied to the accumulator output multiply.
+The manifest records the BF16-RNE operand rounding performed by FP4MULMAT, but
+the exported scale itself retains its FP32 low bits.
 The separate A and B global-scale records are omitted in that variant. If the
 native path is not used, the manifest records `native_nvfp4_not_used` and does
 not claim an effective B source. The capture sidecars are created only for the
@@ -511,13 +523,13 @@ cuBLASLt. This is intended for hardware-model comparison and correctness
 experiments, not performance measurement.
 
 The accumulator writeback follows the `call_mul_fp32` model: the accumulator
-is truncated to canonical BF16 and exactly widened to FP32, multiplied by the
-original FP32 column scale without rounding that scale to BF16, then rounded
-to BF16 with RNE before being stored in the F32 destination.
+and column-scale operands are rounded to BF16 with RNE and exactly widened to
+FP32, multiplied in FP32, then rounded to BF16 with RNE before being stored in
+the F32 destination.
 
 For static input scales this multiplier is
 `weight_scale_2 / global_scale`; for dynamic input scales it is computed per RHS
-row. NVFP4 tensor export captures this rounded final multiplier as the single
+row. NVFP4 tensor export captures the original FP32 final multiplier as the single
 exported scale for the FP4MULMAT variant, rather than exporting the separate
 weight/input global-scale components.
 
@@ -737,3 +749,18 @@ Enables CUDA NVFP4 V-cache single-token fast update. Default: off.
 
 When enabled, CUDA set_rows may patch single-token updates without
 requantizing the whole 16-token V-cache block.
+
+## CUDA RoPE QEMU Dispatch
+
+### `GGML_CUDA_ROPE_QEMU_ENABLED`
+
+Enables the experimental CUDA RoPE QEMU dispatch hook. Default: unset/off.
+
+Accepted true values are `1`, `true`, and `on`; accepted false values are an
+unset or empty value, `0`, `false`, and `off`. The switch is read once on first
+use. When enabled, `GGML_OP_ROPE` receives `qemu_enabled=true`, CUDA graph
+capture is disabled for graphs containing RoPE, and the experimental QEMU entry
+point is attempted. The current interface-only entry point returns control to
+the existing CUDA RoPE kernel, preserving output while the external QEMU
+operator is not yet connected. A once-only log confirms both the switch state
+and the fallback path.

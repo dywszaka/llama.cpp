@@ -333,12 +333,263 @@ static bool test_fp4mulmat_export_writes_only_final_scale() {
                     "FP4MULMAT export must contain matmul_scale") &&
              expect(manifest.find("\"scale_semantics\": \"final_output_multiplier\"") != std::string::npos,
                     "FP4MULMAT export must describe final scale semantics") &&
+             expect(manifest.find("\"scale_encoding\": \"f32\"") != std::string::npos,
+                    "FP4MULMAT export must preserve the F32 scale") &&
+             expect(manifest.find("\"operand_rounding\": \"bf16_rne\"") != std::string::npos,
+                    "FP4MULMAT export must describe scale operand rounding") &&
              expect(manifest.find("\"role\": \"src0_scale_raw\"") == std::string::npos,
                     "FP4MULMAT export must omit raw src0 scale") &&
              expect(manifest.find("\"role\": \"src0_global_scale\"") == std::string::npos,
                     "FP4MULMAT export must omit derived src0 global scale") &&
              expect(manifest.find("\"role\": \"src1_global_scale\"") == std::string::npos,
                     "FP4MULMAT export must omit RHS global scale") && ok;
+    }
+
+    if (sched) {
+        ggml_backend_sched_free(sched);
+    }
+    if (backend) {
+        ggml_backend_free(backend);
+    }
+    ggml_free(ctx);
+    for (size_t i = 0; i < old_values.size(); ++i) {
+        if (old_present[i]) {
+            setenv(env_names[i], old_values[i].c_str(), 1);
+        } else {
+            unsetenv(env_names[i]);
+        }
+    }
+    return ok;
+}
+
+static bool test_soft_max_export_writes_params_and_sinks() {
+    const char * env_names[] = {
+        "LLAMA_EXPT_TENSOR_EXPORT_DIR",
+        "LLAMA_EXPT_TENSOR_EXPORT_NAME",
+        "LLAMA_EXPT_TENSOR_EXPORT_OP",
+        "LLAMA_EXPT_TENSOR_EXPORT_TYPE",
+        "LLAMA_EXPT_TENSOR_EXPORT_LAYER",
+    };
+    std::vector<std::string> old_values;
+    std::vector<bool> old_present;
+    for (const char * env_name : env_names) {
+        const char * value = std::getenv(env_name);
+        old_present.push_back(value != nullptr);
+        old_values.emplace_back(value ? value : "");
+    }
+
+    const std::string dir = temp_dir() + "-soft-max";
+    std::filesystem::remove_all(dir);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", dir.c_str(), 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_NAME", "softmax-export-0", 1);
+    unsetenv("LLAMA_EXPT_TENSOR_EXPORT_OP");
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_TYPE", "decode", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_LAYER", "0", 1);
+
+    ggml_init_params params = {};
+    params.mem_size = 1024 * 1024;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!expect(ctx != nullptr, "expected ggml context for SOFT_MAX export test")) {
+        return false;
+    }
+
+    ggml_tensor * input_leaf = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 4, 1, 2, 1);
+    ggml_tensor * input = ggml_scale(ctx, input_leaf, 1.0f);
+    ggml_set_name(input, "softmax-input-0");
+    ggml_tensor * mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 4, 1, 1, 1);
+    ggml_tensor * sinks = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2);
+    ggml_tensor * dst = ggml_soft_max_ext(ctx, input, mask, 0.125f, 8.0f);
+    ggml_soft_max_add_sinks(dst, sinks);
+    ggml_set_name(dst, "softmax-export-0");
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, dst);
+    const bool retained = llama_expt::tensor_export_maybe_retain_graph(gf);
+    llama_expt::tensor_export_observer * observer =
+            llama_expt::tensor_export_observer_create(gf, false, nullptr, nullptr);
+
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_sched_t sched = ggml_backend_sched_new(&backend, nullptr, 1, 16, false, true);
+    bool ok = expect(retained, "expected SOFT_MAX graph retention") &&
+            expect((dst->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                    "SOFT_MAX dst must be retained") &&
+            expect((sinks->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                    "SOFT_MAX src2 sinks must be retained") &&
+            expect(observer != nullptr, "expected SOFT_MAX export observer") &&
+            expect(backend != nullptr && sched != nullptr, "expected CPU scheduler for SOFT_MAX export test") &&
+            expect(ggml_backend_sched_alloc_graph(sched, gf), "expected graph allocation for SOFT_MAX export test");
+
+    if (ok) {
+        const std::vector<float> input_data = { -1.0f, 0.0f, 1.0f, 2.0f, 2.0f, 1.0f, 0.0f, -1.0f };
+        const std::vector<ggml_fp16_t> mask_data = {
+            ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f),
+            ggml_fp32_to_fp16(-1.0f), ggml_fp32_to_fp16(-2.0f),
+        };
+        const std::vector<float> sink_data = { -0.5f, -1.0f };
+        const std::vector<float> dst_data((size_t) ggml_nelements(dst), 0.25f);
+        ggml_backend_tensor_set(input, input_data.data(), 0, input_data.size() * sizeof(float));
+        ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+        ggml_backend_tensor_set(sinks, sink_data.data(), 0, sink_data.size() * sizeof(float));
+        ggml_backend_tensor_set(dst, dst_data.data(), 0, dst_data.size() * sizeof(float));
+        ok = expect(llama_expt::tensor_export_observer_callback(input, true, observer),
+                    "observer must stop after the SOFT_MAX src0 producer") &&
+             expect(llama_expt::tensor_export_observer_callback(input, false, observer),
+                    "observer must snapshot SOFT_MAX src0 before execution") && ok;
+        ggml_backend_tensor_set(input, dst_data.data(), 0, dst_data.size() * sizeof(float));
+        ok = expect(llama_expt::tensor_export_observer_callback(dst, true, observer),
+                    "observer must request the SOFT_MAX dst") &&
+             expect(llama_expt::tensor_export_observer_callback(dst, false, observer),
+                    "observer must snapshot the SOFT_MAX dst") &&
+             expect(llama_expt::tensor_export_graph(sched, gf, false, observer),
+                    "expected SOFT_MAX graph export") && ok;
+    }
+
+    if (ok) {
+        std::ifstream in(dir + "/manifest.json", std::ios::binary);
+        const std::string manifest((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        ok = expect(manifest.find("\"op\": \"SOFT_MAX\"") != std::string::npos,
+                    "SOFT_MAX export must record the op") &&
+             expect(manifest.find(
+                    "\"snapshot_timing\": \"source_producer_and_node_completion\"") != std::string::npos,
+                    "SOFT_MAX export must describe producer-time source snapshots") &&
+             expect(manifest.find("\"role\": \"src2\"") != std::string::npos,
+                    "SOFT_MAX export must contain src2 sinks") &&
+             expect(manifest.find("\"scale\": 0.125") != std::string::npos,
+                    "SOFT_MAX export must record scale") &&
+             expect(manifest.find("\"max_bias\": 8.0") != std::string::npos,
+                    "SOFT_MAX export must record max_bias") && ok;
+
+        float exported_src0_first = 0.0f;
+        bool found_src0 = false;
+        for (const auto & entry : std::filesystem::directory_iterator(dir)) {
+            if (entry.path().filename().string().find("-src0-") == std::string::npos) {
+                continue;
+            }
+            std::ifstream raw(entry.path(), std::ios::binary);
+            raw.read(reinterpret_cast<char *>(&exported_src0_first), sizeof(exported_src0_first));
+            found_src0 = raw.good();
+            break;
+        }
+        ok = expect(found_src0, "SOFT_MAX export must write src0 data") &&
+             expect_close(exported_src0_first, -1.0, 0.0,
+                    "SOFT_MAX src0 must be captured before in-place overwrite") && ok;
+    }
+
+    llama_expt::tensor_export_observer_free(observer);
+    if (sched) {
+        ggml_backend_sched_free(sched);
+    }
+    if (backend) {
+        ggml_backend_free(backend);
+    }
+    ggml_free(ctx);
+    for (size_t i = 0; i < old_values.size(); ++i) {
+        if (old_present[i]) {
+            setenv(env_names[i], old_values[i].c_str(), 1);
+        } else {
+            unsetenv(env_names[i]);
+        }
+    }
+    return ok;
+}
+
+static bool test_rope_export_writes_params_and_positions() {
+    const char * env_names[] = {
+        "LLAMA_EXPT_TENSOR_EXPORT_DIR",
+        "LLAMA_EXPT_TENSOR_EXPORT_NAME",
+        "LLAMA_EXPT_TENSOR_EXPORT_OP",
+        "LLAMA_EXPT_TENSOR_EXPORT_TYPE",
+        "LLAMA_EXPT_TENSOR_EXPORT_LAYER",
+    };
+    std::vector<std::string> old_values;
+    std::vector<bool> old_present;
+    for (const char * env_name : env_names) {
+        const char * value = std::getenv(env_name);
+        old_present.push_back(value != nullptr);
+        old_values.emplace_back(value ? value : "");
+    }
+
+    const std::string dir = temp_dir() + "-rope";
+    std::filesystem::remove_all(dir);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", dir.c_str(), 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_NAME", "rope-export", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_OP", "ROPE", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_TYPE", "decode", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_LAYER", "0", 1);
+
+    ggml_init_params params = {};
+    params.mem_size = 1024 * 1024;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!expect(ctx != nullptr, "expected ggml context for ROPE export test")) {
+        return false;
+    }
+
+    ggml_tensor * input = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 128, 2, 2);
+    ggml_set_name(input, "rope-input-0");
+    ggml_tensor * positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
+    ggml_set_name(positions, "rope-pos-0");
+    ggml_tensor * dst = ggml_rope_ext(
+            ctx, input, positions, nullptr,
+            128, GGML_ROPE_TYPE_NEOX, 40960,
+            1000000.0f, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+    ggml_set_name(dst, "rope-export-0");
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, dst);
+    const bool retained = llama_expt::tensor_export_maybe_retain_graph(gf);
+
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_sched_t sched = ggml_backend_sched_new(&backend, nullptr, 1, 16, false, true);
+    bool ok = expect(retained, "expected ROPE graph retention") &&
+            expect((dst->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                    "ROPE dst must be retained") &&
+            expect((input->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                    "ROPE src0 must be retained") &&
+            expect((positions->flags & GGML_TENSOR_FLAG_OUTPUT) != 0,
+                    "ROPE src1 positions must be retained") &&
+            expect(backend != nullptr && sched != nullptr, "expected CPU scheduler for ROPE export test") &&
+            expect(ggml_backend_sched_alloc_graph(sched, gf), "expected graph allocation for ROPE export test");
+
+    if (ok) {
+        std::vector<float> input_data((size_t) ggml_nelements(input), 0.0f);
+        std::vector<float> dst_data((size_t) ggml_nelements(dst), 0.0f);
+        const std::vector<int32_t> position_data = { 17, 18 };
+        ggml_backend_tensor_set(input, input_data.data(), 0, input_data.size() * sizeof(float));
+        ggml_backend_tensor_set(positions, position_data.data(), 0, position_data.size() * sizeof(int32_t));
+        ggml_backend_tensor_set(dst, dst_data.data(), 0, dst_data.size() * sizeof(float));
+        ok = expect(llama_expt::tensor_export_graph(sched, gf, false),
+                    "expected ROPE graph export") && ok;
+    }
+
+    if (ok) {
+        std::ifstream in(dir + "/manifest.json", std::ios::binary);
+        const std::string manifest((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        ok = expect(manifest.find("\"op\": \"ROPE\"") != std::string::npos,
+                    "ROPE export must record the op") &&
+             expect(manifest.find("\"role\": \"src1\"") != std::string::npos,
+                    "ROPE export must contain src1 positions") &&
+             expect(manifest.find("\"n_dims\": 128") != std::string::npos,
+                    "ROPE export must record n_dims") &&
+             expect(manifest.find("\"mode\": 2") != std::string::npos,
+                    "ROPE export must record mode") &&
+             expect(manifest.find("\"n_ctx_orig\": 40960") != std::string::npos,
+                    "ROPE export must record n_ctx_orig") &&
+             expect(manifest.find("\"freq_base\": 1000000.0") != std::string::npos,
+                    "ROPE export must record freq_base") &&
+             expect(manifest.find("\"freq_scale\": 1.0") != std::string::npos,
+                    "ROPE export must record freq_scale") &&
+             expect(manifest.find("\"ext_factor\": 0.0") != std::string::npos,
+                    "ROPE export must record ext_factor") &&
+             expect(manifest.find("\"attn_factor\": 1.0") != std::string::npos,
+                    "ROPE export must record attn_factor") &&
+             expect(manifest.find("\"beta_fast\": 32.0") != std::string::npos,
+                    "ROPE export must record beta_fast") &&
+             expect(manifest.find("\"beta_slow\": 1.0") != std::string::npos,
+                    "ROPE export must record beta_slow") &&
+             expect(manifest.find("\"sections\": [") != std::string::npos,
+                    "ROPE export must record sections") && ok;
     }
 
     if (sched) {
@@ -586,6 +837,12 @@ int main() {
         return 1;
     }
     if (!test_fp4mulmat_export_writes_only_final_scale()) {
+        return 1;
+    }
+    if (!test_soft_max_export_writes_params_and_sinks()) {
+        return 1;
+    }
+    if (!test_rope_export_writes_params_and_positions()) {
         return 1;
     }
     if (!test_manifest_eval_and_rejection()) {

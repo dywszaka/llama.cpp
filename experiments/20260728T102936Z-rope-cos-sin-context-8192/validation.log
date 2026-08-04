@@ -1,0 +1,5 @@
+elements=1048576
+bytes=4194304
+max_unit_circle_error=5.00036066e-07
+max_abs=1
+qemu_enabled_vs_disabled=bit_identical

@@ -45,3 +45,4 @@ void ggml_cuda_rope_qemu_run(
         const ggml_tensor * dst_tensor,
         const ggml_cuda_rope_qemu_params & params,
         ggml_cuda_rope_launch_fn cuda_launch);
+
