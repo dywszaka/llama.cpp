@@ -281,6 +281,46 @@ records D2H, RPC, daemon, and return-copy time. `QEMU_CUDA_ROPE_TIMING` records
 preprocess, table operator, output conversion, and total CUDA time. Timing uses
 CUDA event synchronization and changes performance behavior.
 
+## CUDA SWIGLU QEMU Offload
+
+### `GGML_CUDA_GLU_QEMU_MODE`
+
+Selects `cuda|qemu|qemu_cuda|compare` for `GGML_GLU_OP_SWIGLU`. The build
+option is `-DGGML_CUDA_GLU_QEMU=ON`; unset defaults to `cuda`. Other GLU
+variants keep their original CUDA implementation. Both split-input and
+two-tensor SWIGLU layouts are packed on CUDA into identical dense BF16 x/gate
+inputs using RZ truncation.
+
+The `call_glu_fp32` numerical model widens x and gate to FP32. Negated x is
+narrowed once to the BF16 input boundary of `ni900_exp_f16m8`; the exp result is
+widened immediately, and FP32 RVV performs `x / (1 + exp(-x)) * gate` before a
+single BF16 RNE output conversion. `qemu_cuda` mirrors the NI900 exp model on
+device. `compare` retains the original llama.cpp CUDA output downstream and
+records llama-vs-QEMU error plus QEMU-vs-qemu_cuda BF16 mismatches. Non-CUDA
+modes disable CUDA graph capture for intercepted SWIGLU nodes.
+
+### `GGML_CUDA_GLU_QEMU_ENDPOINT`
+
+Daemon endpoint, default `tcp://127.0.0.1:15588`.
+
+### `GGML_CUDA_GLU_QEMU_TIMEOUT_MS`
+
+ZMQ timeout in milliseconds, default `300000`.
+
+### `GGML_CUDA_GLU_QEMU_ARTIFACT`
+
+Compare JSONL path, default `experiments/glu-qemu-compare.jsonl`.
+
+### `GGML_CUDA_GLU_QEMU_MISMATCH_LOG`
+
+Mismatch-only JSONL path, default `experiments/glu-qemu-cuda-mismatch.jsonl`.
+It records both complete canonical inputs and both BF16 outputs.
+
+### `GGML_CUDA_GLU_QEMU_TIMING`
+
+Enables diagnostic SWIGLU timing logs. Default: unset/off. Timing synchronizes
+the measured call and therefore changes performance behavior.
+
 ## Tensor Export and Offline Quantization Evaluation
 
 ### `LLAMA_EXPT_NVFP4_K_OFFLINE_CHANNEL_ORDER`
