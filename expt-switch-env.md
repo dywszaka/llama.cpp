@@ -113,6 +113,24 @@ Supported values are `k`, `q`, `v`, `kq`, and `kqv`. This switch only filters
 which recognized graph tensor names are exported; it does not enable export
 without `LLAMA_EXPT_TENSOR_EXPORT_DIR`.
 
+## CUDA Softmax
+
+### `GGML_CUDA_SOFTMAX_BF16_EXP`
+
+Enables an experimental BF16 fixed-point exponential approximation in the
+non-flash CUDA `GGML_OP_SOFT_MAX` forward path. Default: unset/off.
+
+When enabled with a value beginning with `1`, CUDA softmax truncates each FP32
+range-reduced input to BF16 bits, evaluates the C100 BF16 `expp` model, expands
+the BF16 result back to FP32, and uses it for both tensor elements and optional
+attention sinks. Maximum reduction, accumulation, reciprocal, and final
+normalization remain FP32. Softmax backward and flash-attention softmax are
+unchanged.
+
+The switch is cached on first CUDA softmax use, so changing it later in the same
+process is unsupported. The selected enabled or disabled exp dispatch branch is
+logged once.
+
 ## FP8 E4M3 E8M0 32 K-Cache
 
 ### `--cache-type-k fp8_e4m3_e8m0_32`

@@ -146,6 +146,7 @@ status=0
   export CUDA_VISIBLE_DEVICES=0
   # 在 compute_forward 计算时，把计算结果dst 中的 data 从 f32 round 到 bf16（仍然是 f32 表示）
   export GGML_CUDA_TRUNC_ENABLE=1
+  export GGML_CUDA_SOFTMAX_BF16_EXP=1
   export PROJECT_ROOT="${CONTAINER_ROOT}/build-cuda-c100"
   export LD_LIBRARY_PATH="${CONTAINER_ROOT}/build-cuda-c100/bin:/usr/local/cuda/lib64"
   export LLAMA_C100_REGISTER_DEVICE="${REGISTER_C100_DEVICE}"
