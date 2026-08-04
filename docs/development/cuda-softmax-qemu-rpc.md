@@ -2,13 +2,13 @@
 
 This document defines the transport used by
 `ggml/src/ggml-cuda/expt/softmax-qemu.cu` and
-`call_softmax/daemon/softmax_qemu_daemon.cpp`. The CUDA tensor and algorithm
+`call_softmax_fp32/daemon/softmax_qemu_daemon.cpp`. The CUDA tensor and algorithm
 semantics remain defined by `cuda-softmax-io-protocol.md`.
 
 ## ZMQ RPC
 
 The llama.cpp client uses a ZMQ `REQ` socket. The daemon binds a `REP` socket at
-`tcp://127.0.0.1:15580` by default. Integer and float fields are little-endian;
+`tcp://127.0.0.1:15584` by default. Integer and float fields are little-endian;
 both processes run in the same x86-64 container.
 
 Each request has four frames:
@@ -27,14 +27,14 @@ Each response has two frames:
 The llama.cpp integration uses `SOFTMAX_REQUEST_BF16_IO`: frame 2 and the
 response are BF16 bit patterns, frame 3 is empty because scale/mask/ALiBi have
 already been folded into the effective logits on CUDA, and optional frame 4
-contains BF16 attention sinks. The legacy request form without this flag keeps
-the original F32 input/mask/sink/output layout.
+contains BF16 attention sinks. The FP32 RVV firmware accepts only this canonical
+BF16 request form; the historical `call_softmax/` service remains separate.
 
 The protocol magic is `0x31584d53` and the current version is 1. The canonical
 layout definitions are duplicated with compile-time size checks in:
 
 - `ggml/src/ggml-cuda/expt/softmax-qemu-protocol.h`;
-- `call_softmax/include/softmax_rpc_protocol.h`.
+- `call_softmax_fp32/include/softmax_rpc_protocol.h`.
 
 ## Globalram mailbox
 
@@ -43,9 +43,10 @@ mailbox begins at globalram offset 0 and request data begins at offset `0x1000`.
 The daemon writes input, optional mask, optional sinks, and output regions on
 64-byte boundaries, then publishes `SOFTMAX_MAILBOX_REQUEST`. The resident
 firmware transitions through `RUNNING` and finally `DONE` or `ERROR`. For BF16
-requests, the firmware uses the deterministic integer core shared with the
-qemu_cuda experiment and includes optional BF16 sinks in the row maximum and
-normalization denominator.
+requests, the firmware widens BF16 to FP32 for max/subtract/reduction and
+normalization. Only the exponential boundary is narrowed to BF16 and executed
+by `ni900_exp_f16m8`; qemu_cuda mirrors the QEMU NI900 approximation bit for
+bit. Optional BF16 sinks participate in the row maximum and denominator.
 
 QEMU exposes four interleaved 64-byte HIF banks. A request received on bank `b`
 with bank-local line address `L` maps to the logical byte offset:
@@ -78,4 +79,4 @@ RVV request completes. The line starts with `RVV_SOFTMAX_TIMING` and contains:
 - total external softmax time.
 
 The workspace launcher enables this switch by default and captures llama.cpp
-stdout/stderr in `${SOFTMAX_LOG_DIR}/llama.log`.
+stdout/stderr in the workspace operator log directory.

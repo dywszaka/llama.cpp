@@ -88,11 +88,12 @@ Supported values:
 
 - `cuda`: run only the existing CUDA SOFT_MAX implementation and use the CUDA
   result.
-- `qemu`: apply scale, mask, and ALiBi on CUDA, round the effective logits to
-  BF16, run the deterministic BF16 softmax through the QEMU/RVV ZMQ daemon,
-  convert its BF16 output to F32 on CUDA, and use that result.
-- `qemu_cuda`: run the same deterministic BF16 softmax entirely on the existing
-  CUDA device tensors and use its F32-converted result. This mode does not
+- `qemu`: apply scale, mask, and ALiBi on CUDA, truncate the effective logits to
+  canonical BF16, then run `call_softmax_fp32`: max/subtract/reduction and
+  normalization use FP32 RVV while exp uses `ni900_exp_f16m8`. The BF16 result
+  is converted to F32 on CUDA and used downstream.
+- `qemu_cuda`: run the same FP32-compute/NI900-Exp numerical model entirely on
+  the existing CUDA device tensors and use its F32-converted result. This mode does not
   create a ZMQ socket and performs no D2H or H2D transfer.
 - `compare`: run the original llama.cpp CUDA softmax, QEMU/RVV BF16 softmax,
   and qemu_cuda concurrently. The original llama.cpp CUDA result is used
@@ -102,7 +103,7 @@ Supported values:
 `compare_cuda` and `compare_qemu` are accepted as compatibility aliases for
 `compare`; both now keep the original llama.cpp CUDA result downstream.
 
-Unknown values fall back to `cuda`. Before deterministic BF16 softmax, the CUDA
+Unknown values fall back to `cuda`. Before the FP32/NI900 softmax, the CUDA
 preprocess supports the complete forward protocol described in
 `docs/development/cuda-softmax-io-protocol.md`, including F16/F32 masks, mask
 strides, ALiBi, scale, and attention sinks. QEMU and qemu_cuda receive identical
@@ -114,7 +115,8 @@ run modes do not generate comparison artifacts.
 
 ### `GGML_CUDA_SOFT_MAX_QEMU_ENDPOINT`
 
-ZMQ endpoint for the QEMU daemon. Default: `tcp://127.0.0.1:15580`.
+ZMQ endpoint for the `call_softmax_fp32` daemon. Default:
+`tcp://127.0.0.1:15584`.
 
 ### `GGML_CUDA_SOFT_MAX_QEMU_TIMEOUT_MS`
 
