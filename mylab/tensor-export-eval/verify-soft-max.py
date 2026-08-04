@@ -37,6 +37,10 @@ def bf16_to_f32(value: int) -> float:
     return struct.unpack("<f", struct.pack("<I", value << 16))[0]
 
 
+def f32_to_bf16_trunc(value: float) -> int:
+    return f32_bits(value) >> 16
+
+
 def f32_to_bf16_rne(value: float) -> int:
     bits = f32_bits(value)
     absolute = bits & 0x7FFFFFFF
@@ -82,7 +86,7 @@ class TensorData:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("result", type=Path, help="exported SOFT_MAX dst/result F32 .bin file")
+    parser.add_argument("result", type=Path, help="exported SOFT_MAX dst/result .bin file")
     parser.add_argument("--manifest", type=Path, help="defaults to RESULT.bin's sibling manifest.json")
     parser.add_argument("--scale", type=float, help="override scale; required for an older manifest without op_params")
     parser.add_argument(
@@ -145,12 +149,15 @@ def load_tensor(manifest_path: Path, record: dict) -> TensorData:
     return TensorData(path=path, record=record, raw=raw)
 
 
-def check_bf16_representable_f32(
+def check_bf16_input_storage(
     tensor: TensorData,
     max_failures: int,
-) -> tuple[int, int, list[str]]:
+) -> tuple[str, int, int, list[str]]:
+    count = math.prod(tensor.ne)
+    if tensor.dtype == "bf16":
+        return "native_bf16", count, count, []
     if tensor.dtype != "f32":
-        raise ValueError(f"BF16-rounded input check requires F32 storage, got {tensor.dtype}")
+        return f"not_applicable_{tensor.dtype}", 0, count, []
 
     matching = 0
     failures: list[str] = []
@@ -166,7 +173,7 @@ def check_bf16_representable_f32(
                         failures.append(
                             f"    [{i0},{i1},{i2},{i3}] value={value:.9g} bits=0x{bits:08x}"
                         )
-    return matching, math.prod(tensor.ne), failures
+    return "f32_low16_zero", matching, count, failures
 
 
 def resolve_op_param(result_record: dict, name: str, override: float | None) -> float:
@@ -184,20 +191,20 @@ def validate_shapes(
     mask: TensorData | None,
     sinks: TensorData | None,
 ) -> None:
-    if result.dtype != "f32" or src0.dtype != "f32":
-        raise ValueError(f"SOFT_MAX requires F32 dst/src0, got dst={result.dtype} src0={src0.dtype}")
+    if result.dtype not in ("f32", "bf16") or src0.dtype not in ("f32", "bf16"):
+        raise ValueError(f"SOFT_MAX requires F32/BF16 dst/src0, got dst={result.dtype} src0={src0.dtype}")
     if result.ne != src0.ne:
         raise ValueError(f"dst/src0 shape mismatch: dst={result.ne} src0={src0.ne}")
     if mask is not None:
-        if mask.dtype not in ("f16", "f32"):
-            raise ValueError(f"SOFT_MAX mask must be F16 or F32, got {mask.dtype}")
+        if mask.dtype not in ("f16", "f32", "bf16"):
+            raise ValueError(f"SOFT_MAX mask must be F16/F32/BF16, got {mask.dtype}")
         if mask.ne[0] != src0.ne[0] or mask.ne[1] < src0.ne[1]:
             raise ValueError(f"mask shape is incompatible with src0: mask={mask.ne} src0={src0.ne}")
         if src0.ne[2] % mask.ne[2] != 0 or src0.ne[3] % mask.ne[3] != 0:
             raise ValueError(f"mask batch dimensions do not broadcast: mask={mask.ne} src0={src0.ne}")
     if sinks is not None:
-        if sinks.dtype != "f32" or sinks.ne[0] != src0.ne[2]:
-            raise ValueError(f"sinks must be F32 with ne[0]={src0.ne[2]}, got dtype={sinks.dtype} shape={sinks.ne}")
+        if sinks.dtype not in ("f32", "bf16") or sinks.ne[0] != src0.ne[2]:
+            raise ValueError(f"sinks must be F32/BF16 with ne[0]={src0.ne[2]}, got dtype={sinks.dtype} shape={sinks.ne}")
 
 
 def command_text(manifest_path: Path) -> str:
@@ -223,6 +230,12 @@ def detect_result_rounding(manifest_path: Path, requested: str, mode: str) -> st
     if requested != "auto":
         return requested
     return "bf16-rne" if "GGML_CUDA_TRUNC_ENABLE=1" in command_text(manifest_path) else "f32"
+
+
+def apply_result_storage(expected: float, result: TensorData) -> float:
+    if result.dtype == "bf16":
+        return bf16_to_f32(f32_to_bf16_trunc(expected))
+    return expected
 
 
 def alibi_slope(max_bias: float, head: int, nheads: int) -> float:
@@ -381,7 +394,7 @@ def run() -> int:
     max_bias = resolve_op_param(result_record, "max_bias", args.max_bias)
     mode = detect_mode(manifest_path, args.mode)
     result_rounding = detect_result_rounding(manifest_path, args.result_rounding, mode)
-    input_bf16_matching, input_count, input_bf16_failures = check_bf16_representable_f32(
+    input_bf16_status, input_bf16_matching, input_count, input_bf16_failures = check_bf16_input_storage(
         src0, args.max_mismatches
     )
     input_bf16_ok = input_bf16_matching == input_count
@@ -405,6 +418,7 @@ def run() -> int:
                     else softmax_f32_row(values, sink, result_rounding)
                 )
                 for i0, expected in enumerate(expected_row):
+                    expected = apply_result_storage(expected, result)
                     actual = result.scalar(i0, i1, i2, i3)
                     delta = actual - expected
                     abs_delta = abs(delta)
@@ -431,11 +445,16 @@ def run() -> int:
     print(f"  mode: {mode}")
     print(f"  result rounding: {result_rounding}")
     print(f"  src0: {src0.path} dtype={src0.dtype} shape={src0.ne}")
-    print(
-        "  src0 BF16-representable F32: "
-        f"{'yes' if input_bf16_ok else 'no'} "
-        f"(F32 low 16 bits zero: {input_bf16_matching}/{input_count})"
-    )
+    if input_bf16_status == "native_bf16":
+        print(f"  src0 BF16 input: yes (native BF16 storage: {input_bf16_matching}/{input_count})")
+    elif input_bf16_status == "f32_low16_zero":
+        print(
+            "  src0 BF16-representable F32: "
+            f"{'yes' if input_bf16_ok else 'no'} "
+            f"(F32 low 16 bits zero: {input_bf16_matching}/{input_count})"
+        )
+    else:
+        print(f"  src0 BF16 input: not applicable for dtype={src0.dtype}")
     if input_bf16_failures:
         print("  first non-BF16-representable src0 values:")
         print("\n".join(input_bf16_failures))

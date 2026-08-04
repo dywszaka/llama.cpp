@@ -303,6 +303,19 @@ forms such as `norm-0`, `blk.0.*`, and `cache_k_l0`. This switch has an effect
 only in op-oriented export mode. The selected layer is recorded in the op
 manifest.
 
+### `LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP`
+
+Exports F32 tensor values as raw BF16 storage for tensor-export experiments.
+Default: unset/off.
+
+When enabled, every F32 tensor record selected by tensor export is written as
+BF16 by truncating the low 16 bits of each F32 bit pattern (`bf16_bits =
+f32_bits >> 16`). The written file uses compact contiguous BF16 layout, and the
+manifest records `dtype: "bf16"`, updated strides and byte size, plus original
+F32 dtype/stride metadata for op-oriented exports. Non-F32 tensors are exported
+unchanged. The helper script `mylab/tensor-export-eval/export.sh` exposes this
+as `BF16_DUMP=1`.
+
 ## FP8 E4M3 E8M0 32 K-Cache
 
 ### `--cache-type-k fp8_e4m3_e8m0_32`

@@ -48,12 +48,28 @@ constexpr const char * ENV_OP     = "LLAMA_EXPT_TENSOR_EXPORT_OP";
 constexpr const char * ENV_NAME   = "LLAMA_EXPT_TENSOR_EXPORT_NAME";
 constexpr const char * ENV_TYPE   = "LLAMA_EXPT_TENSOR_EXPORT_TYPE";
 constexpr const char * ENV_LAYER  = "LLAMA_EXPT_TENSOR_EXPORT_LAYER";
+constexpr const char * ENV_BF16_DUMP = "LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP";
 
 std::unordered_set<std::string> completed_op_exports;
 
 std::string env_str(const char * name) {
     const char * value = std::getenv(name);
     return value ? value : "";
+}
+
+bool env_enabled(const char * name) {
+    std::string value = env_str(name);
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    }), value.end());
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return (char) std::tolower(c);
+    });
+    return !value.empty() && value != "0" && value != "false" && value != "off" && value != "no";
+}
+
+bool bf16_dump_enabled() {
+    return env_enabled(ENV_BF16_DUMP);
 }
 
 std::string sanitize_filename(std::string name) {
@@ -313,6 +329,59 @@ size_t tensor_f32_byte_size(const ggml_tensor * t) {
     return (size_t) ggml_nelements(t) * sizeof(float);
 }
 
+void make_contiguous_nb(const ggml_tensor * tensor, size_t type_size, size_t (&nb)[GGML_MAX_DIMS]) {
+    nb[0] = type_size;
+    for (int d = 1; d < GGML_MAX_DIMS; ++d) {
+        nb[d] = nb[d - 1] * (size_t) tensor->ne[d - 1];
+    }
+}
+
+std::vector<uint8_t> f32_values_to_bf16_trunc_bytes(const float * values, size_t n) {
+    std::vector<uint8_t> out(n * sizeof(ggml_bf16_t));
+    for (size_t i = 0; i < n; ++i) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, values + i, sizeof(bits));
+        const uint16_t bf16 = (uint16_t) (bits >> 16);
+        std::memcpy(out.data() + i * sizeof(bf16), &bf16, sizeof(bf16));
+    }
+    return out;
+}
+
+bool f32_tensor_bytes_to_bf16_trunc_bytes(
+        const ggml_tensor * tensor,
+        const std::vector<uint8_t> & src,
+        std::vector<uint8_t> & out) {
+    if (!tensor || tensor->type != GGML_TYPE_F32 || tensor->nb[0] != sizeof(float)) {
+        return false;
+    }
+
+    const size_t n = (size_t) ggml_nelements(tensor);
+    out.resize(n * sizeof(ggml_bf16_t));
+    size_t dst_offset = 0;
+    for (int64_t i3 = 0; i3 < tensor->ne[3]; ++i3) {
+        for (int64_t i2 = 0; i2 < tensor->ne[2]; ++i2) {
+            for (int64_t i1 = 0; i1 < tensor->ne[1]; ++i1) {
+                for (int64_t i0 = 0; i0 < tensor->ne[0]; ++i0) {
+                    const size_t src_offset =
+                            (size_t) i0 * tensor->nb[0] +
+                            (size_t) i1 * tensor->nb[1] +
+                            (size_t) i2 * tensor->nb[2] +
+                            (size_t) i3 * tensor->nb[3];
+                    if (src_offset + sizeof(float) > src.size()) {
+                        return false;
+                    }
+                    uint32_t bits = 0;
+                    std::memcpy(&bits, src.data() + src_offset, sizeof(bits));
+                    const uint16_t bf16 = (uint16_t) (bits >> 16);
+                    std::memcpy(out.data() + dst_offset, &bf16, sizeof(bf16));
+                    dst_offset += sizeof(bf16);
+                }
+            }
+        }
+    }
+    return dst_offset == out.size();
+}
+
 json record_to_json(const tensor_record & rec) {
     json obj;
     obj["name"] = rec.name;
@@ -363,8 +432,8 @@ std::filesystem::path manifest_dir(const std::string & manifest_path) {
 }
 
 std::vector<float> load_record_f32(const std::filesystem::path & base_dir, const tensor_record & rec) {
-    if (rec.dtype != "f32") {
-        throw std::runtime_error("record '" + rec.name + "' has incompatible dtype '" + rec.dtype + "', expected f32");
+    if (rec.dtype != "f32" && rec.dtype != "bf16") {
+        throw std::runtime_error("record '" + rec.name + "' has incompatible dtype '" + rec.dtype + "', expected f32 or bf16");
     }
 
     int64_t n = 1;
@@ -380,7 +449,8 @@ std::vector<float> load_record_f32(const std::filesystem::path & base_dir, const
     if (rec.ne[0] % QK_NVFP4 != 0) {
         throw std::runtime_error("record '" + rec.name + "' row shape is not divisible by NVFP4 block size");
     }
-    const size_t expected = (size_t) n * sizeof(float);
+    const size_t type_size = rec.dtype == "bf16" ? sizeof(ggml_bf16_t) : sizeof(float);
+    const size_t expected = (size_t) n * type_size;
     if (rec.byte_size != expected) {
         throw std::runtime_error("record '" + rec.name + "' byte_size mismatch: manifest=" +
                 std::to_string(rec.byte_size) + " expected=" + std::to_string(expected));
@@ -400,6 +470,17 @@ std::vector<float> load_record_f32(const std::filesystem::path & base_dir, const
     }
 
     std::vector<float> values((size_t) n);
+    if (rec.dtype == "bf16") {
+        std::vector<ggml_bf16_t> raw((size_t) n);
+        in.read(reinterpret_cast<char *>(raw.data()), (std::streamsize) expected);
+        if (!in) {
+            throw std::runtime_error("failed to read raw tensor '" + path.string() + "'");
+        }
+        for (size_t i = 0; i < raw.size(); ++i) {
+            values[i] = ggml_bf16_to_fp32(raw[i]);
+        }
+        return values;
+    }
     in.read(reinterpret_cast<char *>(values.data()), (std::streamsize) expected);
     if (!in) {
         throw std::runtime_error("failed to read raw tensor '" + path.string() + "'");
@@ -516,6 +597,10 @@ const char * k_channel_sort_algorithm_name(k_channel_sort_basis basis) {
 void write_manifest(const std::filesystem::path & dir, const std::vector<tensor_record> & records) {
     json manifest;
     manifest["format"] = "llama_expt_tensor_export_v1";
+    manifest["bf16_dump"] = bf16_dump_enabled();
+    if (bf16_dump_enabled()) {
+        manifest["bf16_dump_conversion"] = "f32_to_bf16_trunc";
+    }
     manifest["records"] = json::array();
     for (const tensor_record & rec : records) {
         manifest["records"].push_back(record_to_json(rec));
@@ -542,12 +627,12 @@ bool write_op_tensor(
         return false;
     }
 
-    const size_t byte_size = ggml_nbytes(tensor);
+    const size_t source_byte_size = ggml_nbytes(tensor);
     std::vector<uint8_t> bytes;
     if (snapshot) {
-        if (snapshot->size() != byte_size) {
+        if (snapshot->size() != source_byte_size) {
             LLAMA_LOG_ERROR("%s: snapshot byte size mismatch for node=%d role=%s tensor='%s': got=%zu expected=%zu\n",
-                    __func__, node_index, role, ggml_get_name(tensor), snapshot->size(), byte_size);
+                    __func__, node_index, role, ggml_get_name(tensor), snapshot->size(), source_byte_size);
             return false;
         }
         bytes = *snapshot;
@@ -558,8 +643,26 @@ bool write_op_tensor(
                     __func__, node_index, op.c_str(), role, ggml_get_name(tensor));
             return false;
         }
-        bytes.resize(byte_size);
-        ggml_backend_tensor_get(tensor, bytes.data(), 0, byte_size);
+        bytes.resize(source_byte_size);
+        ggml_backend_tensor_get(tensor, bytes.data(), 0, source_byte_size);
+    }
+
+    const bool bf16_dump = bf16_dump_enabled() && tensor->type == GGML_TYPE_F32;
+    std::vector<uint8_t> bf16_bytes;
+    const std::vector<uint8_t> * file_bytes = &bytes;
+    std::string dtype = ggml_type_name(tensor->type);
+    size_t record_byte_size = source_byte_size;
+    size_t record_nb[GGML_MAX_DIMS] = { tensor->nb[0], tensor->nb[1], tensor->nb[2], tensor->nb[3] };
+    if (bf16_dump) {
+        if (!f32_tensor_bytes_to_bf16_trunc_bytes(tensor, bytes, bf16_bytes)) {
+            LLAMA_LOG_ERROR("%s: failed to convert node=%d op=%s role=%s tensor='%s' from F32 to BF16 dump\n",
+                    __func__, node_index, op.c_str(), role, ggml_get_name(tensor));
+            return false;
+        }
+        file_bytes = &bf16_bytes;
+        dtype = "bf16";
+        record_byte_size = bf16_bytes.size();
+        make_contiguous_nb(tensor, sizeof(ggml_bf16_t), record_nb);
     }
 
     const std::string name = ggml_get_name(tensor);
@@ -571,7 +674,7 @@ bool write_op_tensor(
                 __func__, node_index, op.c_str(), role, name.c_str());
         return false;
     }
-    out.write(reinterpret_cast<const char *>(bytes.data()), (std::streamsize) bytes.size());
+    out.write(reinterpret_cast<const char *>(file_bytes->data()), (std::streamsize) file_bytes->size());
     if (!out) {
         LLAMA_LOG_ERROR("%s: failed while writing node=%d op=%s role=%s tensor='%s'\n",
                 __func__, node_index, op.c_str(), role, name.c_str());
@@ -583,13 +686,21 @@ bool write_op_tensor(
     rec["op"] = op;
     rec["role"] = role;
     rec["name"] = name;
-    rec["dtype"] = ggml_type_name(tensor->type);
+    rec["dtype"] = dtype;
     rec["ne"] = { tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3] };
-    rec["nb"] = { tensor->nb[0], tensor->nb[1], tensor->nb[2], tensor->nb[3] };
+    rec["nb"] = { record_nb[0], record_nb[1], record_nb[2], record_nb[3] };
     rec["path"] = path;
-    rec["byte_size"] = byte_size;
-    rec["contiguous"] = ggml_is_contiguous(tensor);
-    rec["view_offset"] = tensor->view_offs;
+    rec["byte_size"] = record_byte_size;
+    rec["contiguous"] = bf16_dump ? true : ggml_is_contiguous(tensor);
+    rec["view_offset"] = bf16_dump ? 0 : tensor->view_offs;
+    if (bf16_dump) {
+        rec["dump_conversion"] = "f32_to_bf16_trunc";
+        rec["original_dtype"] = ggml_type_name(tensor->type);
+        rec["original_nb"] = { tensor->nb[0], tensor->nb[1], tensor->nb[2], tensor->nb[3] };
+        rec["original_byte_size"] = source_byte_size;
+        rec["original_contiguous"] = ggml_is_contiguous(tensor);
+        rec["original_view_offset"] = tensor->view_offs;
+    }
     rec.update(extra);
     records.push_back(std::move(rec));
     return true;
@@ -736,7 +847,13 @@ bool write_derived_f32_tensor(
     if (!out) {
         return false;
     }
-    out.write(reinterpret_cast<const char *>(values.data()), (std::streamsize) (values.size() * sizeof(float)));
+    const bool bf16_dump = bf16_dump_enabled();
+    const std::vector<uint8_t> bf16_bytes = bf16_dump
+            ? f32_values_to_bf16_trunc_bytes(values.data(), values.size())
+            : std::vector<uint8_t>();
+    const void * write_data = bf16_dump ? (const void *) bf16_bytes.data() : (const void *) values.data();
+    const size_t write_size = bf16_dump ? bf16_bytes.size() : values.size() * sizeof(float);
+    out.write(reinterpret_cast<const char *>(write_data), (std::streamsize) write_size);
     if (!out) {
         return false;
     }
@@ -746,18 +863,23 @@ bool write_derived_f32_tensor(
     rec["op"] = op;
     rec["role"] = role;
     rec["name"] = name;
-    rec["dtype"] = "f32";
+    rec["dtype"] = bf16_dump ? "bf16" : "f32";
     rec["ne"] = { shape_source->ne[0], shape_source->ne[1], shape_source->ne[2], shape_source->ne[3] };
-    const size_t nb0 = sizeof(float);
+    const size_t nb0 = bf16_dump ? sizeof(ggml_bf16_t) : sizeof(float);
     const size_t nb1 = nb0 * (size_t) shape_source->ne[0];
     const size_t nb2 = nb1 * (size_t) shape_source->ne[1];
     const size_t nb3 = nb2 * (size_t) shape_source->ne[2];
     rec["nb"] = { nb0, nb1, nb2, nb3 };
     rec["path"] = path;
-    rec["byte_size"] = values.size() * sizeof(float);
+    rec["byte_size"] = write_size;
     rec["contiguous"] = true;
     rec["view_offset"] = 0;
     rec["derived"] = true;
+    if (bf16_dump) {
+        rec["dump_conversion"] = "f32_to_bf16_trunc";
+        rec["original_dtype"] = "f32";
+        rec["original_byte_size"] = values.size() * sizeof(float);
+    }
     rec.update(extra);
     records.push_back(std::move(rec));
     return true;
@@ -865,6 +987,10 @@ bool export_op_graph(
     manifest["type"] = type;
     manifest["op"] = requested_op;
     manifest["layer"] = layer;
+    manifest["bf16_dump"] = bf16_dump_enabled();
+    if (bf16_dump_enabled()) {
+        manifest["bf16_dump_conversion"] = "f32_to_bf16_trunc";
+    }
     manifest["snapshot_timing"] = observer ? "source_producer_and_node_completion" : "post_graph";
     manifest["selection"] = {
         { "priority", requested_name.empty() ? "op" : "tensor_name" },
@@ -1334,10 +1460,10 @@ bool tensor_export_maybe_log_config() {
 
     const bool enabled = tensor_export_enabled();
     if (enabled) {
-        LLAMA_LOG_INFO("%s: enabled %s='%s' %s='%s' %s='%s' %s='%s' %s='%s' %s='%s'\n",
+        LLAMA_LOG_INFO("%s: enabled %s='%s' %s='%s' %s='%s' %s='%s' %s='%s' %s='%s' %s='%s'\n",
                 __func__, ENV_DIR, env_str(ENV_DIR).c_str(), ENV_KINDS, env_str(ENV_KINDS).c_str(),
                 ENV_OP, env_str(ENV_OP).c_str(), ENV_NAME, env_str(ENV_NAME).c_str(), ENV_TYPE, env_str(ENV_TYPE).c_str(),
-                ENV_LAYER, env_str(ENV_LAYER).c_str());
+                ENV_LAYER, env_str(ENV_LAYER).c_str(), ENV_BF16_DUMP, env_str(ENV_BF16_DUMP).c_str());
     } else {
         LLAMA_LOG_INFO("%s: disabled; %s is unset\n", __func__, ENV_DIR);
     }
@@ -1396,19 +1522,32 @@ bool tensor_export_graph(
             continue;
         }
 
-        const size_t byte_size = tensor_f32_byte_size(t);
-        std::vector<uint8_t> bytes(byte_size);
-        ggml_backend_tensor_get(t, bytes.data(), 0, byte_size);
+        const bool bf16_dump = bf16_dump_enabled();
+        const size_t source_byte_size = tensor_f32_byte_size(t);
+        std::vector<uint8_t> bytes(source_byte_size);
+        ggml_backend_tensor_get(t, bytes.data(), 0, source_byte_size);
+        std::vector<uint8_t> bf16_bytes;
+        const std::vector<uint8_t> * file_bytes = &bytes;
+        size_t record_nb[GGML_MAX_DIMS] = { t->nb[0], t->nb[1], t->nb[2], t->nb[3] };
+        if (bf16_dump) {
+            if (!f32_tensor_bytes_to_bf16_trunc_bytes(t, bytes, bf16_bytes)) {
+                LLAMA_LOG_ERROR("%s: failed to convert tensor '%s' from F32 to BF16 dump\n",
+                        __func__, ggml_get_name(t));
+                continue;
+            }
+            file_bytes = &bf16_bytes;
+            make_contiguous_nb(t, sizeof(ggml_bf16_t), record_nb);
+        }
 
         tensor_record rec;
         rec.name = ggml_get_name(t);
         rec.kind = kind;
-        rec.dtype = "f32";
+        rec.dtype = bf16_dump ? "bf16" : "f32";
         for (int d = 0; d < GGML_MAX_DIMS; ++d) {
             rec.ne[d] = t->ne[d];
-            rec.nb[d] = t->nb[d];
+            rec.nb[d] = record_nb[d];
         }
-        rec.byte_size = byte_size;
+        rec.byte_size = file_bytes->size();
         rec.path = std::to_string(records.size()) + "-" + sanitize_filename(rec.name) + ".bin";
 
         std::ofstream out(dir / rec.path, std::ios::binary);
@@ -1416,7 +1555,7 @@ bool tensor_export_graph(
             LLAMA_LOG_ERROR("%s: failed to write tensor '%s'\n", __func__, rec.name.c_str());
             continue;
         }
-        out.write(reinterpret_cast<const char *>(bytes.data()), (std::streamsize) bytes.size());
+        out.write(reinterpret_cast<const char *>(file_bytes->data()), (std::streamsize) file_bytes->size());
         if (!out) {
             LLAMA_LOG_ERROR("%s: failed while writing tensor '%s'\n", __func__, rec.name.c_str());
             continue;

@@ -8,8 +8,8 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 TYPE="${TYPE:-decode}" # decode or prefill
 PROMPT="${PROMPT:-$(cat "${ROOT_DIR}/mylab/tensor-export-eval/wikitext-chunk-512.txt")}"
 echo "PROMPT=${PROMPT}"
-OP="${OP-GGML_OP_ROPE}"
-NAME="${NAME-Qcur}"
+OP="${OP-GGML_OP_SOFT_MAX}"
+NAME="${NAME-}"
 LAYER="${LAYER:-0}"
 CUDA_DEVICE="${CUDA_DEVICE:-1}"
 MODEL_PATH="${MODEL_PATH:-${ROOT_DIR}/models/qwen3-8b-nvfp4.gguf}"
@@ -20,10 +20,33 @@ RUN_DIR="${RUN_DIR:-}"
 # Set to 1 to rebuild llama-cli before running.
 REBUILD="${REBUILD:-1}"
 
+# Set to 1 to export F32 tensors as raw BF16 by truncating the low 16 bits.
+BF16_DUMP="${BF16_DUMP:-0}"
+
+# CMake build directory. If unset, prefer an existing configured CUDA build.
+BUILD_DIR="${BUILD_DIR:-}"
+if [[ -z "${BUILD_DIR}" ]]; then
+    for candidate in "${ROOT_DIR}/build_cuda" "${ROOT_DIR}/build-cuda"; do
+        if [[ -f "${candidate}/CMakeCache.txt" ]]; then
+            BUILD_DIR="${candidate}"
+            break
+        fi
+    done
+fi
+if [[ -z "${BUILD_DIR}" ]]; then
+    if [[ -d "${ROOT_DIR}/build_cuda" ]]; then
+        BUILD_DIR="${ROOT_DIR}/build_cuda"
+    elif [[ -d "${ROOT_DIR}/build-cuda" ]]; then
+        BUILD_DIR="${ROOT_DIR}/build-cuda"
+    else
+        BUILD_DIR="${ROOT_DIR}/build_cuda"
+    fi
+fi
+
 # Add intentional llama-cli overrides here. Keep empty for baseline parameters.
 EXTRA_ARGS=()
 
-LLAMA_CLI="${ROOT_DIR}/build_cuda/bin/llama-cli"
+LLAMA_CLI="${LLAMA_CLI:-${BUILD_DIR}/bin/llama-cli}"
 RMS_NORM_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-rms-norm.py"
 MUL_MAT_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-mul-mat.py"
 SOFT_MAX_VALIDATOR_SOURCE="${ROOT_DIR}/mylab/tensor-export-eval/verify-soft-max.py"
@@ -83,8 +106,22 @@ if [[ ! "${LAYER}" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+case "${BF16_DUMP}" in
+    0|1) ;;
+    *)
+        echo "invalid BF16_DUMP='${BF16_DUMP}'; expected 0 or 1" >&2
+        exit 1
+        ;;
+esac
+
 if [[ ${REBUILD} -eq 1 ]]; then
-    cmake --build "${ROOT_DIR}/build_cuda" --target llama-cli -j
+    if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
+        echo "CMake cache not found in BUILD_DIR='${BUILD_DIR}'." >&2
+        echo "Configure the build first, or set BUILD_DIR to an existing CMake build directory." >&2
+        echo "Example: cmake -S '${ROOT_DIR}' -B '${BUILD_DIR}' -DGGML_CUDA=ON" >&2
+        exit 1
+    fi
+    cmake --build "${BUILD_DIR}" --target llama-cli -j
 fi
 
 if [[ ! -x "${LLAMA_CLI}" ]]; then
@@ -170,6 +207,9 @@ printf '%s' "${PROMPT}" > "${RUN_DIR}/prompt.txt"
     printf 'CUDA_DEVICE=%q\n' "${CUDA_DEVICE}"
     printf 'MODEL_PATH=%q\n' "${MODEL_PATH}"
     printf 'N_PREDICT=%q\n' "${N_PREDICT}"
+    printf 'BF16_DUMP=%q\n' "${BF16_DUMP}"
+    printf 'BUILD_DIR=%q\n' "${BUILD_DIR}"
+    printf 'LLAMA_CLI=%q\n' "${LLAMA_CLI}"
     printf 'CODE_REVISION=%q\n' "$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo unknown)"
 } > "${RUN_DIR}/config.env"
 
@@ -185,6 +225,7 @@ printf '%s' "${PROMPT}" > "${RUN_DIR}/prompt.txt"
     printf 'LLAMA_EXPT_TENSOR_EXPORT_NAME=%q ' "${NAME}"
     printf 'LLAMA_EXPT_TENSOR_EXPORT_TYPE=%q ' "${TYPE}"
     printf 'LLAMA_EXPT_TENSOR_EXPORT_LAYER=%q ' "${LAYER}"
+    printf 'LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP=%q ' "${BF16_DUMP}"
     printf '%q ' "${COMMAND[@]}"
     printf '\n'
 } > "${RUN_DIR}/command.txt"
@@ -205,6 +246,7 @@ LLAMA_EXPT_TENSOR_EXPORT_OP="${OP}" \
 LLAMA_EXPT_TENSOR_EXPORT_NAME="${NAME}" \
 LLAMA_EXPT_TENSOR_EXPORT_TYPE="${TYPE}" \
 LLAMA_EXPT_TENSOR_EXPORT_LAYER="${LAYER}" \
+LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP="${BF16_DUMP}" \
     "${COMMAND[@]}" > "${RUN_DIR}/run.log" 2>&1
 exit_code=$?
 set -e
@@ -262,7 +304,9 @@ first_dst_path="$(awk '
 ' "${MANIFEST_PATH}")"
 validator_exit_code=""
 validator_valid=""
-if [[ -n "${VALIDATOR_NAME}" && -n "${first_dst_path}" ]]; then
+if [[ "${BF16_DUMP}" == "1" && -n "${VALIDATOR_NAME}" && "${OP}" != "SOFT_MAX" ]]; then
+    validator_valid="skipped_bf16_dump"
+elif [[ -n "${VALIDATOR_NAME}" && -n "${first_dst_path}" ]]; then
     set +e
     "${RUN_DIR}/${VALIDATOR_NAME}" "${TENSOR_DIR}/${first_dst_path}" \
         > "${RUN_DIR}/validator.log" 2>&1
@@ -319,6 +363,7 @@ fi
     printf 'OP=%q\n' "${OP}"
     printf 'NAME=%q\n' "${NAME}"
     printf 'LAYER=%q\n' "${LAYER}"
+    printf 'BF16_DUMP=%q\n' "${BF16_DUMP}"
     printf 'MANIFEST_FORMAT=%q\n' "${manifest_format}"
     printf 'SELECTION_PRIORITY=%q\n' "${selection_priority}"
     printf 'REQUESTED_NAME=%q\n' "${requested_name}"
@@ -342,6 +387,7 @@ fi
     echo "- Op: \`${OP}\`"
     echo "- Name: \`${NAME}\`"
     echo "- Layer: ${LAYER}"
+    echo "- BF16 dump: \`${BF16_DUMP}\`"
     echo "- Selection priority: \`${selection_priority}\`"
     if [[ -n "${NAME}" ]]; then
         echo "- Resolved dst name: \`${resolved_name}\`"
@@ -354,10 +400,16 @@ fi
     echo "- src2 records: ${src2_records}"
     if [[ -n "${VALIDATOR_NAME}" ]]; then
         echo "- Bundled validator: \`${VALIDATOR_NAME}\`"
-        echo "- Validator result: \`${validator_valid}\` (exit ${validator_exit_code})"
+        if [[ "${validator_valid}" == "skipped_bf16_dump" ]]; then
+            echo "- Validator result: \`skipped\` (BF16_DUMP=1 changes F32 export dtype)"
+        else
+            echo "- Validator result: \`${validator_valid}\` (exit ${validator_exit_code})"
+        fi
     fi
     echo "- Validation: \`${valid}\`"
-    if [[ "${OP}" == "RMS_NORM" && -n "${first_dst_path}" ]]; then
+    if [[ "${BF16_DUMP}" == "1" && "${OP}" != "SOFT_MAX" ]]; then
+        :
+    elif [[ "${OP}" == "RMS_NORM" && -n "${first_dst_path}" ]]; then
         echo
         echo "## RMSNorm data validation"
         echo
@@ -401,7 +453,7 @@ if [[ "${valid}" != true ]]; then
     exit 3
 fi
 
-if [[ -n "${VALIDATOR_NAME}" && "${validator_valid}" != true ]]; then
+if [[ -n "${VALIDATOR_NAME}" && "${validator_valid}" != true && "${validator_valid}" != "skipped_bf16_dump" ]]; then
     echo "tensor value validation failed: ${RUN_DIR}" >&2
     exit 4
 fi
