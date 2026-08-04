@@ -2697,7 +2697,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_op_soft_max_back(ctx, dst);
             break;
         case GGML_OP_ROPE:
-            ggml_cuda_op_rope(ctx, dst, ggml_cuda_rope_qemu_enabled());
+            ggml_cuda_op_rope(ctx, dst);
             break;
         case GGML_OP_ROPE_BACK:
             ggml_cuda_op_rope_back(ctx, dst);
