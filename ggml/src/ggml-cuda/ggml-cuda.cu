@@ -22,8 +22,11 @@
 #include "ggml-cuda/cross-entropy-loss.cuh"
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/fattn.cuh"
+#include "ggml-cuda/expt/add-qemu.cuh"
+#include "ggml-cuda/expt/glu-qemu.cuh"
 #include "ggml-cuda/expt/fp8/fp8-e8m0-matmul.cuh"
 #include "ggml-cuda/expt/rms-norm-qemu.cuh"
+#include "ggml-cuda/expt/rope-qemu.cuh"
 #include "ggml-cuda/expt/mul-qemu.cuh"
 #include "ggml-cuda/expt/rope-qemu.cuh"
 #include "ggml-cuda/expt/softmax-qemu.cuh"
@@ -2927,6 +2930,29 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             use_cuda_graph = false;
 #ifndef NDEBUG
             GGML_LOG_DEBUG("%s: disabling CUDA graphs for MUL QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_ADD && ggml_cuda_add_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for ADD QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_GLU &&
+                ggml_get_glu_op(node) == GGML_GLU_OP_SWIGLU &&
+                ggml_cuda_glu_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for SWIGLU QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_ROPE && ggml_cuda_rope_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for ROPE QEMU experiment\n", __func__);
 #endif
         }
 

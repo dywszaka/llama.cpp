@@ -27,7 +27,7 @@ static const char * GGML_CUDA_SOFT_MAX_QEMU_TIMEOUT_ENV = "GGML_CUDA_SOFT_MAX_QE
 static const char * GGML_CUDA_SOFT_MAX_QEMU_ARTIFACT_ENV = "GGML_CUDA_SOFT_MAX_QEMU_ARTIFACT";
 static const char * GGML_CUDA_SOFT_MAX_QEMU_MISMATCH_LOG_ENV = "GGML_CUDA_SOFT_MAX_QEMU_MISMATCH_LOG";
 static const char * GGML_CUDA_SOFT_MAX_QEMU_TIMING_ENV = "GGML_CUDA_SOFT_MAX_QEMU_TIMING";
-static const char * GGML_CUDA_SOFT_MAX_QEMU_DEFAULT_ENDPOINT = "tcp://127.0.0.1:15580";
+static const char * GGML_CUDA_SOFT_MAX_QEMU_DEFAULT_ENDPOINT = "tcp://127.0.0.1:15584";
 static const char * GGML_CUDA_SOFT_MAX_QEMU_DEFAULT_ARTIFACT = "experiments/softmax-qemu-compare.jsonl";
 static const char * GGML_CUDA_SOFT_MAX_QEMU_DEFAULT_MISMATCH_LOG =
         "experiments/softmax-qemu-cuda-mismatch.jsonl";
@@ -581,7 +581,6 @@ static void run_qemu_cuda_only(
         size_t elements) {
     ggml_cuda_pool_alloc<uint16_t> input_bf16(ctx.pool(), elements);
     ggml_cuda_pool_alloc<uint16_t> output_bf16(ctx.pool(), elements);
-    ggml_cuda_pool_alloc<uint32_t> exponent_values(ctx.pool(), elements);
     ggml_cuda_pool_alloc<uint16_t> sinks_bf16(ctx.pool());
     if (params.src2 != nullptr) {
         sinks_bf16.alloc((size_t) params.ne02);
@@ -599,7 +598,7 @@ static void run_qemu_cuda_only(
             params, input_bf16.get(), sinks_bf16.get(), stream);
     ggml_cuda_soft_max_qemu_cuda_run_preprocessed(
             params, input_bf16.get(), sinks_bf16.get(), output_bf16.get(),
-            exponent_values.get(), params.dst, stream);
+            params.dst, stream);
     if (timing_enabled()) {
         CUDA_CHECK(cudaEventRecord(finish_event, stream));
         const float milliseconds = event_elapsed_ms(start_event, finish_event);
@@ -649,7 +648,6 @@ static void run_compare(
     ggml_cuda_pool_alloc<float> qemu_cuda_dst(ctx.pool(), elements);
     ggml_cuda_pool_alloc<uint16_t> input_bf16(ctx.pool(), elements);
     ggml_cuda_pool_alloc<uint16_t> qemu_cuda_output_bf16(ctx.pool(), elements);
-    ggml_cuda_pool_alloc<uint32_t> exponent_values(ctx.pool(), elements);
     ggml_cuda_pool_alloc<uint16_t> sinks_bf16(ctx.pool());
     if (params.src2 != nullptr) {
         sinks_bf16.alloc((size_t) params.ne02);
@@ -696,7 +694,7 @@ static void run_compare(
     CUDA_CHECK(cudaStreamWaitEvent(qemu_stream, preprocessed_event, 0));
     ggml_cuda_soft_max_qemu_cuda_run_preprocessed(
             params, input_bf16.get(), sinks_bf16.get(), qemu_cuda_output_bf16.get(),
-            exponent_values.get(), qemu_cuda_dst.get(), qemu_cuda_stream);
+            qemu_cuda_dst.get(), qemu_cuda_stream);
     CUDA_CHECK(cudaEventRecord(qemu_cuda_finish_event, qemu_cuda_stream));
     std::vector<uint16_t> qemu_cuda_host(elements);
     if (bf16_bytes != 0) {

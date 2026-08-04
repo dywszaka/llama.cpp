@@ -1,4 +1,5 @@
 #include "unary.cuh"
+#include "expt/glu-qemu.cuh"
 
 static __device__ __forceinline__ float op_abs(float x) {
     return fabsf(x);
@@ -289,7 +290,71 @@ void ggml_cuda_op_geglu(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 }
 
 void ggml_cuda_op_swiglu(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    ggml_cuda_op_unary_gated<op_silu>(ctx, dst);
+    if (!ggml_cuda_glu_qemu_enabled()) {
+        ggml_cuda_op_unary_gated<op_silu>(ctx, dst);
+        return;
+    }
+
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    const int64_t nc = src1 ? src0->ne[0] : src0->ne[0] / 2;
+    const int32_t swapped = ggml_get_op_params_i32(dst, 1);
+
+    GGML_ASSERT(ggml_is_contiguous_1(src0));
+    GGML_ASSERT(src0->nb[0] == ggml_element_size(src0));
+    GGML_ASSERT(ggml_is_contiguous(dst));
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
+    GGML_ASSERT(dst->type == src0->type);
+    GGML_ASSERT(dst->ne[0] == nc);
+    GGML_ASSERT(ggml_nrows(dst) == ggml_nrows(src0));
+    if (src1 != nullptr) {
+        GGML_ASSERT(ggml_is_contiguous_1(src1));
+        GGML_ASSERT(src1->nb[0] == ggml_element_size(src1));
+        GGML_ASSERT(src1->type == src0->type);
+        GGML_ASSERT(src1->ne[0] == nc);
+        GGML_ASSERT(ggml_nrows(src1) == ggml_nrows(dst));
+    }
+
+    const size_t src0_type_size = ggml_type_size(src0->type);
+    const size_t src1_type_size = src1 != nullptr ? ggml_type_size(src1->type) : src0_type_size;
+    const size_t dst_type_size = ggml_type_size(dst->type);
+    const char * src0_base = (const char *) src0->data;
+    const char * src1_base = src1 != nullptr ? (const char *) src1->data : (const char *) src0->data;
+    const void * x = src0_base + (src1 == nullptr && swapped ? (size_t) nc * src0_type_size : 0);
+    const void * gate = src1_base + (src1 == nullptr && !swapped ? (size_t) nc * src1_type_size : 0);
+
+    ggml_cuda_glu_qemu_params params = {};
+    params.src0_tensor = src0;
+    params.src1_tensor = src1 != nullptr ? src1 : src0;
+    params.src0 = x;
+    params.src1 = gate;
+    params.dst = dst->data;
+    params.src0_type = src0->type;
+    params.src1_type = src1 != nullptr ? src1->type : src0->type;
+    params.dst_type = dst->type;
+    for (int dim = 0; dim < 4; ++dim) {
+        params.ne[dim] = dst->ne[dim];
+        params.ne1[dim] = dst->ne[dim];
+        params.s0[dim] = src0->nb[dim] / src0_type_size;
+        params.s1[dim] = (src1 != nullptr ? src1->nb[dim] : src0->nb[dim]) / src1_type_size;
+        params.sd[dim] = dst->nb[dim] / dst_type_size;
+    }
+
+    ggml_cuda_glu_qemu_run(ctx, dst, params,
+            [] (const ggml_cuda_glu_qemu_params & launch, cudaStream_t stream) {
+                const int64_t elements = launch.ne[0] * launch.ne[1] * launch.ne[2] * launch.ne[3];
+                if (launch.src0_type == GGML_TYPE_F16) {
+                    unary_gated_cuda<op_silu>(
+                            (const half *) launch.src0, (const half *) launch.src1,
+                            (half *) launch.dst, elements, launch.ne[0],
+                            launch.s0[1], launch.s1[1], stream);
+                } else {
+                    unary_gated_cuda<op_silu>(
+                            (const float *) launch.src0, (const float *) launch.src1,
+                            (float *) launch.dst, elements, launch.ne[0],
+                            launch.s0[1], launch.s1[1], stream);
+                }
+            });
 }
 
 void ggml_cuda_op_geglu_erf(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

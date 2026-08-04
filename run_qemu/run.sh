@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LLAMA_DIR="${ROOT_DIR}/vendor-llama-cpp"
 LLAMA_BUILD_DIR="${LLAMA_BUILD_DIR:-${LLAMA_DIR}/build_softmax_qemu}"
 SOFTMAX_LOG_DIR="${SOFTMAX_LOG_DIR:-${PWD}/softmax-logs}"
@@ -16,10 +16,9 @@ Usage:
   ./run.sh qemu      MODEL.gguf
   ./run.sh qemu_cuda MODEL.gguf
 
-compare runs llama CUDA, QEMU/RVV, and qemu_cuda softmax, writes numerical and
-bit-exact comparison artifacts, and keeps the llama CUDA result. qemu uses only
-the QEMU/RVV result. qemu_cuda stays on the CUDA device and does not start QEMU,
-ZMQ, or D2H/H2D staging.
+compare runs llama CUDA, FP32 RVV/NI900 Exp, and the mirrored qemu_cuda softmax,
+writes numerical and bit-exact comparison artifacts, and keeps the llama CUDA
+result. qemu_cuda stays on device and does not start QEMU, ZMQ, or D2H/H2D.
 
 Set BUILD_LLAMA=1 to configure/build build_softmax_qemu before launch.
 Set SOFTMAX_LOG_DIR to choose the log/artifact directory.
@@ -89,7 +88,8 @@ else
 fi
 
 if [[ "${start_qemu}" == "1" ]]; then
-  exec "${ROOT_DIR}/call_softmax/run.sh" -- "${command[@]}"
+  exec env SOFTMAX_FP32_LOG_DIR="${SOFTMAX_LOG_DIR}" \
+    "${ROOT_DIR}/call_softmax_fp32/run.sh" -- "${command[@]}"
 fi
 
 : > "${SOFTMAX_LOG_DIR}/llama.log"

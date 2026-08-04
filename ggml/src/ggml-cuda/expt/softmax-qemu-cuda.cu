@@ -1,5 +1,5 @@
 #include "softmax-qemu-cuda.cuh"
-#include "softmax-bf16-core.cuh"
+#include "softmax-fp32-core.cuh"
 
 #include <algorithm>
 
@@ -13,15 +13,9 @@ __device__ __forceinline__ float softmax_qemu_mask_to_f32<half>(half value) {
     return __half2float(value);
 }
 
+/* Canonical F32 -> BF16 uses RZ, matching op_development_guide.md. */
 static __device__ __forceinline__ uint16_t softmax_qemu_f32_to_bf16_bits(float value) {
-    uint32_t bits = __float_as_uint(value);
-    const uint32_t absolute = bits & UINT32_C(0x7fffffff);
-    if (absolute > UINT32_C(0x7f800000)) {
-        uint16_t result = (uint16_t) (bits >> 16);
-        return (result & UINT16_C(0x007f)) != 0 ? result : (uint16_t) (result | UINT16_C(1));
-    }
-    bits += UINT32_C(0x00007fff) + ((bits >> 16) & 1u);
-    return (uint16_t) (bits >> 16);
+    return (uint16_t) (__float_as_uint(value) >> 16);
 }
 
 static __device__ __forceinline__ float softmax_qemu_bf16_bits_to_f32(uint16_t value) {
@@ -68,52 +62,59 @@ static __global__ void softmax_qemu_preprocess_sinks_kernel(
     }
 }
 
-static __global__ void softmax_qemu_bf16_kernel(
+/*
+ * One CUDA thread owns one row so the FP32 chunk reduction order mirrors the
+ * RVV implementation exactly: 32-lane ordered sums, then scalar chunk adds.
+ * NI900 Exp itself is mirrored bit-for-bit by softmax_fp32_exp_from_delta().
+ */
+static __global__ void softmax_qemu_fp32_kernel(
         const uint16_t * input,
         const uint16_t * sinks,
         uint16_t * output,
-        uint32_t * exponent_values,
         int64_t ncols,
         int64_t ne01,
         int64_t ne02) {
-    __shared__ int maximum_q16;
-    __shared__ unsigned long long sum_q31;
+    if (threadIdx.x != 0) {
+        return;
+    }
 
     const int64_t row = (int64_t) blockIdx.x;
     const uint16_t * row_input = input + row * ncols;
     uint16_t * row_output = output + row * ncols;
-    uint32_t * row_exponents = exponent_values + row * ncols;
     const int64_t head = (row / ne01) % ne02;
 
-    if (threadIdx.x == 0) {
-        maximum_q16 = sinks != nullptr ? softmax_bf16_to_q16(sinks[head]) : INT32_MIN;
-        sum_q31 = 0;
+    float maximum = sinks != nullptr ?
+            softmax_fp32_bf16_to_f32(sinks[head]) :
+            -__uint_as_float(UINT32_C(0x7f800000));
+    for (int64_t col = 0; col < ncols; ++col) {
+        maximum = fmaxf(maximum, softmax_fp32_bf16_to_f32(row_input[col]));
     }
-    __syncthreads();
 
-    for (int64_t col = threadIdx.x; col < ncols; col += blockDim.x) {
-        atomicMax(&maximum_q16, softmax_bf16_to_q16(row_input[col]));
+    float sum = 0.0f;
+    for (int64_t chunk = 0; chunk < ncols; chunk += 32) {
+        float chunk_sum = 0.0f;
+        const int64_t end = min(chunk + 32, ncols);
+        for (int64_t col = chunk; col < end; ++col) {
+            const float delta = __fsub_rn(
+                    softmax_fp32_bf16_to_f32(row_input[col]), maximum);
+            const uint16_t exponent = softmax_fp32_exp_from_delta(delta);
+            row_output[col] = exponent;
+            chunk_sum = __fadd_rn(
+                    chunk_sum, softmax_fp32_bf16_to_f32(exponent));
+        }
+        sum = __fadd_rn(sum, chunk_sum);
     }
-    __syncthreads();
-
-    for (int64_t col = threadIdx.x; col < ncols; col += blockDim.x) {
-        const int32_t value = softmax_bf16_to_q16(row_input[col]);
-        const uint64_t delta = (uint64_t) ((int64_t) maximum_q16 - (int64_t) value);
-        const uint32_t exponent = softmax_bf16_exp_neg_q31(delta);
-        row_exponents[col] = exponent;
-        atomicAdd(&sum_q31, (unsigned long long) exponent);
+    if (sinks != nullptr) {
+        const float sink_delta = __fsub_rn(
+                softmax_fp32_bf16_to_f32(sinks[head]), maximum);
+        sum = __fadd_rn(sum, softmax_fp32_bf16_to_f32(
+                softmax_fp32_exp_from_delta(sink_delta)));
     }
-    __syncthreads();
 
-    if (threadIdx.x == 0 && sinks != nullptr) {
-        const int32_t sink = softmax_bf16_to_q16(sinks[head]);
-        const uint64_t delta = (uint64_t) ((int64_t) maximum_q16 - (int64_t) sink);
-        sum_q31 += softmax_bf16_exp_neg_q31(delta);
-    }
-    __syncthreads();
-
-    for (int64_t col = threadIdx.x; col < ncols; col += blockDim.x) {
-        row_output[col] = softmax_bf16_probability_bits(row_exponents[col], sum_q31);
+    const float inverse_sum = __fdiv_rn(1.0f, sum);
+    for (int64_t col = 0; col < ncols; ++col) {
+        row_output[col] = softmax_fp32_f32_to_bf16_rne(
+                __fmul_rn(softmax_fp32_bf16_to_f32(row_output[col]), inverse_sum));
     }
 }
 
@@ -169,17 +170,17 @@ void ggml_cuda_soft_max_qemu_cuda_run_preprocessed(
         const uint16_t * input_bf16,
         const uint16_t * sinks_bf16,
         uint16_t * output_bf16,
-        uint32_t * exponent_values,
         float * output_f32,
         cudaStream_t stream) {
     const size_t rows = (size_t) params.ne01 * (size_t) params.ne02 * (size_t) params.ne03;
     const size_t elements = rows * (size_t) params.ncols;
     if (rows != 0) {
-        softmax_qemu_bf16_kernel<<<(unsigned int) rows, 256, 0, stream>>>(
-                input_bf16, sinks_bf16, output_bf16, exponent_values,
+        softmax_qemu_fp32_kernel<<<(unsigned int) rows, 1, 0, stream>>>(
+                input_bf16, sinks_bf16, output_bf16,
                 params.ncols, params.ne01, params.ne02);
     }
-    ggml_cuda_soft_max_qemu_cuda_output_to_f32(output_bf16, output_f32, elements, stream);
+    ggml_cuda_soft_max_qemu_cuda_output_to_f32(
+            output_bf16, output_f32, elements, stream);
     CUDA_CHECK(cudaGetLastError());
 }
 

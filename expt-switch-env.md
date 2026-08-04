@@ -1,5 +1,45 @@
 # Experiment Switch Environment Variables
 
+## CUDA ADD QEMU Offload
+
+### `GGML_CUDA_ADD_QEMU_MODE`
+
+Selects `cuda|qemu|qemu_cuda|compare` for `GGML_OP_ADD`. The build option is
+`-DGGML_CUDA_ADD_QEMU=ON`; unset defaults to `cuda`, preserving the original
+llama.cpp CUDA ADD implementation. CUDA preprocessing expands ggml's complete
+four-dimensional `src1` repeat/broadcast mapping and converts both F16/F32
+operands to dense canonical BF16 using RZ/high-16-bit truncation.
+
+The replacement numerical model is the `call_add_fp32` contract: both BF16
+inputs are widened exactly to FP32, added with FP32 round-to-nearest semantics,
+and narrowed once to BF16 with RNE. `qemu_cuda` is device-only. `compare` runs
+the original CUDA ADD plus QEMU/RVV and qemu_cuda, compares QEMU and qemu_cuda
+as raw BF16 bits, and keeps the original CUDA result downstream. All non-CUDA
+modes disable CUDA graph capture for graphs containing ADD.
+
+### `GGML_CUDA_ADD_QEMU_ENDPOINT`
+
+Daemon endpoint, default `tcp://127.0.0.1:15586`.
+
+### `GGML_CUDA_ADD_QEMU_TIMEOUT_MS`
+
+ZMQ timeout in milliseconds, default `300000`.
+
+### `GGML_CUDA_ADD_QEMU_ARTIFACT`
+
+Compare JSONL path, default `experiments/add-qemu-compare.jsonl`. It records
+llama-vs-QEMU MSE/RMSE/max error and QEMU-vs-qemu_cuda BF16 mismatch counts.
+
+### `GGML_CUDA_ADD_QEMU_MISMATCH_LOG`
+
+Mismatch-only JSONL path, default `experiments/add-qemu-cuda-mismatch.jsonl`.
+It records both complete canonical inputs and both complete BF16 outputs.
+
+### `GGML_CUDA_ADD_QEMU_TIMING`
+
+Enables diagnostic ADD timing logs. Default: unset/off. Timing synchronizes the
+measured call and therefore changes performance behavior.
+
 ## CUDA MUL QEMU Offload
 
 ### `GGML_CUDA_MUL_QEMU_MODE`
@@ -48,11 +88,12 @@ Supported values:
 
 - `cuda`: run only the existing CUDA SOFT_MAX implementation and use the CUDA
   result.
-- `qemu`: apply scale, mask, and ALiBi on CUDA, round the effective logits to
-  BF16, run the deterministic BF16 softmax through the QEMU/RVV ZMQ daemon,
-  convert its BF16 output to F32 on CUDA, and use that result.
-- `qemu_cuda`: run the same deterministic BF16 softmax entirely on the existing
-  CUDA device tensors and use its F32-converted result. This mode does not
+- `qemu`: apply scale, mask, and ALiBi on CUDA, truncate the effective logits to
+  canonical BF16, then run `call_softmax_fp32`: max/subtract/reduction and
+  normalization use FP32 RVV while exp uses `ni900_exp_f16m8`. The BF16 result
+  is converted to F32 on CUDA and used downstream.
+- `qemu_cuda`: run the same FP32-compute/NI900-Exp numerical model entirely on
+  the existing CUDA device tensors and use its F32-converted result. This mode does not
   create a ZMQ socket and performs no D2H or H2D transfer.
 - `compare`: run the original llama.cpp CUDA softmax, QEMU/RVV BF16 softmax,
   and qemu_cuda concurrently. The original llama.cpp CUDA result is used
@@ -62,7 +103,7 @@ Supported values:
 `compare_cuda` and `compare_qemu` are accepted as compatibility aliases for
 `compare`; both now keep the original llama.cpp CUDA result downstream.
 
-Unknown values fall back to `cuda`. Before deterministic BF16 softmax, the CUDA
+Unknown values fall back to `cuda`. Before the FP32/NI900 softmax, the CUDA
 preprocess supports the complete forward protocol described in
 `docs/development/cuda-softmax-io-protocol.md`, including F16/F32 masks, mask
 strides, ALiBi, scale, and attention sinks. QEMU and qemu_cuda receive identical
@@ -74,7 +115,8 @@ run modes do not generate comparison artifacts.
 
 ### `GGML_CUDA_SOFT_MAX_QEMU_ENDPOINT`
 
-ZMQ endpoint for the QEMU daemon. Default: `tcp://127.0.0.1:15580`.
+ZMQ endpoint for the `call_softmax_fp32` daemon. Default:
+`tcp://127.0.0.1:15584`.
 
 ### `GGML_CUDA_SOFT_MAX_QEMU_TIMEOUT_MS`
 
@@ -178,6 +220,106 @@ RMS_NORM with BF16 I/O, BF16-to-F32 conversion, total duration, cumulative call
 count, and average duration. Timing events are created only when enabled and
 synchronize the timed call. `LLAMA_CUDA_RMS_NORM_TIMING` records original CUDA
 time in `compare`.
+
+## CUDA ROPE QEMU Offload
+
+### `GGML_CUDA_ROPE_QEMU_MODE`
+
+Selects the experimental static-table RoPE path. Default: unset or `cuda`, so
+the upstream CUDA implementation is unchanged. QEMU-contacting modes require a
+build configured with `-DGGML_CUDA_ROPE_QEMU=ON`.
+
+Supported values:
+
+- `cuda`: original llama.cpp CUDA RoPE.
+- `qemu`: truncate the native source to canonical BF16 on CUDA, send BF16 plus
+  I32 positions to the resident RVV service, convert returned BF16 to the native
+  destination type on CUDA, and use that result downstream.
+- `qemu_cuda`: use the same BF16-RZ input, F32 lookup-table multiply/FMA model,
+  BF16-RNE output and native output conversion on CUDA. The immutable 4 MiB F32
+  table is loaded to each CUDA device once; subsequent calls do not use ZMQ,
+  D2H, or H2D.
+- `compare`: run original CUDA, QEMU/RVV, and qemu_cuda; record original-CUDA
+  error and QEMU/qemu_cuda BF16 mismatch counts; keep original CUDA downstream.
+
+`compare_cuda` and `compare_qemu` are accepted as aliases for `compare`.
+Unknown values fall back to `cuda`. The experiment only intercepts forward
+GPT-NeoX RoPE nodes that exactly match the table parameters documented in
+`docs/development/cuda-rope-qemu-rpc.md`; every other RoPE node safely falls
+back to the original CUDA path. Non-`cuda` modes disable CUDA graph capture for
+graphs containing RoPE.
+
+### `GGML_CUDA_ROPE_QEMU_ENDPOINT`
+
+ZMQ endpoint for the ROPE daemon. Default: `tcp://127.0.0.1:15587`.
+
+### `GGML_CUDA_ROPE_QEMU_TIMEOUT_MS`
+
+ZMQ send/receive timeout in milliseconds. Default: `300000`.
+
+### `GGML_CUDA_ROPE_QEMU_TABLE`
+
+Path to the exact 4 MiB F32 table described by
+`rope-cos-sin-manifest.json`. The daemon loads it into globalram at startup;
+qemu_cuda loads it once per CUDA device. Default:
+`/home/lerong.chen/0729-rope-node4/rope-cos-sin-f32.bin`.
+
+### `GGML_CUDA_ROPE_QEMU_ARTIFACT`
+
+Append-only compare JSONL. Default: `experiments/rope-qemu-compare.jsonl`.
+
+### `GGML_CUDA_ROPE_QEMU_MISMATCH_LOG`
+
+QEMU/qemu_cuda mismatch JSONL. Full canonical input, positions, and both BF16
+outputs are written only when bits differ. Default:
+`experiments/rope-qemu-cuda-mismatch.jsonl`.
+
+### `GGML_CUDA_ROPE_QEMU_TIMING`
+
+Enables diagnostic per-call timing. Default: unset/off. `RVV_ROPE_TIMING`
+records D2H, RPC, daemon, and return-copy time. `QEMU_CUDA_ROPE_TIMING` records
+preprocess, table operator, output conversion, and total CUDA time. Timing uses
+CUDA event synchronization and changes performance behavior.
+
+## CUDA SWIGLU QEMU Offload
+
+### `GGML_CUDA_GLU_QEMU_MODE`
+
+Selects `cuda|qemu|qemu_cuda|compare` for `GGML_GLU_OP_SWIGLU`. The build
+option is `-DGGML_CUDA_GLU_QEMU=ON`; unset defaults to `cuda`. Other GLU
+variants keep their original CUDA implementation. Both split-input and
+two-tensor SWIGLU layouts are packed on CUDA into identical dense BF16 x/gate
+inputs using RZ truncation.
+
+The `call_glu_fp32` numerical model widens x and gate to FP32. Negated x is
+narrowed once to the BF16 input boundary of `ni900_exp_f16m8`; the exp result is
+widened immediately, and FP32 RVV performs `x / (1 + exp(-x)) * gate` before a
+single BF16 RNE output conversion. `qemu_cuda` mirrors the NI900 exp model on
+device. `compare` retains the original llama.cpp CUDA output downstream and
+records llama-vs-QEMU error plus QEMU-vs-qemu_cuda BF16 mismatches. Non-CUDA
+modes disable CUDA graph capture for intercepted SWIGLU nodes.
+
+### `GGML_CUDA_GLU_QEMU_ENDPOINT`
+
+Daemon endpoint, default `tcp://127.0.0.1:15588`.
+
+### `GGML_CUDA_GLU_QEMU_TIMEOUT_MS`
+
+ZMQ timeout in milliseconds, default `300000`.
+
+### `GGML_CUDA_GLU_QEMU_ARTIFACT`
+
+Compare JSONL path, default `experiments/glu-qemu-compare.jsonl`.
+
+### `GGML_CUDA_GLU_QEMU_MISMATCH_LOG`
+
+Mismatch-only JSONL path, default `experiments/glu-qemu-cuda-mismatch.jsonl`.
+It records both complete canonical inputs and both BF16 outputs.
+
+### `GGML_CUDA_GLU_QEMU_TIMING`
+
+Enables diagnostic SWIGLU timing logs. Default: unset/off. Timing synchronizes
+the measured call and therefore changes performance behavior.
 
 ## Tensor Export and Offline Quantization Evaluation
 
