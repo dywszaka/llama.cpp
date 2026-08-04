@@ -1,0 +1,6 @@
+{
+  "prompt": "hello",
+  "n_predict": 1,
+  "temperature": 0,
+  "stream": false
+}

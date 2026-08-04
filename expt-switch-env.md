@@ -219,6 +219,66 @@ count, and average duration. Timing events are created only when enabled and
 synchronize the timed call. `LLAMA_CUDA_RMS_NORM_TIMING` records original CUDA
 time in `compare`.
 
+## CUDA ROPE QEMU Offload
+
+### `GGML_CUDA_ROPE_QEMU_MODE`
+
+Selects the experimental static-table RoPE path. Default: unset or `cuda`, so
+the upstream CUDA implementation is unchanged. QEMU-contacting modes require a
+build configured with `-DGGML_CUDA_ROPE_QEMU=ON`.
+
+Supported values:
+
+- `cuda`: original llama.cpp CUDA RoPE.
+- `qemu`: truncate the native source to canonical BF16 on CUDA, send BF16 plus
+  I32 positions to the resident RVV service, convert returned BF16 to the native
+  destination type on CUDA, and use that result downstream.
+- `qemu_cuda`: use the same BF16-RZ input, F32 lookup-table multiply/FMA model,
+  BF16-RNE output and native output conversion on CUDA. The immutable 4 MiB F32
+  table is loaded to each CUDA device once; subsequent calls do not use ZMQ,
+  D2H, or H2D.
+- `compare`: run original CUDA, QEMU/RVV, and qemu_cuda; record original-CUDA
+  error and QEMU/qemu_cuda BF16 mismatch counts; keep original CUDA downstream.
+
+`compare_cuda` and `compare_qemu` are accepted as aliases for `compare`.
+Unknown values fall back to `cuda`. The experiment only intercepts forward
+GPT-NeoX RoPE nodes that exactly match the table parameters documented in
+`docs/development/cuda-rope-qemu-rpc.md`; every other RoPE node safely falls
+back to the original CUDA path. Non-`cuda` modes disable CUDA graph capture for
+graphs containing RoPE.
+
+### `GGML_CUDA_ROPE_QEMU_ENDPOINT`
+
+ZMQ endpoint for the ROPE daemon. Default: `tcp://127.0.0.1:15587`.
+
+### `GGML_CUDA_ROPE_QEMU_TIMEOUT_MS`
+
+ZMQ send/receive timeout in milliseconds. Default: `300000`.
+
+### `GGML_CUDA_ROPE_QEMU_TABLE`
+
+Path to the exact 4 MiB F32 table described by
+`rope-cos-sin-manifest.json`. The daemon loads it into globalram at startup;
+qemu_cuda loads it once per CUDA device. Default:
+`/home/lerong.chen/0729-rope-node4/rope-cos-sin-f32.bin`.
+
+### `GGML_CUDA_ROPE_QEMU_ARTIFACT`
+
+Append-only compare JSONL. Default: `experiments/rope-qemu-compare.jsonl`.
+
+### `GGML_CUDA_ROPE_QEMU_MISMATCH_LOG`
+
+QEMU/qemu_cuda mismatch JSONL. Full canonical input, positions, and both BF16
+outputs are written only when bits differ. Default:
+`experiments/rope-qemu-cuda-mismatch.jsonl`.
+
+### `GGML_CUDA_ROPE_QEMU_TIMING`
+
+Enables diagnostic per-call timing. Default: unset/off. `RVV_ROPE_TIMING`
+records D2H, RPC, daemon, and return-copy time. `QEMU_CUDA_ROPE_TIMING` records
+preprocess, table operator, output conversion, and total CUDA time. Timing uses
+CUDA event synchronization and changes performance behavior.
+
 ## Tensor Export and Offline Quantization Evaluation
 
 ### `LLAMA_EXPT_NVFP4_K_OFFLINE_CHANNEL_ORDER`
