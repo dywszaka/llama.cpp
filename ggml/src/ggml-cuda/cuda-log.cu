@@ -14,6 +14,20 @@ static bool ggml_cuda_name_contains(const ggml_tensor * t, const char * needle) 
     return std::strstr(ggml_cuda_tensor_name(t), needle) != nullptr;
 }
 
+void ggml_cuda_log_softmax_bf16_exp_once(bool enabled) {
+    static std::atomic<bool> logged(false);
+    if (logged.exchange(true)) {
+        return;
+    }
+
+    GGML_LOG_INFO(
+            "%s: GGML_CUDA_SOFTMAX_BF16_EXP=%s -> %s\n",
+            __func__,
+            enabled ? "1" : "0",
+            enabled ? "enabled, CUDA softmax exp selected the BF16 expp branch"
+                    : "disabled, CUDA softmax exp selected the expf branch");
+}
+
 static int ggml_cuda_mul_mat_kqvp_kind(const ggml_tensor * dst) {
     if (ggml_cuda_name_contains(dst, "kqv") || ggml_cuda_name_contains(dst, "KQV")) {
         return 2;

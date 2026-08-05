@@ -4,6 +4,8 @@
 
 struct block_q8_1_mmq;
 
+void ggml_cuda_log_softmax_bf16_exp_once(bool enabled);
+
 void ggml_cuda_log_fattn_tensor_brief_once(
         const ggml_tensor * Q,
         const ggml_tensor * K,

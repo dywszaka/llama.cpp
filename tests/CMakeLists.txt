@@ -224,6 +224,27 @@ if (GGML_CUDA)
 
     get_target_property(LLAMA_TEST_CUDA_ARCH ggml-cuda CUDA_ARCHITECTURES)
 
+    set(LLAMA_TEST_NAME test-cuda-bf16-expp)
+    llama_build(test-cuda-bf16-expp.cu)
+    target_sources(${LLAMA_TEST_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../c100-sim/ext/riscv-isa-sim-lib-demo/src/top/custom/riscv/custom_expp.cpp)
+    if (LLAMA_TEST_CUDA_ARCH AND NOT LLAMA_TEST_CUDA_ARCH STREQUAL "LLAMA_TEST_CUDA_ARCH-NOTFOUND")
+        set_property(TARGET ${LLAMA_TEST_NAME} PROPERTY CUDA_ARCHITECTURES "${LLAMA_TEST_CUDA_ARCH}")
+    endif()
+    target_include_directories(${LLAMA_TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
+    llama_test(test-cuda-bf16-expp LABEL "cuda")
+    set_tests_properties(test-cuda-bf16-expp PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME test-cuda-bf16-expp-default
+             COMMAND $<TARGET_FILE:test-cuda-bf16-expp> --default)
+    set_tests_properties(test-cuda-bf16-expp-default PROPERTIES
+                         LABELS "cuda"
+                         SKIP_RETURN_CODE 77)
+    add_test(NAME test-cuda-bf16-expp-host
+             COMMAND $<TARGET_FILE:test-cuda-bf16-expp> --host-only)
+    set_tests_properties(test-cuda-bf16-expp-host PROPERTIES LABELS "cuda")
+    target_link_libraries(${LLAMA_TEST_NAME} PRIVATE CUDA::cudart)
+    unset(LLAMA_TEST_NAME)
+
     set(LLAMA_TEST_NAME test-nvfp4-matmul)
     llama_build(test-nvfp4-matmul.cu)
     if (LLAMA_TEST_CUDA_ARCH AND NOT LLAMA_TEST_CUDA_ARCH STREQUAL "LLAMA_TEST_CUDA_ARCH-NOTFOUND")
