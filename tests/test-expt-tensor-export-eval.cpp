@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -65,6 +66,12 @@ static void write_f32(const std::string & path, const std::vector<float> & value
         throw std::runtime_error("failed to open " + path);
     }
     out.write(reinterpret_cast<const char *>(values.data()), (std::streamsize) (values.size() * sizeof(float)));
+}
+
+static bool read_first_u16(const std::filesystem::path & path, uint16_t & value) {
+    std::ifstream in(path, std::ios::binary);
+    in.read(reinterpret_cast<char *>(&value), sizeof(value));
+    return in.good();
 }
 
 static bool test_metrics() {
@@ -187,6 +194,7 @@ static bool test_tensor_name_priority_binds_nvfp4_capture() {
         "LLAMA_EXPT_TENSOR_EXPORT_OP",
         "LLAMA_EXPT_TENSOR_EXPORT_TYPE",
         "LLAMA_EXPT_TENSOR_EXPORT_LAYER",
+        "LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP",
     };
     std::vector<std::string> old_values;
     std::vector<bool> old_present;
@@ -201,6 +209,7 @@ static bool test_tensor_name_priority_binds_nvfp4_capture() {
     setenv("LLAMA_EXPT_TENSOR_EXPORT_OP", "RMS_NORM", 1);
     setenv("LLAMA_EXPT_TENSOR_EXPORT_TYPE", "decode", 1);
     setenv("LLAMA_EXPT_TENSOR_EXPORT_LAYER", "0", 1);
+    unsetenv("LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP");
 
     ggml_init_params params = {};
     params.mem_size = 1024 * 1024;
@@ -253,6 +262,150 @@ static bool test_tensor_name_priority_binds_nvfp4_capture() {
     return ok;
 }
 
+static bool test_soft_max_bf16_dump_writes_f32_records_as_bf16() {
+    const char * env_names[] = {
+        "LLAMA_EXPT_TENSOR_EXPORT_DIR",
+        "LLAMA_EXPT_TENSOR_EXPORT_NAME",
+        "LLAMA_EXPT_TENSOR_EXPORT_OP",
+        "LLAMA_EXPT_TENSOR_EXPORT_TYPE",
+        "LLAMA_EXPT_TENSOR_EXPORT_LAYER",
+        "LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP",
+    };
+    std::vector<std::string> old_values;
+    std::vector<bool> old_present;
+    for (const char * env_name : env_names) {
+        const char * value = std::getenv(env_name);
+        old_present.push_back(value != nullptr);
+        old_values.emplace_back(value ? value : "");
+    }
+
+    const std::string dir = temp_dir() + "-soft-max-bf16-dump";
+    std::filesystem::remove_all(dir);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_DIR", dir.c_str(), 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_NAME", "softmax-export-0", 1);
+    unsetenv("LLAMA_EXPT_TENSOR_EXPORT_OP");
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_TYPE", "decode", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_LAYER", "0", 1);
+    setenv("LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP", "1", 1);
+
+    ggml_init_params params = {};
+    params.mem_size = 1024 * 1024;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!expect(ctx != nullptr, "expected ggml context for SOFT_MAX BF16 dump test")) {
+        return false;
+    }
+
+    ggml_tensor * input_leaf = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 4, 1, 2, 1);
+    ggml_tensor * input = ggml_scale(ctx, input_leaf, 1.0f);
+    ggml_set_name(input, "softmax-input-0");
+    ggml_tensor * mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 4, 1, 1, 1);
+    ggml_tensor * sinks = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2);
+    ggml_tensor * dst = ggml_soft_max_ext(ctx, input, mask, 0.125f, 8.0f);
+    ggml_soft_max_add_sinks(dst, sinks);
+    ggml_set_name(dst, "softmax-export-0");
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(gf, dst);
+    const bool retained = llama_expt::tensor_export_maybe_retain_graph(gf);
+    llama_expt::tensor_export_observer * observer =
+            llama_expt::tensor_export_observer_create(gf, false, nullptr, nullptr);
+
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_sched_t sched = ggml_backend_sched_new(&backend, nullptr, 1, 16, false, true);
+    bool ok = expect(retained, "expected SOFT_MAX BF16 dump graph retention") &&
+            expect(observer != nullptr, "expected SOFT_MAX BF16 dump observer") &&
+            expect(backend != nullptr && sched != nullptr, "expected CPU scheduler for SOFT_MAX BF16 dump test") &&
+            expect(ggml_backend_sched_alloc_graph(sched, gf), "expected graph allocation for SOFT_MAX BF16 dump test");
+
+    if (ok) {
+        const std::vector<float> input_data = { -1.0f, 0.0f, 1.0f, 2.0f, 2.0f, 1.0f, 0.0f, -1.0f };
+        const std::vector<ggml_fp16_t> mask_data = {
+            ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f),
+            ggml_fp32_to_fp16(-1.0f), ggml_fp32_to_fp16(-2.0f),
+        };
+        const std::vector<float> sink_data = { -0.5f, -1.0f };
+        const std::vector<float> dst_data((size_t) ggml_nelements(dst), 0.25f);
+        ggml_backend_tensor_set(input, input_data.data(), 0, input_data.size() * sizeof(float));
+        ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+        ggml_backend_tensor_set(sinks, sink_data.data(), 0, sink_data.size() * sizeof(float));
+        ggml_backend_tensor_set(dst, dst_data.data(), 0, dst_data.size() * sizeof(float));
+        ok = expect(llama_expt::tensor_export_observer_callback(input, true, observer),
+                    "BF16 dump observer must stop after SOFT_MAX src0 producer") &&
+             expect(llama_expt::tensor_export_observer_callback(input, false, observer),
+                    "BF16 dump observer must snapshot SOFT_MAX src0 before execution") && ok;
+        ggml_backend_tensor_set(input, dst_data.data(), 0, dst_data.size() * sizeof(float));
+        ok = expect(llama_expt::tensor_export_observer_callback(dst, true, observer),
+                    "BF16 dump observer must request the SOFT_MAX dst") &&
+             expect(llama_expt::tensor_export_observer_callback(dst, false, observer),
+                    "BF16 dump observer must snapshot the SOFT_MAX dst") &&
+             expect(llama_expt::tensor_export_graph(sched, gf, false, observer),
+                    "expected SOFT_MAX BF16 dump graph export") && ok;
+    }
+
+    if (ok) {
+        std::ifstream in(dir + "/manifest.json", std::ios::binary);
+        const std::string manifest((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        ok = expect(manifest.find("\"bf16_dump\": true") != std::string::npos,
+                    "SOFT_MAX BF16 dump manifest must record bf16_dump") &&
+             expect(manifest.find("\"dump_conversion\": \"f32_to_bf16_trunc\"") != std::string::npos,
+                    "SOFT_MAX BF16 dump manifest must record conversion") &&
+             expect(manifest.find("\"dtype\": \"bf16\"") != std::string::npos,
+                    "SOFT_MAX BF16 dump manifest must write F32 records as BF16") &&
+             expect(manifest.find("\"original_dtype\": \"f32\"") != std::string::npos,
+                    "SOFT_MAX BF16 dump manifest must preserve original F32 dtype") &&
+             expect(manifest.find("\"dtype\": \"f16\"") != std::string::npos,
+                    "SOFT_MAX BF16 dump must leave non-F32 mask storage unchanged") && ok;
+
+        bool found_dst = false;
+        bool found_src0 = false;
+        bool found_src2 = false;
+        bool found_mask_f16 = false;
+        uint16_t dst_first = 0;
+        uint16_t src0_first = 0;
+        uint16_t src2_first = 0;
+        for (const auto & entry : std::filesystem::directory_iterator(dir)) {
+            const std::string filename = entry.path().filename().string();
+            if (filename.find("-dst-") != std::string::npos) {
+                found_dst = read_first_u16(entry.path(), dst_first) &&
+                        std::filesystem::file_size(entry.path()) == (size_t) ggml_nelements(dst) * sizeof(uint16_t);
+            } else if (filename.find("-src0-") != std::string::npos) {
+                found_src0 = read_first_u16(entry.path(), src0_first) &&
+                        std::filesystem::file_size(entry.path()) == (size_t) ggml_nelements(input) * sizeof(uint16_t);
+            } else if (filename.find("-src1-") != std::string::npos) {
+                found_mask_f16 = std::filesystem::file_size(entry.path()) == (size_t) ggml_nelements(mask) * sizeof(ggml_fp16_t);
+            } else if (filename.find("-src2-") != std::string::npos) {
+                found_src2 = read_first_u16(entry.path(), src2_first) &&
+                        std::filesystem::file_size(entry.path()) == (size_t) ggml_nelements(sinks) * sizeof(uint16_t);
+            }
+        }
+        ok = expect(found_dst, "SOFT_MAX BF16 dump must write dst as compact BF16") &&
+             expect(found_src0, "SOFT_MAX BF16 dump must write src0 as compact BF16") &&
+             expect(found_src2, "SOFT_MAX BF16 dump must write src2 as compact BF16") &&
+             expect(found_mask_f16, "SOFT_MAX BF16 dump must leave src1 F16 compact") &&
+             expect(dst_first == UINT16_C(0x3e80), "SOFT_MAX BF16 dump dst first value must be 0.25 BF16") &&
+             expect(src0_first == UINT16_C(0xbf80), "SOFT_MAX BF16 dump src0 first value must be -1.0 BF16") &&
+             expect(src2_first == UINT16_C(0xbf00), "SOFT_MAX BF16 dump src2 first value must be -0.5 BF16") && ok;
+    }
+
+    llama_expt::tensor_export_observer_free(observer);
+    if (sched) {
+        ggml_backend_sched_free(sched);
+    }
+    if (backend) {
+        ggml_backend_free(backend);
+    }
+    ggml_free(ctx);
+    for (size_t i = 0; i < old_values.size(); ++i) {
+        if (old_present[i]) {
+            setenv(env_names[i], old_values[i].c_str(), 1);
+        } else {
+            unsetenv(env_names[i]);
+        }
+    }
+    return ok;
+}
+
 static bool test_fp4mulmat_export_writes_only_final_scale() {
     const char * env_names[] = {
         "LLAMA_EXPT_TENSOR_EXPORT_DIR",
@@ -260,6 +413,7 @@ static bool test_fp4mulmat_export_writes_only_final_scale() {
         "LLAMA_EXPT_TENSOR_EXPORT_OP",
         "LLAMA_EXPT_TENSOR_EXPORT_TYPE",
         "LLAMA_EXPT_TENSOR_EXPORT_LAYER",
+        "LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP",
     };
     std::vector<std::string> old_values;
     std::vector<bool> old_present;
@@ -276,6 +430,7 @@ static bool test_fp4mulmat_export_writes_only_final_scale() {
     unsetenv("LLAMA_EXPT_TENSOR_EXPORT_OP");
     setenv("LLAMA_EXPT_TENSOR_EXPORT_TYPE", "decode", 1);
     setenv("LLAMA_EXPT_TENSOR_EXPORT_LAYER", "0", 1);
+    unsetenv("LLAMA_EXPT_TENSOR_EXPORT_BF16_DUMP");
 
     ggml_init_params params = {};
     params.mem_size = 2 * 1024 * 1024;
@@ -840,6 +995,9 @@ int main() {
         return 1;
     }
     if (!test_soft_max_export_writes_params_and_sinks()) {
+        return 1;
+    }
+    if (!test_soft_max_bf16_dump_writes_f32_records_as_bf16()) {
         return 1;
     }
     if (!test_rope_export_writes_params_and_positions()) {

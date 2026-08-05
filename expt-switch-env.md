@@ -548,6 +548,10 @@ The switch is cached on first CUDA softmax use, so changing it later in the same
 process is unsupported. The selected enabled or disabled exp dispatch branch is
 logged once.
 
+The helper script `mylab/tensor-export-eval/export.sh` sets this switch to `1`
+by default for tensor-export runs; override `SOFTMAX_BF16_EXP=0` only when the
+comparison explicitly needs the standard CUDA softmax exp path.
+
 ## FP8 E4M3 E8M0 32 K-Cache
 
 ### `--cache-type-k fp8_e4m3_e8m0_32`

@@ -23,6 +23,9 @@ REBUILD="${REBUILD:-1}"
 # Set to 1 to export F32 tensors as raw BF16 by truncating the low 16 bits.
 BF16_DUMP="${BF16_DUMP:-0}"
 
+# Set to 1 to enable the CUDA softmax BF16 exponential experiment.
+SOFTMAX_BF16_EXP="${SOFTMAX_BF16_EXP:-1}"
+
 # CMake build directory. If unset, prefer an existing configured CUDA build.
 BUILD_DIR="${BUILD_DIR:-}"
 if [[ -z "${BUILD_DIR}" ]]; then
@@ -110,6 +113,14 @@ case "${BF16_DUMP}" in
     0|1) ;;
     *)
         echo "invalid BF16_DUMP='${BF16_DUMP}'; expected 0 or 1" >&2
+        exit 1
+        ;;
+esac
+
+case "${SOFTMAX_BF16_EXP}" in
+    0|1) ;;
+    *)
+        echo "invalid SOFTMAX_BF16_EXP='${SOFTMAX_BF16_EXP}'; expected 0 or 1" >&2
         exit 1
         ;;
 esac
@@ -208,6 +219,7 @@ printf '%s' "${PROMPT}" > "${RUN_DIR}/prompt.txt"
     printf 'MODEL_PATH=%q\n' "${MODEL_PATH}"
     printf 'N_PREDICT=%q\n' "${N_PREDICT}"
     printf 'BF16_DUMP=%q\n' "${BF16_DUMP}"
+    printf 'SOFTMAX_BF16_EXP=%q\n' "${SOFTMAX_BF16_EXP}"
     printf 'BUILD_DIR=%q\n' "${BUILD_DIR}"
     printf 'LLAMA_CLI=%q\n' "${LLAMA_CLI}"
     printf 'CODE_REVISION=%q\n' "$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -220,6 +232,7 @@ printf '%s' "${PROMPT}" > "${RUN_DIR}/prompt.txt"
     printf 'GGML_CUDA_TRUNC_ENABLE=%q ' "1"
     printf 'GGML_CUDA_TRUNC_LOG=%q ' "1"
     printf 'GGML_CUDA_NVFP4_FP4MULMAT=%q ' "1"
+    printf 'GGML_CUDA_SOFTMAX_BF16_EXP=%q ' "${SOFTMAX_BF16_EXP}"
     printf 'LLAMA_EXPT_TENSOR_EXPORT_DIR=%q ' "${TENSOR_DIR}"
     printf 'LLAMA_EXPT_TENSOR_EXPORT_OP=%q ' "${OP}"
     printf 'LLAMA_EXPT_TENSOR_EXPORT_NAME=%q ' "${NAME}"
@@ -241,6 +254,7 @@ GGML_CUDA_TRUNC_LOG=1 \
 GGML_CUDA_NVFP4_FP4MULMAT=1 \
 GGML_CUDA_NVFP4_BF16_QUANT=1 \
 GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=1 \
+GGML_CUDA_SOFTMAX_BF16_EXP="${SOFTMAX_BF16_EXP}" \
 LLAMA_EXPT_TENSOR_EXPORT_DIR="${TENSOR_DIR}" \
 LLAMA_EXPT_TENSOR_EXPORT_OP="${OP}" \
 LLAMA_EXPT_TENSOR_EXPORT_NAME="${NAME}" \
@@ -364,6 +378,7 @@ fi
     printf 'NAME=%q\n' "${NAME}"
     printf 'LAYER=%q\n' "${LAYER}"
     printf 'BF16_DUMP=%q\n' "${BF16_DUMP}"
+    printf 'SOFTMAX_BF16_EXP=%q\n' "${SOFTMAX_BF16_EXP}"
     printf 'MANIFEST_FORMAT=%q\n' "${manifest_format}"
     printf 'SELECTION_PRIORITY=%q\n' "${selection_priority}"
     printf 'REQUESTED_NAME=%q\n' "${requested_name}"
@@ -388,6 +403,7 @@ fi
     echo "- Name: \`${NAME}\`"
     echo "- Layer: ${LAYER}"
     echo "- BF16 dump: \`${BF16_DUMP}\`"
+    echo "- Softmax BF16 exp: \`${SOFTMAX_BF16_EXP}\`"
     echo "- Selection priority: \`${selection_priority}\`"
     if [[ -n "${NAME}" ]]; then
         echo "- Resolved dst name: \`${resolved_name}\`"

@@ -96,9 +96,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["auto", "f32", "qemu-bf16"],
+        choices=["auto", "f32", "bf16-exp", "qemu-bf16"],
         default="auto",
-        help="auto reads GGML_CUDA_SOFT_MAX_QEMU_MODE from command.txt",
+        help="auto reads GGML_CUDA_SOFT_MAX_QEMU_MODE and GGML_CUDA_SOFTMAX_BF16_EXP from command.txt",
     )
     parser.add_argument(
         "--result-rounding",
@@ -221,6 +221,8 @@ def detect_mode(manifest_path: Path, requested: str) -> str:
     if "GGML_CUDA_SOFT_MAX_QEMU_MODE=qemu_cuda" in command or \
             "GGML_CUDA_SOFT_MAX_QEMU_MODE=qemu " in command:
         return "qemu-bf16"
+    if "GGML_CUDA_SOFTMAX_BF16_EXP=1" in command:
+        return "bf16-exp"
     return "f32"
 
 
@@ -273,6 +275,87 @@ def softmax_f32_row(values: list[float], sink: float | None, result_rounding: st
     total = math.fsum(exponents)
     if sink is not None:
         total += f32(math.exp(sink - maximum))
+    output = [f32(value / total) for value in exponents]
+    if result_rounding == "bf16-rne":
+        output = [bf16_to_f32(f32_to_bf16_rne(value)) for value in output]
+    return output
+
+
+def sign_extend(value: int, width: int) -> int:
+    sign = 1 << (width - 1)
+    mask = (1 << width) - 1
+    value &= mask
+    return value - (1 << width) if value & sign else value
+
+
+def bf16_expp_bits(input_bits: int) -> int:
+    bias = 127
+    one_bf16 = 0x3F80
+    ln2_flip = 23637
+    alpha = 4
+    beta = 7
+    gamma1 = 363
+    gamma2 = 278
+
+    input_bits &= 0xFFFF
+    sign = input_bits >> 15
+    exponent = (input_bits >> 7) & 0xFF
+    mantissa = input_bits & 0x7F
+
+    if exponent == 0:
+        return one_bf16
+    if exponent == 0xFF:
+        if mantissa != 0:
+            return 0x7FC0
+        return 0x0000 if sign else 0x7F80
+
+    if 0x42B2 <= input_bits <= 0x7F7F:
+        return 0x7F80
+    if 0xC386 <= input_bits <= 0xFF7F:
+        return 0x0000
+
+    mant_with_1 = 0x80 | mantissa
+    mant_mul_ln2flip = (mant_with_1 * ln2_flip) & 0x7FFFFF
+
+    if exponent >= bias:
+        shift_amount = exponent - bias
+        shm = ((mant_mul_ln2flip << shift_amount) & 0x3FFFFFFF) if shift_amount < 30 else 0
+    else:
+        shift_amount = bias - exponent
+        shm = ((mant_mul_ln2flip >> shift_amount) & 0x3FFFFFFF) if shift_amount < 23 else 0
+
+    shm_q7 = ((shm >> 14) + ((shm >> 13) & 1)) & 0xFFFF
+    if sign != 0:
+        shm_q7 = (~shm_q7 + 1) & 0xFFFF
+
+    nm = shm_q7 & 0x7F
+    integer_part = sign_extend((shm_q7 >> 7) & 0x1FF, 9)
+    ne_temp = sign_extend((integer_part + bias) & 0x1FF, 9)
+
+    if ne_temp >= 255:
+        return 0x0000 if sign else 0x7F80
+    if ne_temp <= 0:
+        return 0x0000
+
+    frac_msb = nm >> 6
+    res_add_1 = (nm + (gamma2 if frac_msb else gamma1)) & 0x1FF
+    mant_mul = (nm << 1) & 0xFF
+    res_mul_1 = (((0xFF - mant_mul) * beta) & 0x7FF) if frac_msb else ((mant_mul * alpha) & 0x7FF)
+    res_mul_2 = ((res_add_1 * res_mul_1) >> 12) & 0xFF
+    result_mantissa = ((0x7F - res_mul_2) & 0x7F) if frac_msb else (res_mul_2 & 0x7F)
+    return ((ne_temp << 7) | result_mantissa) & 0xFFFF
+
+
+def bf16_expp_f32(value: float) -> float:
+    return bf16_to_f32(bf16_expp_bits(f32_to_bf16_trunc(value)))
+
+
+def softmax_bf16_exp_row(values: list[float], sink: float | None, result_rounding: str) -> list[float]:
+    maximum = max(values) if sink is None else max(max(values), sink)
+    exponents = [bf16_expp_f32(f32(value - maximum)) for value in values]
+    total = math.fsum(exponents)
+    if sink is not None:
+        total += bf16_expp_f32(f32(sink - maximum))
     output = [f32(value / total) for value in exponents]
     if result_rounding == "bf16-rne":
         output = [bf16_to_f32(f32_to_bf16_rne(value)) for value in output]
@@ -415,6 +498,8 @@ def run() -> int:
                 expected_row = (
                     softmax_qemu_bf16_row(values, sink)
                     if mode == "qemu-bf16"
+                    else softmax_bf16_exp_row(values, sink, result_rounding)
+                    if mode == "bf16-exp"
                     else softmax_f32_row(values, sink, result_rounding)
                 )
                 for i0, expected in enumerate(expected_row):
