@@ -13,52 +13,90 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
-struct expp_case {
-    uint32_t input;
-    uint16_t expected;
-};
-
-static constexpr expp_case CASES[] = {
-    {0x00000000u, 0x3f80u},
-    {0x80000000u, 0x3f80u},
-    {0x00010000u, 0x3f80u},
-    {0x80010000u, 0x3f80u},
-    {0x7fc10000u, 0x7fc0u},
-    {0x7f800000u, 0x7f80u},
-    {0xff800000u, 0x0000u},
-    {0xbf800000u, 0x3ebcu},
-    {0xbf000000u, 0x3f1cu},
-    {0x3f000000u, 0x3fd3u},
-    {0x3f800000u, 0x402eu},
-    {0x41200000u, 0x46acu},
-    {0x42b10000u, 0x7f4du},
-    {0x42b20000u, 0x7f80u},
-    {0xc2ae0000u, 0x00b3u},
-    {0xc2af0000u, 0x0000u},
-    {0x3f80ffffu, 0x402eu},
-};
+static constexpr int EXHAUSTIVE_CASE_COUNT = 0x10000;
 
 static_assert(ggml_cuda_bf16_expp_bits(0x3f80u) == 0x402eu, "exp(1) mismatch");
 static_assert(ggml_cuda_bf16_expp_bits(0xbf80u) == 0x3ebcu, "exp(-1) mismatch");
 static_assert(ggml_cuda_bf16_expp_bits(0x42b2u) == 0x7f80u, "overflow mismatch");
 
-__global__ void expp_kernel(const expp_case * cases, uint32_t * output, int count) {
+__global__ void expp_kernel(const uint16_t * input_bf16, uint32_t * output, int count) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < count) {
-        const float input = __uint_as_float(cases[i].input);
+        const float input = __uint_as_float(uint32_t(input_bf16[i]) << 16);
         output[i] = __float_as_uint(ggml_cuda_bf16_expp_f32(input));
     }
 }
 
-static bool run_exhaustive_host_test() {
+static void build_exhaustive_cases(std::vector<uint16_t> & input, std::vector<uint16_t> & expected) {
     BF16ExppUnit_Model reference;
-    for (uint32_t input = 0; input <= 0xffffu; ++input) {
-        const uint16_t expected = reference.process(uint16_t(input));
-        const uint16_t actual = ggml_cuda_bf16_expp_bits(uint16_t(input));
-        if (actual != expected) {
+    input.resize(EXHAUSTIVE_CASE_COUNT);
+    expected.resize(EXHAUSTIVE_CASE_COUNT);
+
+    for (uint32_t i = 0; i <= 0xffffu; ++i) {
+        input[i] = uint16_t(i);
+        expected[i] = reference.process(uint16_t(i));
+    }
+}
+
+static bool run_exhaustive_host_test() {
+    std::vector<uint16_t> input;
+    std::vector<uint16_t> expected;
+    build_exhaustive_cases(input, expected);
+
+    for (uint32_t i = 0; i <= 0xffffu; ++i) {
+        const uint16_t actual = ggml_cuda_bf16_expp_bits(input[i]);
+        if (actual != expected[i]) {
             std::fprintf(stderr, "host case 0x%04x: got 0x%04x, expected 0x%04x\n",
-                         input, uint32_t(actual), uint32_t(expected));
+                         uint32_t(input[i]), uint32_t(actual), uint32_t(expected[i]));
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool run_exhaustive_cuda_test() {
+    std::vector<uint16_t> input;
+    std::vector<uint16_t> expected;
+    build_exhaustive_cases(input, expected);
+    std::vector<uint32_t> output(EXHAUSTIVE_CASE_COUNT);
+
+    uint16_t * input_d = nullptr;
+    uint32_t * output_d = nullptr;
+
+    if (cudaMalloc(&input_d, input.size() * sizeof(input[0])) != cudaSuccess) {
+        std::fprintf(stderr, "CUDA input allocation failed\n");
+        return false;
+    }
+    if (cudaMalloc(&output_d, output.size() * sizeof(output[0])) != cudaSuccess) {
+        std::fprintf(stderr, "CUDA output allocation failed\n");
+        cudaFree(input_d);
+        return false;
+    }
+
+    const int threads = 256;
+    const int blocks = (EXHAUSTIVE_CASE_COUNT + threads - 1) / threads;
+    bool ok = cudaMemcpy(input_d, input.data(), input.size() * sizeof(input[0]), cudaMemcpyHostToDevice) == cudaSuccess;
+    if (ok) {
+        expp_kernel<<<blocks, threads>>>(input_d, output_d, EXHAUSTIVE_CASE_COUNT);
+        ok = cudaGetLastError() == cudaSuccess &&
+             cudaMemcpy(output.data(), output_d, output.size() * sizeof(output[0]), cudaMemcpyDeviceToHost) == cudaSuccess;
+    }
+
+    cudaFree(output_d);
+    cudaFree(input_d);
+
+    if (!ok) {
+        std::fprintf(stderr, "CUDA BF16 expp exhaustive kernel failed\n");
+        return false;
+    }
+
+    for (size_t i = 0; i < output.size(); ++i) {
+        const uint32_t expected_bits = uint32_t(expected[i]) << 16;
+        if (output[i] != expected_bits) {
+            std::fprintf(stderr, "CUDA case 0x%04x: got 0x%08x, expected 0x%08x\n",
+                         uint32_t(input[i]), output[i], expected_bits);
             return false;
         }
     }
@@ -155,42 +193,7 @@ int main(int argc, char ** argv) {
         return 77;
     }
 
-    expp_case * cases_d = nullptr;
-    uint32_t * output_d = nullptr;
-    uint32_t output[sizeof(CASES) / sizeof(CASES[0])] = {};
-
-    if (cudaMalloc(&cases_d, sizeof(CASES)) != cudaSuccess) {
-        std::fprintf(stderr, "CUDA input allocation failed\n");
-        return 1;
-    }
-    if (cudaMalloc(&output_d, sizeof(output)) != cudaSuccess) {
-        std::fprintf(stderr, "CUDA output allocation failed\n");
-        cudaFree(cases_d);
-        return 1;
-    }
-
-    cudaMemcpy(cases_d, CASES, sizeof(CASES), cudaMemcpyHostToDevice);
-    expp_kernel<<<1, 32>>>(cases_d, output_d, int(sizeof(CASES) / sizeof(CASES[0])));
-    if (cudaGetLastError() != cudaSuccess ||
-        cudaMemcpy(output, output_d, sizeof(output), cudaMemcpyDeviceToHost) != cudaSuccess) {
-        std::fprintf(stderr, "CUDA BF16 expp kernel failed\n");
-        cudaFree(output_d);
-        cudaFree(cases_d);
-        return 1;
-    }
-
-    bool ok = true;
-    for (size_t i = 0; i < sizeof(CASES) / sizeof(CASES[0]); ++i) {
-        const uint32_t expected = uint32_t(CASES[i].expected) << 16;
-        if (output[i] != expected) {
-            std::fprintf(stderr, "case %zu: got 0x%08x, expected 0x%08x\n",
-                         i, output[i], expected);
-            ok = false;
-        }
-    }
-
-    cudaFree(output_d);
-    cudaFree(cases_d);
+    bool ok = run_exhaustive_cuda_test();
     if (ok) {
         ok = run_softmax_switch_test(use_bf16_exp);
     }
