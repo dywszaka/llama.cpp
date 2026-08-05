@@ -17,31 +17,6 @@
 
 static constexpr int EXHAUSTIVE_CASE_COUNT = 0x10000;
 
-struct expp_case {
-    uint32_t input;
-    uint16_t expected;
-};
-
-static constexpr expp_case CASES[] = {
-    {0x00000000u, 0x3f80u},
-    {0x80000000u, 0x3f80u},
-    {0x00010000u, 0x3f80u},
-    {0x80010000u, 0x3f80u},
-    {0x7fc10000u, 0x7fc0u},
-    {0x7f800000u, 0x7f80u},
-    {0xff800000u, 0x0000u},
-    {0xbf800000u, 0x3ebcu},
-    {0xbf000000u, 0x3f1cu},
-    {0x3f000000u, 0x3fd3u},
-    {0x3f800000u, 0x402eu},
-    {0x41200000u, 0x46acu},
-    {0x42b10000u, 0x7f4du},
-    {0x42b20000u, 0x7f80u},
-    {0xc2ae0000u, 0x00b3u},
-    {0xc2af0000u, 0x0000u},
-    {0x3f80ffffu, 0x402eu},
-};
-
 static_assert(ggml_cuda_bf16_expp_bits(0x3f80u) == 0x402eu, "exp(1) mismatch");
 static_assert(ggml_cuda_bf16_expp_bits(0xbf80u) == 0x3ebcu, "exp(-1) mismatch");
 static_assert(ggml_cuda_bf16_expp_bits(0x42b2u) == 0x7f80u, "overflow mismatch");
@@ -75,19 +50,6 @@ static bool run_exhaustive_host_test() {
         if (actual != expected[i]) {
             std::fprintf(stderr, "host case 0x%04x: got 0x%04x, expected 0x%04x\n",
                          uint32_t(input[i]), uint32_t(actual), uint32_t(expected[i]));
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool run_fixed_host_cases() {
-    for (size_t i = 0; i < sizeof(CASES) / sizeof(CASES[0]); ++i) {
-        const uint16_t input_bf16 = uint16_t(CASES[i].input >> 16);
-        const uint16_t actual = ggml_cuda_bf16_expp_bits(input_bf16);
-        if (actual != CASES[i].expected) {
-            std::fprintf(stderr, "fixed host case %zu input 0x%08x: got 0x%04x, expected 0x%04x\n",
-                         i, CASES[i].input, uint32_t(actual), uint32_t(CASES[i].expected));
             return false;
         }
     }
@@ -218,9 +180,6 @@ static bool run_softmax_switch_test(bool use_bf16_exp) {
 
 int main(int argc, char ** argv) {
     if (!run_exhaustive_host_test()) {
-        return 1;
-    }
-    if (!run_fixed_host_cases()) {
         return 1;
     }
     if (argc == 2 && std::strcmp(argv[1], "--host-only") == 0) {
