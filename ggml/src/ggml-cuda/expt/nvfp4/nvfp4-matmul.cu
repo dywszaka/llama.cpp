@@ -1,6 +1,7 @@
 #include "nvfp4-matmul.cuh"
 
 #include "kcache-outlier.cuh"
+#include "nvfp4-fp4mulmat.cuh"
 #include "nvfp4-log.cuh"
 #include "nvfp4-quantize.cuh"
 
@@ -8,18 +9,15 @@
 #include "../../../ggml-quants.h"
 
 #include <atomic>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace {
-
-static constexpr unsigned GGML_CUDA_NVFP4_FP4MULMAT_EXP_BITS = 9;
-static constexpr unsigned GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS = 23;
-
-using ggml_cuda_nvfp4_uint128_t = unsigned __int128;
 
 #if defined(CUBLAS_VERSION)
 #define GGML_CUDA_NVFP4_HAS_LT_SCALE_CHANNEL_ATTRS (CUBLAS_VERSION >= 130000)
@@ -73,27 +71,21 @@ static bool ggml_cuda_fetch_input_scale_f32(const ggml_tensor * scale, float & o
     }
 }
 
-static __host__ __device__ __forceinline__ float ggml_cuda_nvfp4_bf16_round_f32(float x) {
-    union {
-        float f;
-        uint32_t u;
-    } v;
-    v.f = x;
-
-    if ((v.u & 0x7FFFFFFFu) > 0x7F800000u) {
-        v.u = (v.u & 0xFFFF0000u) | 0x00400000u;
-        return v.f;
-    }
-
-    v.u += 0x7FFFu + ((v.u >> 16) & 1u);
-    v.u &= 0xFFFF0000u;
-    return v.f;
-}
-
 static __global__ void ggml_cuda_nvfp4_set_scalar_kernel(float * dst, float value) {
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         dst[0] = value;
     }
+}
+
+static __global__ void ggml_cuda_nvfp4_bf16_trunc_scales_kernel(
+        float * __restrict__ scales,
+        const int64_t nrows) {
+    const int64_t row = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= nrows) {
+        return;
+    }
+
+    scales[row] = ggml_cuda_nvfp4_fp4mulmat_bf16_trunc_f32(scales[row]);
 }
 
 static __global__ void ggml_cuda_nvfp4_apply_column_scales_kernel(
@@ -122,15 +114,6 @@ static bool ggml_cuda_nvfp4_native_debug_enabled() {
     return cached != 0;
 }
 
-static bool ggml_cuda_nvfp4_native_no_fallback_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK");
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
 static bool ggml_cuda_nvfp4_scale_linear_layout_enabled() {
     static int cached = -1;
     if (cached < 0) {
@@ -153,24 +136,6 @@ static bool ggml_cuda_nvfp4_native_row_split_enabled() {
     static int cached = -1;
     if (cached < 0) {
         const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_ROW_SPLIT");
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
-static bool ggml_cuda_nvfp4_fp4mulmat_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("GGML_CUDA_NVFP4_FP4MULMAT");
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
-static bool ggml_cuda_nvfp4_fp4mulmat_log_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("GGML_CUDA_NVFP4_FP4MULMAT_LOG");
         cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
     }
     return cached != 0;
@@ -254,353 +219,6 @@ static float ggml_cuda_nvfp4_input_global_scale(
     return 1.0f / input_scale;
 }
 
-static __device__ __forceinline__ uint64_t ggml_cuda_nvfp4_fp4mulmat_bitmask_u64(unsigned width) {
-    return (width == 64) ? ~0ULL : ((1ULL << width) - 1ULL);
-}
-
-static __device__ __forceinline__ ggml_cuda_nvfp4_uint128_t ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(unsigned width) {
-    return width == 0 ? 0 : (((ggml_cuda_nvfp4_uint128_t) 1 << width) - 1);
-}
-
-static __device__ __forceinline__ int64_t ggml_cuda_nvfp4_fp4mulmat_sign_extend(uint32_t value, unsigned width) {
-    const unsigned shift = 32 - width;
-    const int32_t extended = ((int32_t) (value << shift)) >> shift;
-    return (int64_t) extended;
-}
-
-static __device__ __forceinline__ int64_t ggml_cuda_nvfp4_fp4mulmat_sign_extend_u128(
-        ggml_cuda_nvfp4_uint128_t value,
-        unsigned width) {
-    ggml_cuda_nvfp4_uint128_t bits = value & ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(width);
-    const ggml_cuda_nvfp4_uint128_t sign_bit = (ggml_cuda_nvfp4_uint128_t) 1 << (width - 1);
-    __int128 signed_value = (__int128) bits;
-    if (bits & sign_bit) {
-        signed_value -= (__int128) 1 << width;
-    }
-    return (int64_t) signed_value;
-}
-
-static __device__ __forceinline__ ggml_cuda_nvfp4_uint128_t ggml_cuda_nvfp4_fp4mulmat_signed_arith_shift_bits(
-        ggml_cuda_nvfp4_uint128_t value_bits,
-        unsigned width,
-        unsigned shift) {
-    value_bits &= ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(width);
-    const bool negative = (value_bits & ((ggml_cuda_nvfp4_uint128_t) 1 << (width - 1))) != 0;
-    if (shift >= width) {
-        return negative ? ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(width) : 0;
-    }
-
-    ggml_cuda_nvfp4_uint128_t shifted = value_bits >> shift;
-    if (negative && shift > 0) {
-        shifted |= ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(shift) << (width - shift);
-    }
-    return shifted & ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(width);
-}
-
-static __device__ __forceinline__ int64_t ggml_cuda_nvfp4_fp4mulmat_signed_rnd_shift(
-        int64_t value,
-        unsigned shift,
-        unsigned width) {
-    const ggml_cuda_nvfp4_uint128_t value_bits = (ggml_cuda_nvfp4_uint128_t) value & ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(width);
-    const ggml_cuda_nvfp4_uint128_t shifted_bits = ggml_cuda_nvfp4_fp4mulmat_signed_arith_shift_bits(value_bits, width, shift);
-
-    bool guard = false;
-    bool lsb = false;
-    bool sticky = false;
-    if (shift > 0) {
-        if (shift < width) {
-            guard = ((value_bits >> (shift - 1)) & 1) != 0;
-            lsb = (shifted_bits & 1) != 0;
-            sticky = (value_bits & ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(shift - 1)) != 0;
-        } else {
-            const bool negative = (value_bits & ((ggml_cuda_nvfp4_uint128_t) 1 << (width - 1))) != 0;
-            guard = negative;
-            lsb = negative;
-            sticky = (value_bits & ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(width - 1)) != 0;
-        }
-    }
-
-    const bool round_enable = guard && (sticky || lsb);
-    const ggml_cuda_nvfp4_uint128_t result_bits =
-            (shifted_bits + (round_enable ? 1 : 0)) & ggml_cuda_nvfp4_fp4mulmat_bitmask_u128(width);
-    return ggml_cuda_nvfp4_fp4mulmat_sign_extend_u128(result_bits, width);
-}
-
-struct ggml_cuda_nvfp4_fp4mulmat_accumulator {
-    uint16_t exp;
-    int64_t mat;
-};
-
-static __device__ __forceinline__ void ggml_cuda_nvfp4_fp4mulmat_fp_add(
-        uint16_t exp1,
-        int64_t mat1,
-        uint16_t exp2,
-        int64_t mat2,
-        uint16_t * result_exp,
-        int64_t * result_mat) {
-    if (exp1 > exp2) {
-        mat2 = ggml_cuda_nvfp4_fp4mulmat_signed_rnd_shift(mat2, exp1 - exp2, GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-        *result_exp = exp1;
-    } else {
-        mat1 = ggml_cuda_nvfp4_fp4mulmat_signed_rnd_shift(mat1, exp2 - exp1, GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-        *result_exp = exp2;
-    }
-
-    mat1 = ggml_cuda_nvfp4_fp4mulmat_sign_extend(
-            mat1 & ggml_cuda_nvfp4_fp4mulmat_bitmask_u64(GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS),
-            GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-    mat2 = ggml_cuda_nvfp4_fp4mulmat_sign_extend(
-            mat2 & ggml_cuda_nvfp4_fp4mulmat_bitmask_u64(GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS),
-            GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-
-    int64_t sum = mat1 + mat2;
-    sum = ggml_cuda_nvfp4_fp4mulmat_sign_extend(
-            sum & ggml_cuda_nvfp4_fp4mulmat_bitmask_u64(GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS + 1),
-            GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS + 1);
-    const int msb = (sum >> GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS) & 0x1;
-    const int sec_msb = (sum >> (GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS - 1)) & 0x1;
-    const int overflow = (msb != sec_msb);
-
-    if (overflow) {
-        *result_mat = (sum >> 1) & ggml_cuda_nvfp4_fp4mulmat_bitmask_u64(GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-        (*result_exp)++;
-    } else {
-        *result_mat = sum & ggml_cuda_nvfp4_fp4mulmat_bitmask_u64(GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-    }
-    *result_mat = ggml_cuda_nvfp4_fp4mulmat_sign_extend(*result_mat, GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-}
-
-struct ggml_cuda_nvfp4_fp4mulmat_act_denorm {
-    uint8_t sign[QK_NVFP4];
-    uint8_t exp;
-    int64_t mat_pos1[QK_NVFP4];
-    int64_t mat_neg1[QK_NVFP4];
-    int64_t mat_pos2[QK_NVFP4];
-    int64_t mat_neg2[QK_NVFP4];
-    int64_t mat_pos3[QK_NVFP4];
-    int64_t mat_neg3[QK_NVFP4];
-};
-
-static __device__ __forceinline__ uint8_t ggml_cuda_nvfp4_fp4mulmat_nibble(const block_nvfp4 & block, int i) {
-    const uint8_t packed = block.qs[i >> 1];
-    return (i & 1) ? (packed >> 4) : (packed & 0x0F);
-}
-
-static __device__ void ggml_cuda_nvfp4_fp4mulmat_compute_act_denorm(
-        const uint8_t act[QK_NVFP4],
-        ggml_cuda_nvfp4_fp4mulmat_act_denorm * out) {
-    uint8_t exp_max = 0;
-    for (int i = 0; i < QK_NVFP4; ++i) {
-        const uint8_t exp = (act[i] >> 1) & 0x3;
-        if (exp > exp_max) {
-            exp_max = exp;
-        }
-    }
-    out->exp = exp_max;
-
-    for (int i = 0; i < QK_NVFP4; ++i) {
-        const uint8_t fp4 = act[i];
-        const uint8_t sign = (fp4 >> 3) & 0x1;
-        const uint8_t exp = (fp4 >> 1) & 0x3;
-        const uint8_t mat_raw = fp4 & 0x1;
-
-        const uint8_t mat = (exp != 0) ? ((1 << 1) | mat_raw) : (mat_raw << 1);
-        const uint8_t shift_amt = exp_max - exp;
-        const uint32_t mat_shifted = ((uint32_t) mat << 3) >> shift_amt;
-
-        const uint32_t mat_mul1 = mat_shifted;
-        const uint32_t mat_mul2 = mat_shifted * 2;
-        const uint32_t mat_mul3 = mat_shifted * 3;
-
-        const uint32_t mat_pos1 = mat_mul1 & 0x7F;
-        const uint32_t mat_pos2 = mat_mul2 & 0x7F;
-        const uint32_t mat_pos3 = mat_mul3 & 0x7F;
-
-        const uint32_t mat_neg1 = (~mat_mul1 + 1) & 0xFF;
-        const uint32_t mat_neg2 = (~mat_mul2 + 1) & 0xFF;
-        const uint32_t mat_neg3 = (~mat_mul3 + 1) & 0xFF;
-
-        out->sign[i] = sign;
-        out->mat_pos1[i] = ggml_cuda_nvfp4_fp4mulmat_sign_extend(mat_pos1, 8);
-        out->mat_neg1[i] = ggml_cuda_nvfp4_fp4mulmat_sign_extend(mat_neg1, 8);
-        out->mat_pos2[i] = ggml_cuda_nvfp4_fp4mulmat_sign_extend(mat_pos2, 8);
-        out->mat_neg2[i] = ggml_cuda_nvfp4_fp4mulmat_sign_extend(mat_neg2, 8);
-        out->mat_pos3[i] = ggml_cuda_nvfp4_fp4mulmat_sign_extend(mat_pos3, 8);
-        out->mat_neg3[i] = ggml_cuda_nvfp4_fp4mulmat_sign_extend(mat_neg3, 8);
-    }
-}
-
-static __device__ void ggml_cuda_nvfp4_fp4mulmat_compute_product(
-        const ggml_cuda_nvfp4_fp4mulmat_act_denorm & act,
-        const uint8_t wgt[QK_NVFP4],
-        uint8_t * product_exp,
-        int64_t * product_mat) {
-    int64_t psum[QK_NVFP4];
-
-    for (int i = 0; i < QK_NVFP4; ++i) {
-        const uint8_t w = wgt[i];
-        const uint8_t act_sign = act.sign[i];
-        const uint8_t wgt_sign = (w >> 3) & 0x1;
-        const uint8_t wgt_exp = (w >> 1) & 0x3;
-
-        uint8_t mat;
-        if (wgt_exp == 0) {
-            mat = (w & 0x1) << 1;
-        } else {
-            mat = 2 | (w & 0x1);
-        }
-
-        const uint8_t product_sign = wgt_sign ^ act_sign;
-        int64_t fp4_mat_mul;
-        switch (mat) {
-            case 0: fp4_mat_mul = 0; break;
-            case 1: fp4_mat_mul = product_sign ? act.mat_neg1[i] : act.mat_pos1[i]; break;
-            case 2: fp4_mat_mul = product_sign ? act.mat_neg2[i] : act.mat_pos2[i]; break;
-            case 3: fp4_mat_mul = product_sign ? act.mat_neg3[i] : act.mat_pos3[i]; break;
-            default: fp4_mat_mul = 0; break;
-        }
-
-        psum[i] = ggml_cuda_nvfp4_fp4mulmat_sign_extend((uint32_t) fp4_mat_mul, 8) << wgt_exp;
-    }
-
-    int64_t sum = 0;
-    for (int i = 0; i < QK_NVFP4; ++i) {
-        sum += psum[i];
-    }
-
-    *product_mat = ggml_cuda_nvfp4_fp4mulmat_sign_extend((uint32_t) sum, 15);
-    *product_exp = act.exp;
-}
-
-static __device__ __forceinline__ void ggml_cuda_nvfp4_fp4mulmat_psum_accumulate(
-        uint8_t product_exp,
-        int64_t product_mat,
-        uint8_t scale_act,
-        uint8_t scale_wgt,
-        ggml_cuda_nvfp4_fp4mulmat_accumulator * state) {
-    const uint8_t scale_act_exp = (scale_act >> 3) & 0xF;
-    const uint8_t scale_act_mat = scale_act_exp != 0 ? (1 << 3 | (scale_act & 0x7)) : (scale_act & 0x7) << 1;
-    const uint8_t scale_wgt_exp = (scale_wgt >> 3) & 0xF;
-    const uint8_t scale_wgt_mat = scale_wgt_exp != 0 ? (1 << 3 | (scale_wgt & 0x7)) : (scale_wgt & 0x7) << 1;
-
-    const uint16_t prod_exp = (product_exp + scale_act_exp + scale_wgt_exp) &
-            ggml_cuda_nvfp4_fp4mulmat_bitmask_u64(GGML_CUDA_NVFP4_FP4MULMAT_EXP_BITS);
-    const int64_t product_mat_tmp = ggml_cuda_nvfp4_fp4mulmat_sign_extend(product_mat, 15) *
-            ggml_cuda_nvfp4_fp4mulmat_sign_extend(scale_wgt_mat, 5) *
-            ggml_cuda_nvfp4_fp4mulmat_sign_extend(scale_act_mat, 5);
-    const int64_t prod_mat = ggml_cuda_nvfp4_fp4mulmat_sign_extend(
-            product_mat_tmp & ggml_cuda_nvfp4_fp4mulmat_bitmask_u64(GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS),
-            GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-
-    uint16_t acc_exp;
-    int64_t acc_mat;
-    ggml_cuda_nvfp4_fp4mulmat_fp_add(prod_exp, prod_mat, state->exp, state->mat, &acc_exp, &acc_mat);
-    state->exp = acc_exp;
-    state->mat = acc_mat;
-}
-
-static __device__ __forceinline__ float ggml_cuda_nvfp4_fp4mulmat_accumulator_to_f32(
-        ggml_cuda_nvfp4_fp4mulmat_accumulator state) {
-    const uint64_t mat_bits = (uint64_t) state.mat & ggml_cuda_nvfp4_fp4mulmat_bitmask_u64(GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-    const int64_t mat = ggml_cuda_nvfp4_fp4mulmat_sign_extend((uint32_t) mat_bits, GGML_CUDA_NVFP4_FP4MULMAT_ACC_BITS);
-    return ldexpf((float) mat, (int) state.exp - 27);
-}
-
-static __global__ void ggml_cuda_nvfp4_fp4mulmat_kernel(
-        const block_nvfp4 * __restrict__ src0,
-        const block_nvfp4 * __restrict__ src1_q,
-        const float * __restrict__ dynamic_input_scales,
-        char * __restrict__ dst,
-        const int64_t ne01,
-        const int64_t ne11,
-        const int64_t nblk_k,
-        const int64_t dst_nb0,
-        const int64_t dst_nb1,
-        const float static_scale,
-        const int32_t used_dynamic_scale) {
-    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    const int64_t total = ne01 * ne11;
-    if (idx >= total) {
-        return;
-    }
-
-    const int64_t row = idx % ne01;
-    const int64_t col = idx / ne01;
-    const block_nvfp4 * w_row = src0 + row * nblk_k;
-    const block_nvfp4 * x_row = src1_q + col * nblk_k;
-    const float column_scale = used_dynamic_scale ? dynamic_input_scales[col] : static_scale;
-
-    ggml_cuda_nvfp4_fp4mulmat_accumulator state = { 0, 0 };
-    for (int64_t ib = 0; ib < nblk_k; ++ib) {
-        const block_nvfp4 wb = w_row[ib];
-        const block_nvfp4 xb = x_row[ib];
-        uint8_t act[QK_NVFP4];
-        uint8_t wgt[QK_NVFP4];
-
-#pragma unroll
-        for (int i = 0; i < QK_NVFP4; ++i) {
-            act[i] = ggml_cuda_nvfp4_fp4mulmat_nibble(xb, i);
-            wgt[i] = ggml_cuda_nvfp4_fp4mulmat_nibble(wb, i);
-        }
-
-        ggml_cuda_nvfp4_fp4mulmat_act_denorm act_denorm;
-        ggml_cuda_nvfp4_fp4mulmat_compute_act_denorm(act, &act_denorm);
-
-        uint8_t product_exp;
-        int64_t product_mat;
-        ggml_cuda_nvfp4_fp4mulmat_compute_product(act_denorm, wgt, &product_exp, &product_mat);
-        ggml_cuda_nvfp4_fp4mulmat_psum_accumulate(product_exp, product_mat, xb.e, wb.e, &state);
-    }
-
-    *(float *) (dst + row * dst_nb0 + col * dst_nb1) = [] __device__ (float left, float right) {
-        const float product = __fmul_rn(
-                ggml_cuda_nvfp4_bf16_round_f32(left),
-                ggml_cuda_nvfp4_bf16_round_f32(right));
-        const uint32_t bits = __float_as_uint(product);
-        const uint32_t exponent = bits & 0x7f800000u;
-        const uint32_t mantissa = bits & 0x007fffffu;
-        if (exponent == 0x7f800000u && mantissa != 0u) {
-            return __uint_as_float(0x7fc00000u);
-        }
-        const uint32_t upper = bits >> 16;
-        const uint32_t lower = bits & 0xffffu;
-        const uint32_t rounded = upper +
-                (lower > 0x8000u || (lower == 0x8000u && (upper & 1u) != 0u));
-        return __uint_as_float(rounded << 16);
-    }(ggml_cuda_nvfp4_fp4mulmat_accumulator_to_f32(state), column_scale);
-}
-
-static void ggml_cuda_nvfp4_fp4mulmat_cuda(
-        const block_nvfp4 * src0,
-        const block_nvfp4 * src1_q,
-        const float * dynamic_input_scales,
-        void * dst,
-        int64_t ne01,
-        int64_t ne11,
-        int64_t nblk_k,
-        int64_t dst_nb0,
-        int64_t dst_nb1,
-        float static_scale,
-        bool used_dynamic_scale,
-        cudaStream_t stream) {
-    const int block_size = 256;
-    const int64_t total = ne01 * ne11;
-    const int grid_size = (int) ((total + block_size - 1) / block_size);
-    ggml_cuda_nvfp4_fp4mulmat_kernel<<<grid_size, block_size, 0, stream>>>(
-            src0,
-            src1_q,
-            dynamic_input_scales,
-            (char *) dst,
-            ne01,
-            ne11,
-            nblk_k,
-            dst_nb0,
-            dst_nb1,
-            static_scale,
-            used_dynamic_scale ? 1 : 0);
-    CUDA_CHECK(cudaGetLastError());
-}
-
 struct ggml_cuda_nvfp4_split_matrix {
     const void * data = nullptr;
     const void * scale = nullptr;
@@ -609,6 +227,74 @@ struct ggml_cuda_nvfp4_split_matrix {
     int64_t scale_inner_padded = 0;
     int64_t scale_outer_padded = 0;
 };
+
+template<typename T>
+static T * ggml_cuda_nvfp4_alloc_or_reuse(ggml_cuda_pool_alloc<T> & alloc, size_t size) {
+    if (alloc.get() == nullptr) {
+        return alloc.alloc(size);
+    }
+    GGML_ASSERT(alloc.actual_size >= size * sizeof(T));
+    return alloc.get();
+}
+
+struct ggml_cuda_nvfp4_parallel_events {
+    cudaEvent_t main_ready = nullptr;
+    cudaEvent_t done[GGML_CUDA_MAX_STREAMS] = { nullptr };
+    int n_streams = 1;
+
+    ~ggml_cuda_nvfp4_parallel_events() {
+        if (main_ready != nullptr) {
+            CUDA_CHECK(cudaEventDestroy(main_ready));
+        }
+        for (int i = 1; i < n_streams; ++i) {
+            if (done[i] != nullptr) {
+                CUDA_CHECK(cudaEventDestroy(done[i]));
+            }
+        }
+    }
+};
+
+struct ggml_cuda_nvfp4_native_slice_lane {
+    ggml_cuda_pool_alloc<char> src0_contig;
+    ggml_cuda_pool_alloc<char> src1_contig;
+    ggml_cuda_nvfp4_native_scratch scratch;
+
+    explicit ggml_cuda_nvfp4_native_slice_lane(ggml_cuda_pool & pool) :
+        src0_contig(pool),
+        src1_contig(pool),
+        scratch(pool) {
+    }
+};
+
+static bool ggml_cuda_nvfp4_begin_parallel_streams(
+        ggml_backend_cuda_context & ctx,
+        int64_t slices,
+        cudaStream_t main_stream,
+        ggml_cuda_nvfp4_parallel_events & events) {
+    events.n_streams = (int) std::min<int64_t>(std::max<int64_t>(slices, 1), GGML_CUDA_MAX_STREAMS);
+    if (events.n_streams <= 1) {
+        return true;
+    }
+
+    CUDA_CHECK(cudaEventCreateWithFlags(&events.main_ready, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventRecord(events.main_ready, main_stream));
+    for (int i = 1; i < events.n_streams; ++i) {
+        CUDA_CHECK(cudaEventCreateWithFlags(&events.done[i], cudaEventDisableTiming));
+        CUDA_CHECK(cudaStreamWaitEvent(ctx.stream(ctx.device, i), events.main_ready, 0));
+    }
+    return true;
+}
+
+static void ggml_cuda_nvfp4_end_parallel_streams(
+        ggml_backend_cuda_context & ctx,
+        ggml_cuda_nvfp4_parallel_events & events,
+        cudaStream_t main_stream) {
+    for (int i = 1; i < events.n_streams; ++i) {
+        cudaStream_t stream = ctx.stream(ctx.device, i);
+        CUDA_CHECK(cudaEventRecord(events.done[i], stream));
+        CUDA_CHECK(cudaStreamWaitEvent(main_stream, events.done[i], 0));
+    }
+}
 
 static __device__ __forceinline__ uint8_t ggml_cuda_nvfp4_lt_scale_from_ggml_scale_byte(uint8_t ggml_e) {
     const float scale_f = ggml_cuda_e4m3_to_fp32(ggml_e);
@@ -650,7 +336,8 @@ static void ggml_cuda_nvfp4_split_blocks_cuda(
         const block_nvfp4 * in,
         uint8_t * out_data,
         uint8_t * out_scale,
-        int64_t ne_k,
+        int64_t ne_k_valid,
+        int64_t ne_k_alloc,
         int64_t n_outer_valid,
         int64_t n_outer_alloc,
         int64_t * scale_inner_padded,
@@ -659,12 +346,14 @@ static void ggml_cuda_nvfp4_split_blocks_cuda(
         size_t * scale_nbytes,
         bool linear_scale_layout,
         cudaStream_t stream) {
-    GGML_ASSERT(ne_k % QK_NVFP4 == 0);
+    GGML_ASSERT(ne_k_valid % QK_NVFP4 == 0);
+    GGML_ASSERT(ne_k_alloc % QK_NVFP4 == 0);
+    GGML_ASSERT(ne_k_alloc >= ne_k_valid);
     GGML_ASSERT(n_outer_valid >= 0 && n_outer_alloc >= n_outer_valid);
 
-    const int64_t nblk_k = ne_k / QK_NVFP4;
-    const int64_t row_data_bytes = ne_k / 2;
-    const int64_t inner_padded = ggml_cuda_nvfp4_pad_i64(nblk_k, 4);
+    const int64_t nblk_k = ne_k_valid / QK_NVFP4;
+    const int64_t row_data_bytes = ne_k_alloc / 2;
+    const int64_t inner_padded = ggml_cuda_nvfp4_pad_i64(ne_k_alloc / QK_NVFP4, 4);
     const int64_t outer_padded = ggml_cuda_nvfp4_pad_i64(n_outer_alloc, 128);
 
     const size_t dn = (size_t) n_outer_alloc * (size_t) row_data_bytes;
@@ -717,6 +406,7 @@ static bool ggml_cuda_nvfp4_cache_key_match(
 static bool ggml_cuda_nvfp4_get_repacked_src0(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,
+        int64_t ne_k_alloc,
         bool linear_scale_layout,
         cudaStream_t stream,
         ggml_cuda_pool_alloc<uint8_t> & transient_data,
@@ -743,12 +433,13 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
 
     const int64_t ne_k = src0->ne[0];
     const int64_t n_outer = src0->ne[1];
-    if (ne_k % QK_NVFP4 != 0) {
+    if (ne_k % QK_NVFP4 != 0 || ne_k_alloc < ne_k || ne_k_alloc % QK_NVFP4 != 0) {
         return false;
     }
 
-    const size_t data_nbytes = (size_t) n_outer * (size_t) ne_k / 2;
-    const size_t scale_nbytes = (size_t) ggml_cuda_nvfp4_pad_i64(n_outer, 128) * (size_t) ggml_cuda_nvfp4_pad_i64(ne_k / QK_NVFP4, 4);
+    const size_t data_nbytes = (size_t) n_outer * (size_t) ne_k_alloc / 2;
+    const size_t scale_nbytes = (size_t) ggml_cuda_nvfp4_pad_i64(n_outer, 128) *
+            (size_t) ggml_cuda_nvfp4_pad_i64(ne_k_alloc / QK_NVFP4, 4);
 
     void * data_repacked = nullptr;
     void * scale_repacked = nullptr;
@@ -775,8 +466,8 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
             return false;
         }
     } else {
-        data_repacked = transient_data.alloc(ctx.pool(), data_nbytes);
-        scale_repacked = transient_scale.alloc(ctx.pool(), scale_nbytes);
+        data_repacked = ggml_cuda_nvfp4_alloc_or_reuse(transient_data, data_nbytes);
+        scale_repacked = ggml_cuda_nvfp4_alloc_or_reuse(transient_scale, scale_nbytes);
     }
 
     int64_t scale_inner_padded = 0;
@@ -788,6 +479,7 @@ static bool ggml_cuda_nvfp4_get_repacked_src0(
             (uint8_t *) data_repacked,
             (uint8_t *) scale_repacked,
             ne_k,
+            ne_k_alloc,
             n_outer,
             n_outer,
             &scale_inner_padded,
@@ -862,7 +554,7 @@ static void ggml_cuda_nvfp4_materialize_contiguous_matrix(
 
     const size_t row_bytes = ggml_row_size(slice.type, slice.ne[0]);
     const size_t total_bytes = row_bytes * (size_t) slice.ne[1];
-    storage.alloc(ctx.pool(), total_bytes);
+    ggml_cuda_nvfp4_alloc_or_reuse(storage, total_bytes);
 
     CUDA_CHECK(cudaMemcpy2DAsync(
             storage.get(),
@@ -921,13 +613,26 @@ static void ggml_cuda_nvfp4_apply_kcache_outlier_correction(
 
 } // namespace
 
+bool ggml_cuda_nvfp4_native_no_fallback_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
 static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         ggml_backend_cuda_context & ctx,
         const ggml_tensor * src0,
         const ggml_tensor * src1,
         ggml_tensor * dst,
         bool apply_outlier_correction,
-        uint32_t * capture_result_flags) {
+        uint32_t * capture_result_flags = nullptr,
+        const float * device_weight_scale = nullptr,
+        bool reciprocal_device_weight_scale = false,
+        cudaStream_t stream_override = nullptr,
+        ggml_cuda_nvfp4_native_scratch * scratch = nullptr) {
 #if GGML_CUDA_HAS_CUBLASLT && GGML_CUDA_HAS_FP4 && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     GGML_ASSERT(src0 != nullptr);
     GGML_ASSERT(src1 != nullptr);
@@ -974,24 +679,43 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
 
         const int64_t r2 = src1->ne[2] / src0->ne[2];
         const int64_t r3 = src1->ne[3] / src0->ne[3];
-        cudaStream_t stream = ctx.stream();
+        cudaStream_t stream = stream_override != nullptr ? stream_override : ctx.stream();
         const ggml_tensor * rhs_capture = ggml_mul_mat_get_nvfp4_rhs_capture(dst);
         const ggml_tensor * rhs_scale_capture = ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(dst);
         uint32_t batched_capture_flags = 0;
         bool have_batched_capture_flags = false;
+        const int64_t total_slices = src1->ne[2] * src1->ne[3];
+        ggml_cuda_nvfp4_parallel_events events = {};
+        ggml_cuda_nvfp4_begin_parallel_streams(ctx, total_slices, stream, events);
+        std::vector<std::unique_ptr<ggml_cuda_nvfp4_native_slice_lane>> lanes;
+        if (events.n_streams > 1) {
+            lanes.reserve((size_t) events.n_streams);
+            for (int i = 0; i < events.n_streams; ++i) {
+                lanes.emplace_back(new ggml_cuda_nvfp4_native_slice_lane(ctx.pool()));
+            }
+        }
+        bool ok = true;
 
-        for (int64_t i3 = 0; i3 < src1->ne[3]; ++i3) {
-            for (int64_t i2 = 0; i2 < src1->ne[2]; ++i2) {
+        for (int64_t i3 = 0, slice = 0; i3 < src1->ne[3] && ok; ++i3) {
+            for (int64_t i2 = 0; i2 < src1->ne[2]; ++i2, ++slice) {
+                const int stream_idx = events.n_streams > 1 ? (int) (slice % events.n_streams) : 0;
+                cudaStream_t slice_stream = stream_idx == 0 ? stream : ctx.stream(ctx.device, stream_idx);
                 ggml_tensor src0_slice = ggml_cuda_nvfp4_make_matrix_slice(src0, i2 / r2, i3 / r3);
                 ggml_tensor src1_slice = ggml_cuda_nvfp4_make_matrix_slice(src1, i2, i3);
                 ggml_tensor dst_slice  = ggml_cuda_nvfp4_make_matrix_slice(dst,  i2, i3);
+                if (events.n_streams > 1) {
+                    src0_slice.buffer = nullptr;
+                }
                 ggml_cuda_pool_alloc<char> src0_contig(ctx.pool());
                 ggml_cuda_pool_alloc<char> src1_contig(ctx.pool());
                 ggml_tensor rhs_capture_slice = {};
                 ggml_tensor rhs_scale_capture_slice = {};
+                ggml_cuda_pool_alloc<char> & src0_contig_ref = events.n_streams > 1 ? lanes[(size_t) stream_idx]->src0_contig : src0_contig;
+                ggml_cuda_pool_alloc<char> & src1_contig_ref = events.n_streams > 1 ? lanes[(size_t) stream_idx]->src1_contig : src1_contig;
+                ggml_cuda_nvfp4_native_scratch * slice_scratch_ptr = events.n_streams > 1 ? &lanes[(size_t) stream_idx]->scratch : nullptr;
 
-                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src0_slice, src0_contig, stream);
-                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src1_slice, src1_contig, stream);
+                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src0_slice, src0_contig_ref, slice_stream);
+                ggml_cuda_nvfp4_materialize_contiguous_matrix(ctx, src1_slice, src1_contig_ref, slice_stream);
 
                 if (rhs_capture != nullptr && rhs_scale_capture != nullptr) {
                     rhs_capture_slice = ggml_cuda_nvfp4_make_matrix_slice(rhs_capture, i2, i3);
@@ -1008,8 +732,10 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
 
                 uint32_t slice_capture_flags = 0;
                 if (!ggml_cuda_mul_mat_nvfp4_native_impl(
-                            ctx, &src0_slice, &src1_slice, &dst_slice, false, &slice_capture_flags)) {
-                    return false;
+                            ctx, &src0_slice, &src1_slice, &dst_slice, false,
+                            &slice_capture_flags, nullptr, false, slice_stream, slice_scratch_ptr)) {
+                    ok = false;
+                    break;
                 }
                 if (!have_batched_capture_flags) {
                     batched_capture_flags = slice_capture_flags;
@@ -1056,16 +782,19 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                             src1_slice.nb[1] / (int64_t) sizeof(float),
                             dst_slice.nb[0] / (int64_t) sizeof(float),
                             dst_slice.nb[1] / (int64_t) sizeof(float),
-                            stream);
+                            slice_stream);
                 }
             }
         }
 
-        if (capture_result_flags != nullptr) {
+        ggml_cuda_nvfp4_end_parallel_streams(ctx, events, stream);
+        for (int i = (int) lanes.size() - 1; i >= 0; --i) {
+            lanes[(size_t) i].reset();
+        }
+        if (capture_result_flags != nullptr && ok) {
             *capture_result_flags = batched_capture_flags;
         }
-
-        return true;
+        return ok;
     }
 
     if (ggml_is_transposed(src0) || ggml_is_transposed(src1) || !ggml_is_contiguous(src0) || !ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
@@ -1099,12 +828,15 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     }
 #endif
 
-    // cuBLASLt native FP4 matmul is restrictive on GEMM dimensions.
-    // Keep static matrix dimensions (M/K) aligned and pad dynamic token dimension (N) when needed.
+    const bool use_fp4mulmat = ggml_cuda_nvfp4_fp4mulmat_enabled();
+
+    // Native FP4 matmul is restrictive on GEMM dimensions. The experimental fp4mulmat kernel accepts K in
+    // 16-value blocks, while the cuBLASLt path zero-pads K to a multiple of 32.
     if ((ne01 % 16) != 0 || (ne10 % 16) != 0) {
         log_skip("native FP4 requires M/K to be multiples of 16");
         return false;
     }
+    const bool pad_k = !use_fp4mulmat && (ne10 % 32) != 0;
     const bool row_split_mode = ggml_cuda_nvfp4_native_row_split_enabled() && ne11 > 1;
     const int64_t ne11_padded = (ne11 + 15) & ~15LL;
     const int64_t lt_n = row_split_mode ? 16 : ne11_padded;
@@ -1115,9 +847,13 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         return false;
     }
 
-    cudaStream_t stream = ctx.stream();
+    cudaStream_t stream = stream_override != nullptr ? stream_override : ctx.stream();
     const int64_t nblk_k = ne10 / QK_NVFP4;
-    const int64_t scale_inner_padded = ggml_cuda_nvfp4_pad_i64(nblk_k, 4);
+    const int64_t lt_k = pad_k ? ggml_cuda_nvfp4_pad_i64(ne10, 32) : ne10;
+    if (pad_k) {
+        ggml_cuda_nvfp4_log_native_k_padding_once(ne10, lt_k);
+    }
+    const int64_t scale_inner_padded = ggml_cuda_nvfp4_pad_i64(lt_k / QK_NVFP4, 4);
     const int64_t scale_outer_padded_b = ggml_cuda_nvfp4_pad_i64(ne11_padded, 128);
 
     float out_scale = 1.0f;
@@ -1128,8 +864,28 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         }
     }
 
+    ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4_local(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src1_repacked_data_local(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src1_repacked_scale_local(ctx.pool());
+    ggml_cuda_pool_alloc<float> dynamic_amax_rows_local(ctx.pool());
+    ggml_cuda_pool_alloc<float> dynamic_input_scales_local(ctx.pool());
+    ggml_cuda_pool_alloc<block_nvfp4> & src1_q_nvfp4 = scratch != nullptr ? scratch->src1_q_nvfp4 : src1_q_nvfp4_local;
+    ggml_cuda_pool_alloc<uint8_t> & src1_repacked_data = scratch != nullptr ? scratch->src1_repacked_data : src1_repacked_data_local;
+    ggml_cuda_pool_alloc<uint8_t> & src1_repacked_scale = scratch != nullptr ? scratch->src1_repacked_scale : src1_repacked_scale_local;
+    ggml_cuda_pool_alloc<float> & dynamic_amax_rows = scratch != nullptr ? scratch->dynamic_amax_rows : dynamic_amax_rows_local;
+    ggml_cuda_pool_alloc<float> & dynamic_input_scales = scratch != nullptr ? scratch->dynamic_input_scales : dynamic_input_scales_local;
+    ggml_cuda_nvfp4_alloc_or_reuse(src1_q_nvfp4, (size_t) nblk_k * (size_t) ne11);
+    ggml_cuda_nvfp4_alloc_or_reuse(src1_repacked_data, (size_t) ne11_padded * (size_t) lt_k / 2);
+    ggml_cuda_nvfp4_alloc_or_reuse(src1_repacked_scale, (size_t) scale_outer_padded_b * (size_t) scale_inner_padded);
+    ggml_cuda_nvfp4_alloc_or_reuse(dynamic_amax_rows, (size_t) std::max<int64_t>(ne11, 1));
+    ggml_cuda_nvfp4_alloc_or_reuse(dynamic_input_scales, (size_t) std::max<int64_t>(ne11, 1));
+
     bool used_dynamic_scale = ggml_mul_mat_get_nvfp4_input_scale(dst) == nullptr;
     float global_scale = ggml_cuda_nvfp4_input_global_scale(dst, &used_dynamic_scale);
+    if (device_weight_scale != nullptr && !used_dynamic_scale) {
+        log_skip("device weight scale requires dynamic RHS scale");
+        return false;
+    }
     const ggml_tensor * rhs_capture = ggml_mul_mat_get_nvfp4_rhs_capture(dst);
     const ggml_tensor * rhs_scale_capture = ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(dst);
     const bool capture_requested = rhs_capture != nullptr || rhs_scale_capture != nullptr;
@@ -1152,17 +908,9 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             GGML_LOG_WARN("%s: ignoring invalid NVFP4 RHS capture for %s\n", __func__, ggml_get_name(dst));
         }
     }
-
-    ggml_cuda_pool_alloc<block_nvfp4> src1_q_nvfp4_tmp(ctx.pool());
-    block_nvfp4 * src1_q_nvfp4 = capture_active
+    block_nvfp4 * src1_q_nvfp4_data = capture_active
             ? (block_nvfp4 *) rhs_capture->data
-            : src1_q_nvfp4_tmp.alloc(ctx.pool(), (size_t) nblk_k * (size_t) ne11);
-    ggml_cuda_pool_alloc<uint8_t> src1_repacked_data(ctx.pool(), (size_t) ne11_padded * (size_t) ne10 / 2);
-    ggml_cuda_pool_alloc<uint8_t> src1_repacked_scale(ctx.pool(), (size_t) scale_outer_padded_b * (size_t) scale_inner_padded);
-    ggml_cuda_pool_alloc<float> dynamic_amax_rows(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
-    ggml_cuda_pool_alloc<float> dynamic_input_scales(ctx.pool(), (size_t) std::max<int64_t>(ne11, 1));
-
-    const bool use_fp4mulmat = ggml_cuda_nvfp4_fp4mulmat_enabled();
+            : src1_q_nvfp4.get();
     const bool use_outlier_q_tensor_scale =
             used_dynamic_scale &&
             ggml_tensor_get_nvfp4_kcache_outlier_counts(src0) != nullptr &&
@@ -1196,16 +944,34 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             CUDA_CHECK(cudaGetLastError());
         }
 
-        ggml_cuda_nvfp4_prepare_dynamic_input_scales(
-                dynamic_amax_rows.get(),
-                dynamic_input_scales.get(),
-                capture_active && !use_fp4mulmat ? (float *) rhs_scale_capture->data : nullptr,
-                ne11,
-                out_scale,
-                use_outlier_q_tensor_scale,
-                stream);
+        if (device_weight_scale != nullptr) {
+            ggml_cuda_nvfp4_prepare_dynamic_input_scales_device_weight(
+                    dynamic_amax_rows.get(),
+                    dynamic_input_scales.get(),
+                    ne11,
+                    device_weight_scale,
+                    reciprocal_device_weight_scale,
+                    use_outlier_q_tensor_scale,
+                    stream);
+        } else {
+            ggml_cuda_nvfp4_prepare_dynamic_input_scales(
+                    dynamic_amax_rows.get(),
+                    dynamic_input_scales.get(),
+                    nullptr,
+                    ne11,
+                    out_scale,
+                    use_outlier_q_tensor_scale,
+                    stream);
+        }
         CUDA_CHECK(cudaGetLastError());
-        if (capture_active && use_fp4mulmat) {
+        if (use_fp4mulmat) {
+            const int block_size = 256;
+            const int grid_size = (int) ((ne11 + block_size - 1) / block_size);
+            ggml_cuda_nvfp4_bf16_trunc_scales_kernel<<<grid_size, block_size, 0, stream>>>(
+                    dynamic_input_scales.get(), ne11);
+            CUDA_CHECK(cudaGetLastError());
+        }
+        if (capture_active) {
             CUDA_CHECK(cudaMemcpyAsync(
                     rhs_scale_capture->data,
                     dynamic_input_scales.get(),
@@ -1217,13 +983,13 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         if (use_bf16_trunc_nn) {
             if (capture_active && !use_fp4mulmat) {
                 ggml_cuda_nvfp4_quantize_rows_bf16_f32(
-                        (const float *) src1->data, src1_q_nvfp4,
+                        (const float *) src1->data, src1_q_nvfp4_data,
                         ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
                         (const float *) rhs_scale_capture->data, use_outlier_q_tensor_scale,
                         use_bf16_internal_arith, use_bf16_block_scale, stream);
             } else {
                 ggml_cuda_nvfp4_quantize_rows_dynamic_bf16_f32(
-                        (const float *) src1->data, src1_q_nvfp4,
+                        (const float *) src1->data, src1_q_nvfp4_data,
                         ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
                         dynamic_amax_rows.get(), use_outlier_q_tensor_scale,
                         use_bf16_internal_arith, use_bf16_block_scale, stream);
@@ -1231,13 +997,13 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         } else {
             if (capture_active && !use_fp4mulmat) {
                 ggml_cuda_nvfp4_quantize_rows_scales_f32(
-                        (const float *) src1->data, src1_q_nvfp4,
+                        (const float *) src1->data, src1_q_nvfp4_data,
                         ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
                         (const float *) rhs_scale_capture->data, use_outlier_q_tensor_scale,
                         use_trunc_bf16_input, stream);
             } else {
                 ggml_cuda_nvfp4_quantize_rows_dynamic_f32(
-                        (const float *) src1->data, src1_q_nvfp4,
+                        (const float *) src1->data, src1_q_nvfp4_data,
                         ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
                         dynamic_amax_rows.get(), use_outlier_q_tensor_scale, use_trunc_bf16_input, stream);
             }
@@ -1256,13 +1022,13 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                     cudaMemcpyHostToDevice,
                     stream));
             ggml_cuda_nvfp4_quantize_rows_bf16_f32(
-                    (const float *) src1->data, src1_q_nvfp4,
+                    (const float *) src1->data, src1_q_nvfp4_data,
                     ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
                     dynamic_input_scales.get(), true,
                     use_bf16_internal_arith, use_bf16_block_scale, stream);
         } else {
             ggml_cuda_nvfp4_quantize_rows_f32(
-                    (const float *) src1->data, src1_q_nvfp4,
+                    (const float *) src1->data, src1_q_nvfp4_data,
                     ne10, src1->nb[1] / (int64_t) sizeof(float), ne11,
                     global_scale, use_trunc_bf16_input, stream);
         }
@@ -1284,20 +1050,9 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     };
 
     if (use_fp4mulmat) {
-        static std::atomic<int> log_count(0);
-        const int seen = log_count.fetch_add(1);
-        const bool should_log = ggml_cuda_nvfp4_fp4mulmat_log_enabled() ? (seen < 16) : (seen == 0);
-        if (should_log) {
-            GGML_LOG_WARN(
-                    "%s: fp4_mulmat-derived NVFP4 kernel active for %s ne01=%lld ne11=%lld ne10=%lld dynamic_scale=%d\n",
-                    __func__,
-                    ggml_get_name(dst),
-                    (long long) ne01,
-                    (long long) ne11,
-                    (long long) ne10,
-                    used_dynamic_scale ? 1 : 0);
-        }
-        const float static_scale = used_dynamic_scale ? 1.0f : (global_scale != 0.0f) ? (out_scale / global_scale) : out_scale;
+        ggml_cuda_nvfp4_log_fp4mulmat_native_path(
+                __func__, dst, ne01, ne11, ne10, used_dynamic_scale, ggml_cuda_nvfp4_fp4mulmat_log_enabled());
+        const float static_scale = used_dynamic_scale ? 1.0f : ggml_cuda_nvfp4_fp4mulmat_bf16_trunc_f32((global_scale != 0.0f) ? (out_scale / global_scale) : out_scale);
         if (capture_active && !used_dynamic_scale) {
             ggml_cuda_nvfp4_set_scalar_kernel<<<1, 1, 0, stream>>>(
                     (float *) rhs_scale_capture->data, static_scale);
@@ -1305,7 +1060,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         }
         ggml_cuda_nvfp4_fp4mulmat_cuda(
                 (const block_nvfp4 *) src0->data,
-                src1_q_nvfp4,
+                src1_q_nvfp4_data,
                 dynamic_input_scales.get(),
                 dst->data,
                 ne01,
@@ -1327,11 +1082,15 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         return true;
     }
 
+    ggml_cuda_nvfp4_log_native_cublaslt_kernel_path(
+            __func__, src0, src1, dst, ne01, ne11, ne10, lt_k, used_dynamic_scale, row_split_mode, debug_enabled);
+
     ggml_cuda_nvfp4_split_blocks_cuda(
-            src1_q_nvfp4,
+            src1_q_nvfp4_data,
             src1_repacked_data.get(),
             src1_repacked_scale.get(),
             ne10,
+            lt_k,
             ne11,
             ne11_padded,
             nullptr,
@@ -1342,10 +1101,12 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             stream);
 
     ggml_cuda_nvfp4_split_matrix src0_repacked = {};
-    ggml_cuda_pool_alloc<uint8_t> src0_repacked_data_tmp(ctx.pool());
-    ggml_cuda_pool_alloc<uint8_t> src0_repacked_scale_tmp(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src0_repacked_data_tmp_local(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> src0_repacked_scale_tmp_local(ctx.pool());
+    ggml_cuda_pool_alloc<uint8_t> & src0_repacked_data_tmp = scratch != nullptr ? scratch->src0_repacked_data_tmp : src0_repacked_data_tmp_local;
+    ggml_cuda_pool_alloc<uint8_t> & src0_repacked_scale_tmp = scratch != nullptr ? scratch->src0_repacked_scale_tmp : src0_repacked_scale_tmp_local;
     if (!ggml_cuda_nvfp4_get_repacked_src0(
-                ctx, src0, linear_scale_layout, stream,
+                ctx, src0, lt_k, linear_scale_layout, stream,
                 src0_repacked_data_tmp, src0_repacked_scale_tmp,
                 src0_repacked)) {
         static std::atomic<bool> logged(false);
@@ -1359,7 +1120,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
         ggml_cuda_nvfp4_log_native_repack_debug(
                 dst,
                 (const block_nvfp4 *) src0->data,
-                (const block_nvfp4 *) src1_q_nvfp4,
+                (const block_nvfp4 *) src1_q_nvfp4_data,
                 src0_repacked.data,
                 src0_repacked.scale,
                 src0_repacked.data_nbytes,
@@ -1368,7 +1129,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                 src0_repacked.scale_inner_padded,
                 (const void *) src1_repacked_data.get(),
                 (const void *) src1_repacked_scale.get(),
-                (size_t) ne11_padded * (size_t) ne10 / 2,
+                (size_t) ne11_padded * (size_t) lt_k / 2,
                 (size_t) scale_outer_padded_b * (size_t) scale_inner_padded,
                 scale_outer_padded_b,
                 scale_inner_padded,
@@ -1386,7 +1147,9 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     cublasLtMatrixLayout_t b_desc = nullptr;
     cublasLtMatrixLayout_t c_desc = nullptr;
     const bool use_temp_dst = pad_n || row_split_mode;
-    ggml_cuda_pool_alloc<float> dst_padded(ctx.pool(), use_temp_dst ? (size_t) ne01 * (size_t) lt_n : 1);
+    ggml_cuda_pool_alloc<float> dst_padded_local(ctx.pool());
+    ggml_cuda_pool_alloc<float> & dst_padded = scratch != nullptr ? scratch->dst_padded : dst_padded_local;
+    ggml_cuda_nvfp4_alloc_or_reuse(dst_padded, use_temp_dst ? (size_t) ne01 * (size_t) lt_n : 1);
     void * dst_data = use_temp_dst ? (void *) dst_padded.get() : dst->data;
 
     const char * stage = "matmul_desc_create";
@@ -1464,7 +1227,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
 
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_a";
-        st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) ne01, (int64_t) ne10);
+        st = cublasLtMatrixLayoutCreate(&a_desc, CUDA_R_4F_E2M1, (uint64_t) lt_k, (uint64_t) ne01, (int64_t) lt_k);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
@@ -1473,7 +1236,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         stage = "layout_create_b";
-        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) ne10, (uint64_t) lt_n, (int64_t) ne10);
+        st = cublasLtMatrixLayoutCreate(&b_desc, CUDA_R_4F_E2M1, (uint64_t) lt_k, (uint64_t) lt_n, (int64_t) lt_k);
     }
     if (st == CUBLAS_STATUS_SUCCESS) {
         const cublasLtOrder_t order = CUBLASLT_ORDER_COL;
@@ -1521,7 +1284,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                     strcmp(dst_name, "Qcur-scaled-0") == 0 &&
                     ne11 > 14) {
                 const int64_t saved_row = 14;
-                const int64_t row_data_bytes = ne10 / 2;
+                const int64_t row_data_bytes = lt_k / 2;
                 saved_full_scale_row.resize((size_t) nblk_k);
                 saved_full_data_row.resize((size_t) nblk_k * (QK_NVFP4 / 2));
                 for (int64_t inner = 0; inner < nblk_k; ++inner) {
@@ -1547,10 +1310,11 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             }
             for (int64_t row = 0; row < ne11 && st == CUBLAS_STATUS_SUCCESS; ++row) {
                 ggml_cuda_nvfp4_split_blocks_cuda(
-                        src1_q_nvfp4 + row * nblk_k,
+                        src1_q_nvfp4_data + row * nblk_k,
                         src1_repacked_data.get(),
                         src1_repacked_scale.get(),
                         ne10,
+                        lt_k,
                         1,
                         lt_n,
                         nullptr,
@@ -1747,7 +1511,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             const char * x_row_ptr = (const char *) src1->data + 0 * src1->nb[1];
             CUDA_CHECK(cudaMemcpyAsync(w_row.data(), w_row_ptr, (size_t) nblk * sizeof(block_nvfp4), cudaMemcpyDeviceToHost, stream));
             CUDA_CHECK(cudaMemcpyAsync(x_row.data(), x_row_ptr, (size_t) ne10 * sizeof(float), cudaMemcpyDeviceToHost, stream));
-            CUDA_CHECK(cudaMemcpyAsync(x_q_gpu.data(), src1_q_nvfp4, (size_t) nblk * sizeof(block_nvfp4), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaMemcpyAsync(x_q_gpu.data(), src1_q_nvfp4_data, (size_t) nblk * sizeof(block_nvfp4), cudaMemcpyDeviceToHost, stream));
             CUDA_CHECK(cudaStreamSynchronize(stream));
 
             quantize_row_nvfp4_ref(x_row.data(), x_q.data(), ne10, global_scale);
@@ -1928,7 +1692,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
 
             auto load_src0_repacked_col = [&](int64_t out_col, scale_probe_mode mode, std::vector<block_nvfp4> & out_blocks) {
                 out_blocks.resize((size_t) nblk);
-                const int64_t row_data_bytes = ne10 / 2;
+                const int64_t row_data_bytes = lt_k / 2;
                 const int64_t transposed_inner_padded = ggml_cuda_nvfp4_pad_i64(ne01, 4);
                 for (int64_t inner = 0; inner < nblk; ++inner) {
                     int64_t scale_idx = 0;
@@ -3011,8 +2775,8 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             GGML_LOG_WARN(
                 "%s: cublasLt NVFP4 matmul failed for %s stage=%s status=%d (%s) cuda_err=%d (%s) "
                 "device=%d cc=%d runtime=%d driver=%d stream=%p "
-                "A=[k=%lld,n=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
-                "B=[k=%lld,m=%lld(padded=%lld),ld=%lld,type=CUDA_R_4F_E2M1] "
+                "A=[k=%lld(logical=%lld),n=%lld,ld=%lld,type=CUDA_R_4F_E2M1] "
+                "B=[k=%lld(logical=%lld),m=%lld(padded=%lld),ld=%lld,type=CUDA_R_4F_E2M1] "
                 "C/D=[n=%lld,m=%lld(padded=%lld),ld=%lld,type=CUDA_R_32F] alpha=%g beta=0 "
                 "global_scale=%g src0_type=%s src1_type=%s dst_type=%s "
                 "in_scale_tensor=%p in_scale_type=%s out_scale_tensor=%p out_scale_type=%s "
@@ -3031,8 +2795,8 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                 runtime_version,
                 driver_version,
                 (void *) stream,
-                (long long) ne10, (long long) ne01, (long long) ne10,
-                (long long) ne10, (long long) ne11, (long long) ne11_padded, (long long) ne10,
+                (long long) lt_k, (long long) ne10, (long long) ne01, (long long) lt_k,
+                (long long) lt_k, (long long) ne10, (long long) ne11, (long long) ne11_padded, (long long) lt_k,
                 (long long) ne01, (long long) ne11, (long long) ne11_padded, (long long) ne01,
                 (double) out_scale,
                 (double) global_scale,
@@ -3054,7 +2818,7 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
                 dst_align16,
                 src0_repacked.data_nbytes,
                 src0_repacked.scale_nbytes,
-                (size_t) ne11_padded * (size_t) ne10 / 2,
+                (size_t) ne11_padded * (size_t) lt_k / 2,
                 (size_t) scale_outer_padded_b * (size_t) scale_inner_padded,
                 src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
                 src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3],
@@ -3069,11 +2833,12 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
             if (st == CUBLAS_STATUS_INVALID_VALUE) {
                 GGML_LOG_WARN(
                         "%s: hint: CUBLAS_STATUS_INVALID_VALUE is commonly caused by unsupported FP4 dimension constraints "
-                        "or layout limits. Check M=%lld N=%lld (padded=%lld) K=%lld.\n",
+                        "or layout limits. Check M=%lld N=%lld (padded=%lld) K=%lld (logical=%lld).\n",
                         __func__,
                         (long long) ne01,
                         (long long) ne11,
                         (long long) ne11_padded,
+                        (long long) lt_k,
                         (long long) ne10);
             }
         }
@@ -3091,6 +2856,10 @@ static bool ggml_cuda_mul_mat_nvfp4_native_impl(
     GGML_UNUSED(dst);
     GGML_UNUSED(apply_outlier_correction);
     GGML_UNUSED(capture_result_flags);
+    GGML_UNUSED(device_weight_scale);
+    GGML_UNUSED(reciprocal_device_weight_scale);
+    GGML_UNUSED(stream_override);
+    GGML_UNUSED(scratch);
     return false;
 #endif
 }
@@ -3115,4 +2884,28 @@ bool ggml_cuda_mul_mat_nvfp4_native(
                 dst, GGML_NVFP4_MUL_MAT_CAPTURE_REQUESTED | capture_result_flags);
     }
     return ok;
+}
+
+bool ggml_cuda_mul_mat_nvfp4_native_device_weight_scale(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst,
+        const float * device_weight_scale,
+        bool reciprocal_weight_scale) {
+    return ggml_cuda_mul_mat_nvfp4_native_impl(
+            ctx, src0, src1, dst, true, nullptr, device_weight_scale, reciprocal_weight_scale);
+}
+
+bool ggml_cuda_mul_mat_nvfp4_native_device_weight_scale_stream(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        ggml_tensor * dst,
+        const float * device_weight_scale,
+        bool reciprocal_weight_scale,
+        cudaStream_t stream,
+        ggml_cuda_nvfp4_native_scratch * scratch) {
+    return ggml_cuda_mul_mat_nvfp4_native_impl(
+            ctx, src0, src1, dst, true, nullptr, device_weight_scale, reciprocal_weight_scale, stream, scratch);
 }

@@ -418,24 +418,46 @@ Enables experimental runtime export of selected computed F32 graph tensors for
 offline quantization evaluation. Default: unset/off.
 
 When set to a non-empty output directory, the decode graph export pass scans
-completed graph nodes and writes supported F32 tensors whose names map to K, Q,
-V, KQ, or KQV records. It creates the directory when needed, writes one
-contiguous raw `.bin` file per tensor, and writes `manifest.json` containing
-`name`, `kind`, `dtype`, `ne`, `nb`, `path`, and `byte_size`. Unsupported dtypes
-are skipped with a warning so normal inference does not fail solely because
-export is enabled. Before graph allocation, matching tensors are marked as graph
-outputs so their backend storage remains valid until the post-compute export and
-cannot be reused by later nodes. The export hook is narrow and does not change
-inference math; when this switch is unset or empty, no tensors are retained or
-written.
+completed graph nodes and writes supported tensors whose names map to K, Q, V,
+KQ, post-softmax KQ probabilities, KQ masks, K-attention replay inputs,
+Q-attention replay inputs, or KQV records. It creates the directory when
+needed, writes one raw `.bin` file per exported tensor, and writes
+`manifest.json` containing `name`, `kind`, `dtype`, `ne`, `nb`, `path`,
+`byte_size`, and per-record `meta` when replay/export bookkeeping needs extra
+context. Unsupported dtypes are skipped with a warning so normal inference does
+not fail solely because export is enabled. Before graph allocation, matching
+tensors are marked as graph outputs so their backend storage remains valid until
+the post-compute export and cannot be reused by later nodes. The export hook is
+narrow and does not change inference math; when this switch is unset or empty,
+no tensors are retained or written.
 
 ### `LLAMA_EXPT_TENSOR_EXPORT_KINDS`
 
-Comma-separated tensor kinds to export. Default: `k,q,v,kq,kqv`.
+Comma-separated tensor kinds to export. Default:
+`k,q,v,kq,kqv,kq_softmax,kq_mask,k_attn,q_attn`.
 
-Supported values are `k`, `q`, `v`, `kq`, and `kqv`. This switch only filters
-which recognized graph tensor names are exported; it does not enable export
-without `LLAMA_EXPT_TENSOR_EXPORT_DIR`.
+Supported values are `k`, `q`, `v`, `kq`, `kqv`, `kq_softmax`, `kq_mask`,
+`k_attn`, and `q_attn`. This switch only filters which recognized graph tensor
+names are exported; it does not enable export without
+`LLAMA_EXPT_TENSOR_EXPORT_DIR`.
+
+## CUDA Softmax
+
+### `GGML_CUDA_SOFTMAX_BF16_EXP`
+
+Enables an experimental BF16 fixed-point exponential approximation in the
+non-flash CUDA `GGML_OP_SOFT_MAX` forward path. Default: unset/off.
+
+When enabled with a value beginning with `1`, CUDA softmax truncates each FP32
+range-reduced input to BF16 bits, evaluates the C100 BF16 `expp` model, expands
+the BF16 result back to FP32, and uses it for both tensor elements and optional
+attention sinks. Maximum reduction, accumulation, reciprocal, and final
+normalization remain FP32. Softmax backward and flash-attention softmax are
+unchanged.
+
+The switch is cached on first CUDA softmax use, so changing it later in the same
+process is unsupported. The selected enabled or disabled exp dispatch branch is
+logged once.
 
 ### `LLAMA_EXPT_TENSOR_EXPORT_OP`
 
@@ -591,6 +613,39 @@ flash attention is not supported, and KQ/V offload must be enabled.
 
 ## NVFP4 CUDA Native Matmul
 
+### `GGML_CUDA_NVFP4_VCACHE_MM_STANDALONE`
+
+Enables the mm-standalone CUDA NVFP4 V-cache P*V algorithm. Default:
+unset/off, preserving the release CUDA NVFP4 V-cache path.
+
+When enabled, the V-cache dispatcher tries the mm-standalone algorithm before
+the batched or per-head native-slice release paths. This path supports the old
+per-block external-scale V-cache layout as well as the global-scale layout,
+quantizes dense F32 P rows to temporary NVFP4, then uses its cuBLASLt FP4 path
+when available and its custom CUDA FP4 kernel otherwise. If this path does not
+accept the shape, execution continues to the existing release paths.
+
+### `GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK`
+
+Validation switch for native CUDA NVFP4 matmul. Default: unset/off.
+
+When enabled, an NVFP4 model matmul that cannot complete through the selected
+native implementation aborts instead of continuing to the general quantized
+fallback. Recognized NVFP4 V-cache P*V operations are covered as well: failure
+of the global-scale native-slice path aborts before the V-cache-specific
+cuBLASLt or custom CUDA fallback can run. Use this switch to prove native path
+coverage, not for normal service operation.
+
+### `GGML_CUDA_NVFP4_VCACHE_CUBLASLT_TRACE`
+
+Diagnostic switch for NVFP4 V-cache P*V validation. Default: unset/off.
+
+When enabled, logs one record after every complete V-cache native-slice P*V
+operation, including logical K, padded cuBLASLt K, query columns, and head
+counts. This is intentionally high-volume and should only be used for focused
+validation runs. It does not select the native path by itself and does not log
+the separate `GGML_CUDA_NVFP4_FP4MULMAT` implementation.
+
 ### `GGML_CUDA_NVFP4_BF16_QUANT`
 
 Parent switch for the experimental BF16 trunc-NN NVFP4 RHS activation quantizer
@@ -626,8 +681,10 @@ Default: unset/off.
 When enabled, the native CUDA NVFP4 matmul path still quantizes F32 RHS
 activations through the current NVFP4 activation quantizer, then evaluates the
 NVFP4 block dot product with the experimental FP4 accumulator model instead of
-cuBLASLt. This is intended for hardware-model comparison and correctness
-experiments, not performance measurement.
+cuBLASLt. The CUDA NVFP4 V-cache native-slice path also honors this switch after
+folding V-cache scale compensation into dynamic RHS scales. This is intended for
+hardware-model comparison and correctness experiments, not performance
+measurement.
 
 The accumulator writeback follows the `call_mul_fp32` model: the accumulator
 and column-scale operands are rounded to BF16 with RNE and exactly widened to

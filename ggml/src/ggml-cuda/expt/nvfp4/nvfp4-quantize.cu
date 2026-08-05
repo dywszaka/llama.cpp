@@ -151,6 +151,27 @@ static __global__ void ggml_cuda_nvfp4_prepare_dynamic_input_scales_kernel(
     }
 }
 
+static __global__ void ggml_cuda_nvfp4_prepare_dynamic_input_scales_device_weight_kernel(
+        const float * __restrict__ amax_rows,
+        float * __restrict__ input_scales,
+        const int64_t nrows,
+        const float * __restrict__ weight_scale,
+        const bool reciprocal_weight_scale,
+        const bool per_tensor_scale) {
+    const int64_t row = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= nrows) {
+        return;
+    }
+
+    const float raw_scale = weight_scale != nullptr ? weight_scale[0] : 0.0f;
+    const float out_scale = reciprocal_weight_scale ?
+            ((raw_scale > 0.0f && isfinite(raw_scale)) ? 1.0f / raw_scale : 0.0f) :
+            raw_scale;
+    const float amax_f = per_tensor_scale ? amax_rows[0] : amax_rows[row];
+    const float global_scale = ggml_cuda_nvfp4_kcache_outlier_q_global_scale(amax_f);
+    input_scales[row] = (global_scale != 0.0f) ? (out_scale / global_scale) : 0.0f;
+}
+
 static __global__ void quantize_row_nvfp4_kernel(
         const float * __restrict__ x,
         block_nvfp4 * __restrict__ y,
@@ -259,6 +280,20 @@ void ggml_cuda_nvfp4_prepare_dynamic_input_scales(
     const int grid_size = (int) ((nrows + block_size - 1) / block_size);
     ggml_cuda_nvfp4_prepare_dynamic_input_scales_kernel<<<grid_size, block_size, 0, stream>>>(
             amax_rows, input_scales, global_scales, nrows, out_scale, per_tensor_scale);
+}
+
+void ggml_cuda_nvfp4_prepare_dynamic_input_scales_device_weight(
+        const float * amax_rows,
+        float * input_scales,
+        int64_t nrows,
+        const float * weight_scale,
+        bool reciprocal_weight_scale,
+        bool per_tensor_scale,
+        cudaStream_t stream) {
+    const int block_size = 256;
+    const int grid_size = (int) ((nrows + block_size - 1) / block_size);
+    ggml_cuda_nvfp4_prepare_dynamic_input_scales_device_weight_kernel<<<grid_size, block_size, 0, stream>>>(
+            amax_rows, input_scales, nrows, weight_scale, reciprocal_weight_scale, per_tensor_scale);
 }
 
 void ggml_cuda_nvfp4_quantize_rows_f32(

@@ -1619,8 +1619,9 @@ static bool run_case_backend_batched_dynamic_rhs(
                     b_q_slice.data(), b_q_slice.size() * sizeof(block_nvfp4));
             for (int row = 0; row < n; ++row) {
                 const float global_scale = global_scales_b[(size_t) row];
+                const float final_scale = global_scale != 0.0f ? (1.0f / global_scale) : 0.0f;
                 b_final_scale_ref[(size_t) ib * (size_t) n + (size_t) row] =
-                        global_scale != 0.0f ? (1.0f / global_scale) : 0.0f;
+                        host_trunc_f32_to_bf16_value(final_scale);
             }
         }
         dequantize_matrix_nvfp4_per_row_scale(b_q_slice, b_deq_slice, n, k, global_scales_b);
@@ -1729,15 +1730,15 @@ static bool run_case_backend_batched_dynamic_rhs(
         capture_ok = (capture_flags & GGML_NVFP4_MUL_MAT_CAPTURE_VALID) != 0 &&
                 (capture_flags & GGML_NVFP4_MUL_MAT_CAPTURE_FINAL_SCALE) != 0 &&
                 std::memcmp(b_q_gpu.data(), b_q_ref.data(), b_q_ref.size() * sizeof(block_nvfp4)) == 0;
-        bool captured_non_bf16_scale = false;
+        bool captured_bf16_scale = true;
         for (size_t i = 0; i < b_final_scale_ref.size() && capture_ok; ++i) {
             const float tolerance = 1e-6f * std::max(std::fabs(b_final_scale_ref[i]), 1.0f);
             capture_ok = std::fabs(b_final_scale_gpu[i] - b_final_scale_ref[i]) <= tolerance;
             uint32_t scale_bits = 0;
             std::memcpy(&scale_bits, &b_final_scale_gpu[i], sizeof(scale_bits));
-            captured_non_bf16_scale = captured_non_bf16_scale || (scale_bits & 0xffffu) != 0;
+            captured_bf16_scale = captured_bf16_scale && ((scale_bits & 0xffffu) == 0);
         }
-        capture_ok = capture_ok && captured_non_bf16_scale;
+        capture_ok = capture_ok && captured_bf16_scale;
         if (!capture_ok) {
             std::fprintf(stderr, "NVFP4 RHS capture mismatch flags=0x%x\n", capture_flags);
         }

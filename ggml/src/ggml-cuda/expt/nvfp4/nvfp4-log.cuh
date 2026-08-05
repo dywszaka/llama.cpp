@@ -9,6 +9,8 @@ void ggml_cuda_nvfp4_log_bf16_quant_trunc_nn_once(const char * env, bool enabled
 void ggml_cuda_nvfp4_log_bf16_quant_bf16_internal_once(const char * env, bool enabled);
 void ggml_cuda_nvfp4_log_bf16_quant_bf16_block_scale_once(const char * env, bool enabled);
 void ggml_cuda_nvfp4_log_trunc_bf16_input_once(const char * env, bool enabled);
+void ggml_cuda_nvfp4_log_native_k_padding_once(int64_t logical_k, int64_t padded_k);
+void ggml_cuda_nvfp4_log_vcache_cublaslt_trace_switch_once(const char * env, bool enabled);
 
 void ggml_cuda_nvfp4_log_kcache_outlier_counts(
         const char * caller,
@@ -61,6 +63,26 @@ void ggml_cuda_nvfp4_log_kcache_outlier_fingerprint(
 
 void ggml_cuda_nvfp4_log_vcache_fast_update_once(bool enabled);
 void ggml_cuda_nvfp4_log_vcache_fp4_pv_once();
+void ggml_cuda_nvfp4_log_vcache_mm_standalone_switch_once(const char * env, bool enabled);
+void ggml_cuda_nvfp4_log_vcache_native_slice_active_once(
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_size,
+        int64_t q_heads,
+        int64_t q_streams);
+void ggml_cuda_nvfp4_log_vcache_native_slice_failure_once(
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_size,
+        int64_t q_heads,
+        int64_t q_streams);
+void ggml_cuda_nvfp4_log_vcache_cublaslt_trace(
+        int64_t rows,
+        int64_t cols,
+        int64_t logical_k,
+        int64_t lt_k,
+        int64_t q_heads,
+        int64_t q_streams);
 void ggml_cuda_nvfp4_log_vcache_matmul_path_once(const char * path);
 void ggml_cuda_nvfp4_log_vcache_lt_failure_once(const char * stage, int status, const char * status_str);
 void ggml_cuda_nvfp4_log_vcache_lt_active_once(
@@ -135,6 +157,36 @@ void ggml_cuda_nvfp4_log_native_repack_debug(
         bool linear_scale_layout,
         bool used_dynamic_scale,
         cudaStream_t stream);
+
+void ggml_cuda_nvfp4_log_fp4mulmat_native_path(
+        const char * caller,
+        const ggml_tensor * dst,
+        int64_t ne01,
+        int64_t ne11,
+        int64_t ne10,
+        bool used_dynamic_scale,
+        bool verbose);
+
+void ggml_cuda_nvfp4_log_native_cublaslt_kernel_path(
+        const char * caller,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        const ggml_tensor * dst,
+        int64_t ne01,
+        int64_t ne11,
+        int64_t ne10,
+        int64_t lt_k,
+        bool used_dynamic_scale,
+        bool row_split,
+        bool verbose);
+
+void ggml_cuda_nvfp4_log_fp4mulmat_vcache_kernel_once(
+        const char * kernel,
+        int64_t rows,
+        int64_t cols,
+        int64_t kv_size,
+        int64_t q_heads,
+        int64_t q_streams);
 
 void ggml_cuda_nvfp4_log_validate_sampled_row(
         const ggml_tensor * dst,

@@ -2020,15 +2020,6 @@ static bool ggml_cuda_nvfp4_8_kq_cublaslt_enabled() {
     return cached != 0;
 }
 
-static bool ggml_cuda_nvfp4_native_no_fallback() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char * env = getenv("GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK");
-        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
 static bool ggml_cuda_fp8_e8m0_native_no_fallback() {
     static int cached = -1;
     if (cached < 0) {
@@ -2105,7 +2096,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         if (ggml_cuda_mul_mat_nvfp4_native(ctx, src0, src1, dst)) {
             return;
         }
-        if (ggml_cuda_nvfp4_native_no_fallback()) {
+        if (ggml_cuda_nvfp4_native_no_fallback_enabled()) {
             GGML_ABORT(
                     "%s: native NVFP4 path failed for dst=%s and GGML_CUDA_NVFP4_NATIVE_NO_FALLBACK=1 | "
                     "src0_type=%s src1_type=%s dst_type=%s "

@@ -1,0 +1,266 @@
+case=kld_native_slice_ubatch_512
+date_utc=2026-07-27T10:07:08Z
+env=CUDA_VISIBLE_DEVICES=0 -
+diagnostics_dir=experiments/20260727T100455Z-nvfp4-vcache-batched/diagnostics/kld_native_slice_ubatch_512
+cmd=/home/allen/host_workspace/develop/llama.cpp-vp-opt/build_cuda/bin/llama-perplexity cmd=-m cmd=/home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf cmd=-f cmd=/home/allen/host_workspace/develop/llama.cpp-vp-opt/experiments/kld-baseline-data/data/wikitext-small.raw cmd=--n_gpu_layers cmd=40 cmd=--batch-size cmd=512 cmd=-t cmd=32 cmd=-c cmd=512 cmd=--kv-unified cmd=--no-warmup cmd=--chunks cmd=8 cmd=--cache-type-k cmd=f16 cmd=--cache-type-v cmd=nvfp4 cmd=--ubatch-size cmd=512 cmd=--kl-divergence cmd=--kl-divergence-base cmd=/home/allen/host_workspace/develop/llama.cpp-vp-opt/experiments/kld-baseline-data/baseline-logprobs/ubatch_512.kld
+
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+build: 6347 (36bdb74e) with cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0 for x86_64-linux-gnu
+llama_model_load_from_file_impl: using device CUDA0 (NVIDIA GeForce RTX 5090) - 31603 MiB free
+llama_model_loader: loaded meta data with 32 key-value pairs and 975 tensors from /home/allen/host_workspace/develop/models/qwen3-8b-nvfp4.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = qwen3
+llama_model_loader: - kv   1:                               general.type str              = model
+llama_model_loader: - kv   2:                               general.name str              = Ccd10A893Cbca613259517C3Efe08E151Ddf2B8E
+llama_model_loader: - kv   3:                         general.size_label str              = 8.2B
+llama_model_loader: - kv   4:                            general.license str              = apache-2.0
+llama_model_loader: - kv   5:                   general.base_model.count u32              = 1
+llama_model_loader: - kv   6:                  general.base_model.0.name str              = Qwen3 8B
+llama_model_loader: - kv   7:          general.base_model.0.organization str              = Qwen
+llama_model_loader: - kv   8:              general.base_model.0.repo_url str              = https://huggingface.co/Qwen/Qwen3-8B
+llama_model_loader: - kv   9:                               general.tags arr[str,7]       = ["nvidia", "ModelOpt", "Qwen3", "quan...
+llama_model_loader: - kv  10:                          qwen3.block_count u32              = 36
+llama_model_loader: - kv  11:                       qwen3.context_length u32              = 40960
+llama_model_loader: - kv  12:                     qwen3.embedding_length u32              = 4096
+llama_model_loader: - kv  13:                  qwen3.feed_forward_length u32              = 12288
+llama_model_loader: - kv  14:                 qwen3.attention.head_count u32              = 32
+llama_model_loader: - kv  15:              qwen3.attention.head_count_kv u32              = 8
+llama_model_loader: - kv  16:                       qwen3.rope.freq_base f32              = 1000000.000000
+llama_model_loader: - kv  17:     qwen3.attention.layer_norm_rms_epsilon f32              = 0.000001
+llama_model_loader: - kv  18:                 qwen3.attention.key_length u32              = 128
+llama_model_loader: - kv  19:               qwen3.attention.value_length u32              = 128
+llama_model_loader: - kv  20:                          general.file_type u32              = 38
+llama_model_loader: - kv  21:               general.quantization_version u32              = 2
+llama_model_loader: - kv  22:                       tokenizer.ggml.model str              = gpt2
+llama_model_loader: - kv  23:                         tokenizer.ggml.pre str              = qwen2
+llama_model_loader: - kv  24:                      tokenizer.ggml.tokens arr[str,151936]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+llama_model_loader: - kv  25:                  tokenizer.ggml.token_type arr[i32,151936]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+llama_model_loader: - kv  26:                      tokenizer.ggml.merges arr[str,151387]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
+llama_model_loader: - kv  27:                tokenizer.ggml.eos_token_id u32              = 151643
+llama_model_loader: - kv  28:            tokenizer.ggml.padding_token_id u32              = 151643
+llama_model_loader: - kv  29:                tokenizer.ggml.bos_token_id u32              = 151643
+llama_model_loader: - kv  30:               tokenizer.ggml.add_bos_token bool             = false
+llama_model_loader: - kv  31:                    tokenizer.chat_template str              = {%- if tools %}\n    {{- '<|im_start|>...
+llama_model_loader: - type  f32:  723 tensors
+llama_model_loader: - type nvfp4:  252 tensors
+print_info: file format = GGUF V3 (latest)
+print_info: file type   = MXFP4 MoE
+print_info: file size   = 8.28 GiB (8.68 BPW)
+load: printing all EOG tokens:
+load:   - 151643 ('<|endoftext|>')
+load:   - 151645 ('<|im_end|>')
+load:   - 151662 ('<|fim_pad|>')
+load:   - 151663 ('<|repo_name|>')
+load:   - 151664 ('<|file_sep|>')
+load: special tokens cache size = 26
+load: token to piece cache size = 0.9311 MB
+print_info: arch             = qwen3
+print_info: vocab_only       = 0
+print_info: n_ctx_train      = 40960
+print_info: n_embd           = 4096
+print_info: n_layer          = 36
+print_info: n_head           = 32
+print_info: n_head_kv        = 8
+print_info: n_rot            = 128
+print_info: n_swa            = 0
+print_info: is_swa_any       = 0
+print_info: n_embd_head_k    = 128
+print_info: n_embd_head_v    = 128
+print_info: n_gqa            = 4
+print_info: n_embd_k_gqa     = 1024
+print_info: n_embd_v_gqa     = 1024
+print_info: f_norm_eps       = 0.0e+00
+print_info: f_norm_rms_eps   = 1.0e-06
+print_info: f_clamp_kqv      = 0.0e+00
+print_info: f_max_alibi_bias = 0.0e+00
+print_info: f_logit_scale    = 0.0e+00
+print_info: f_attn_scale     = 0.0e+00
+print_info: n_ff             = 12288
+print_info: n_expert         = 0
+print_info: n_expert_used    = 0
+print_info: causal attn      = 1
+print_info: pooling type     = -1
+print_info: rope type        = 2
+print_info: rope scaling     = linear
+print_info: freq_base_train  = 1000000.0
+print_info: freq_scale_train = 1
+print_info: n_ctx_orig_yarn  = 40960
+print_info: rope_finetuned   = unknown
+print_info: model type       = 8B
+print_info: model params     = 8.19 B
+print_info: general.name     = Ccd10A893Cbca613259517C3Efe08E151Ddf2B8E
+print_info: vocab type       = BPE
+print_info: n_vocab          = 151936
+print_info: n_merges         = 151387
+print_info: BOS token        = 151643 '<|endoftext|>'
+print_info: EOS token        = 151643 '<|endoftext|>'
+print_info: EOT token        = 151645 '<|im_end|>'
+print_info: PAD token        = 151643 '<|endoftext|>'
+print_info: LF token         = 198 'Ċ'
+print_info: FIM PRE token    = 151659 '<|fim_prefix|>'
+print_info: FIM SUF token    = 151661 '<|fim_suffix|>'
+print_info: FIM MID token    = 151660 '<|fim_middle|>'
+print_info: FIM PAD token    = 151662 '<|fim_pad|>'
+print_info: FIM REP token    = 151663 '<|repo_name|>'
+print_info: FIM SEP token    = 151664 '<|file_sep|>'
+print_info: EOG token        = 151643 '<|endoftext|>'
+print_info: EOG token        = 151645 '<|im_end|>'
+print_info: EOG token        = 151662 '<|fim_pad|>'
+print_info: EOG token        = 151663 '<|repo_name|>'
+print_info: EOG token        = 151664 '<|file_sep|>'
+print_info: max token length = 256
+load_tensors: loading model tensors, this can take a while... (mmap = true)
+load_tensors: offloading 36 repeating layers to GPU
+load_tensors: offloading output layer to GPU
+load_tensors: offloaded 37/37 layers to GPU
+load_tensors:        CUDA0 model buffer size =  6101.25 MiB
+load_tensors:   CPU_Mapped model buffer size =  2374.00 MiB
+.............................................
+llama_vcache_nvfp4_log_once: NVFP4 V-cache runtime path is requested by type_v=nvfp4; required runtime settings are flash_attn=0, offload_kqv=1, kv_unified=1
+llama_context: constructing llama_context
+llama_context: n_seq_max     = 1
+llama_context: n_ctx         = 512
+llama_context: n_ctx_per_seq = 512
+llama_context: n_batch       = 512
+llama_context: n_ubatch      = 512
+llama_context: causal_attn   = 1
+llama_context: flash_attn    = 0
+llama_context: kv_unified    = true
+llama_context: freq_base     = 1000000.0
+llama_context: freq_scale    = 1
+llama_context: n_ctx_per_seq (512) < n_ctx_train (40960) -- the full capacity of the model will not be utilized
+llama_context:  CUDA_Host  output buffer size =     0.58 MiB
+llama_vcache_nvfp4_log_scale_mode_once: LLAMA_NVFP4_VCACHE_LAYER_GLOBAL_SCALE=(unset), LLAMA_NVFP4_VCACHE_PER_BLOCK_SCALE=0 -> disabled, NVFP4 V-cache uses default per-tensor global scale
+llama_kv_cache_unified:      CUDA0 KV buffer size =    46.13 MiB
+llama_kv_cache_unified: layer 0 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 1 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 2 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 3 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 4 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 5 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 6 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 7 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 8 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 9 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 10 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 11 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 12 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 13 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 14 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 15 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 16 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 17 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 18 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 19 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 20 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 21 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 22 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 23 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 24 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 25 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 26 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 27 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 28 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 29 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 30 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 31 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 32 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 33 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 34 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: layer 35 NVFP4 V-cache global_scale=16.7106 from default per-tensor P90 absmax=80.428
+llama_kv_cache_unified: size =   46.12 MiB (   512 cells,  36 layers,  1/1 seqs), K (f16):   36.00 MiB, V (nvfp4):   10.12 MiB
+llama_context:      CUDA0 compute buffer size =   304.75 MiB
+llama_context:  CUDA_Host compute buffer size =     9.26 MiB
+llama_context: graph nodes  = 1446
+llama_context: graph splits = 2
+common_init_from_params: added <|endoftext|> logit bias = -inf
+common_init_from_params: added <|im_end|> logit bias = -inf
+common_init_from_params: added <|fim_pad|> logit bias = -inf
+common_init_from_params: added <|repo_name|> logit bias = -inf
+common_init_from_params: added <|file_sep|> logit bias = -inf
+common_init_from_params: setting dry_penalty_last_n to ctx_size = 512
+
+system_info: n_threads = 32 (n_threads_batch = 32) / 128 | CUDA : ARCHS = 1200 | USE_GRAPHS = 1 | PEER_MAX_BATCH_SIZE = 128 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | AVX512_BF16 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 |
+ggml_cuda_nvfp4_log_bf16_quant_once: GGML_CUDA_NVFP4_BF16_QUANT=(unset) -> disabled, using FP32 nearest-neighbor NVFP4 quantization
+ggml_cuda_nvfp4_log_trunc_bf16_input_once: GGML_CUDA_NVFP4_TRUNC_BF16_INPUT=(unset) -> disabled, FP32 nearest-neighbor NVFP4 quantization uses full FP32 activations
+ggml_cuda_nvfp4_log_vcache_fast_update_once: LLAMA_NVFP4_VCACHE_FAST_UPDATE=(unset) -> disabled
+ggml_cuda_log_mul_mat_kqvp_once: q*k src0{name=cache_k_l0 (view) (permuted) type=f16 ne=[128,512,8,1]} src1{name=Qcur-0 (reshaped) (permuted) type=f32 ne=[128,512,32,1]} dst{name=kq-0 type=f32 ne=[512,512,32,1]}
+ggml_cuda_log_mul_mat_kqvp_once: p*v src0{name=cache_v_l0 (view) (permuted) type=nvfp4 ne=[512,128,8,1]} src1{name=kq-softmax-0 type=f32 ne=[512,512,32,1]} dst{name=kqv-0 type=f32 ne=[128,512,32,1]}
+ggml_cuda_nvfp4_log_vcache_fp4_pv_once: CUDA NVFP4 V-cache p*v uses dynamic NVFP4 P; global-scale V defaults to per-head native slices
+ggml_cuda_nvfp4_log_vcache_batched_switch_once: GGML_CUDA_NVFP4_VCACHE_BATCHED=(unset) -> disabled, using the existing per-head native V-cache path
+ggml_cuda_nvfp4_log_vcache_native_slice_active_once: native-slice V-cache P*V active rows=128 cols=512 kv_size=512 q_heads=32 q_streams=1 P=F32 at wrapper boundary dynamic_P_quantization=native-matmul V_scale_compensation=native_weight_scale_1_over_global_scale
+ggml_cuda_nvfp4_log_vcache_cublaslt_trace_switch_once: GGML_CUDA_NVFP4_VCACHE_CUBLASLT_TRACE=(unset) -> disabled
+ggml_cuda_nvfp4_log_vcache_matmul_path_once: CUDA NVFP4 V-cache p*v matmul path=native-slice-dynamic-p-global-scale
+tensor_export_maybe_log_config: disabled; LLAMA_EXPT_TENSOR_EXPORT_DIR is unset
+kl_divergence: 0.47 seconds per pass - ETA 0.05 minutes
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   1       7.4123 ±    1.3877       0.03683 ±    0.03402       0.06218 ±    0.01126     6.576 ±  0.810 %    93.333 ±  1.565 %
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   2      10.6723 ±    1.5824       0.05320 ±    0.02724       0.07104 ±    0.00797     7.031 ±  0.669 %    91.176 ±  1.257 %
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   3      10.0606 ±    1.2325       0.04616 ±    0.02191       0.07867 ±    0.00805     8.179 ±  0.795 %    91.373 ±  1.016 %
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   4       9.6673 ±    0.9674       0.04479 ±    0.01813       0.07613 ±    0.00645     8.139 ±  0.704 %    90.294 ±  0.927 %
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   5       9.6234 ±    0.8375       0.03457 ±    0.01583       0.08200 ±    0.00576     8.219 ±  0.584 %    88.863 ±  0.881 %
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   6      10.0061 ±    0.7883       0.02301 ±    0.01414       0.07966 ±    0.00529     8.235 ±  0.552 %    88.824 ±  0.806 %
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   7      10.1431 ±    0.7339       0.02274 ±    0.01340       0.07821 ±    0.00467     8.218 ±  0.497 %    88.627 ±  0.752 %
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   8      10.7260 ±    0.7295       0.01973 ±    0.01223       0.07824 ±    0.00426     8.029 ±  0.449 %    87.843 ±  0.724 %
+
+====== Perplexity statistics ======
+Mean PPL(Q)                   :  10.725980 ±   0.729550
+Mean PPL(base)                :  10.516417 ±   0.704933
+Cor(ln(PPL(Q)), ln(PPL(base))):  98.37%
+Mean ln(PPL(Q)/PPL(base))     :   0.019731 ±   0.012230
+Mean PPL(Q)/PPL(base)         :   1.019927 ±   0.012474
+Mean PPL(Q)-PPL(base)         :   0.209562 ±   0.131792
+
+====== KL divergence statistics ======
+Mean    KLD:   0.078243 ±   0.004257
+Maximum KLD:   3.930665
+99.9%   KLD:   2.182183
+99.0%   KLD:   0.775333
+99.0%   KLD:   0.775333
+Median  KLD:   0.033292
+10.0%   KLD:   0.000328
+ 5.0%   KLD:   0.000031
+ 1.0%   KLD:   0.000001
+Minimum KLD:  -0.000001
+
+====== Token probability statistics ======
+Mean    Δp: -0.179 ± 0.178 %
+Maximum Δp: 89.008%
+99.9%   Δp: 49.475%
+99.0%   Δp: 24.824%
+95.0%   Δp: 10.149%
+90.0%   Δp:  5.846%
+75.0%   Δp:  0.770%
+Median  Δp: -0.000%
+25.0%   Δp: -1.266%
+10.0%   Δp: -6.326%
+ 5.0%   Δp: -11.569%
+ 1.0%   Δp: -24.244%
+ 0.1%   Δp: -49.133%
+Minimum Δp: -78.418%
+RMS Δp    :  8.029 ± 0.449 %
+Same top p: 87.843 ± 0.724 %
+
+llama_perf_context_print:        load time =    1830.58 ms
+llama_perf_context_print: prompt eval time =    1571.60 ms /  4096 tokens (    0.38 ms per token,  2606.26 tokens per second)
+llama_perf_context_print:        eval time =       0.00 ms /     1 runs   (    0.00 ms per token,      inf tokens per second)
+llama_perf_context_print:       total time =    3110.08 ms /  4097 tokens
+llama_perf_context_print:    graphs reused =          7

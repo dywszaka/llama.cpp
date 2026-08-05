@@ -1,0 +1,56 @@
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+ggml_cuda_nvfp4_log_vcache_fp4_pv_once: CUDA NVFP4 V-cache p*v uses dynamic NVFP4 P; global-scale V defaults to per-head native slices
+ggml_cuda_nvfp4_log_vcache_batched_switch_once: GGML_CUDA_NVFP4_VCACHE_BATCHED=1 -> enabled, batching P quantization and cuBLASLt resources across V-cache heads
+ggml_cuda_nvfp4_log_bf16_quant_once: GGML_CUDA_NVFP4_BF16_QUANT=(unset) -> disabled, using FP32 nearest-neighbor NVFP4 quantization
+ggml_cuda_nvfp4_log_bf16_quant_trunc_nn_once: GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=(unset) -> disabled, BF16 activation quantizer does not use the truncation NN variant
+ggml_cuda_nvfp4_log_bf16_quant_bf16_internal_once: GGML_CUDA_NVFP4_BF16_QUANT_BF16_INTERNAL=(unset) -> disabled, BF16 trunc-NN quantizer keeps internal scale/threshold arithmetic in FP32 precision
+ggml_cuda_nvfp4_log_bf16_quant_bf16_block_scale_once: GGML_CUDA_NVFP4_BF16_QUANT_BF16_BLOCK_SCALE=(unset) -> disabled, BF16 trunc-NN quantizer computes blockscale with FP32 tensor scale arithmetic
+ggml_cuda_nvfp4_log_trunc_bf16_input_once: GGML_CUDA_NVFP4_TRUNC_BF16_INPUT=(unset) -> disabled, FP32 nearest-neighbor NVFP4 quantization uses full FP32 activations
+ggml_cuda_nvfp4_log_vcache_lt_active_once: cuBLASLt FP4 P*V path active rows=128 cols=2 padded_cols=16 kv_size=512 q_heads=32 q_streams=1
+ggml_cuda_nvfp4_log_vcache_matmul_path_once: CUDA NVFP4 V-cache p*v matmul path=batched-native-dynamic-p-global-scale
+test-vcache-nvfp4-matmul: benchmark kv_size=512 path=global-native-slice 161.614 us/iter (100 iters)
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+ggml_cuda_nvfp4_log_vcache_fp4_pv_once: CUDA NVFP4 V-cache p*v uses dynamic NVFP4 P; global-scale V defaults to per-head native slices
+ggml_cuda_nvfp4_log_vcache_batched_switch_once: GGML_CUDA_NVFP4_VCACHE_BATCHED=1 -> enabled, batching P quantization and cuBLASLt resources across V-cache heads
+ggml_cuda_nvfp4_log_bf16_quant_once: GGML_CUDA_NVFP4_BF16_QUANT=(unset) -> disabled, using FP32 nearest-neighbor NVFP4 quantization
+ggml_cuda_nvfp4_log_bf16_quant_trunc_nn_once: GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=(unset) -> disabled, BF16 activation quantizer does not use the truncation NN variant
+ggml_cuda_nvfp4_log_bf16_quant_bf16_internal_once: GGML_CUDA_NVFP4_BF16_QUANT_BF16_INTERNAL=(unset) -> disabled, BF16 trunc-NN quantizer keeps internal scale/threshold arithmetic in FP32 precision
+ggml_cuda_nvfp4_log_bf16_quant_bf16_block_scale_once: GGML_CUDA_NVFP4_BF16_QUANT_BF16_BLOCK_SCALE=(unset) -> disabled, BF16 trunc-NN quantizer computes blockscale with FP32 tensor scale arithmetic
+ggml_cuda_nvfp4_log_trunc_bf16_input_once: GGML_CUDA_NVFP4_TRUNC_BF16_INPUT=(unset) -> disabled, FP32 nearest-neighbor NVFP4 quantization uses full FP32 activations
+ggml_cuda_nvfp4_log_vcache_lt_active_once: cuBLASLt FP4 P*V path active rows=128 cols=2 padded_cols=16 kv_size=2048 q_heads=32 q_streams=1
+ggml_cuda_nvfp4_log_vcache_matmul_path_once: CUDA NVFP4 V-cache p*v matmul path=batched-native-dynamic-p-global-scale
+test-vcache-nvfp4-matmul: benchmark kv_size=2048 path=global-native-slice 308.788 us/iter (100 iters)
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+ggml_cuda_nvfp4_log_vcache_fp4_pv_once: CUDA NVFP4 V-cache p*v uses dynamic NVFP4 P; global-scale V defaults to per-head native slices
+ggml_cuda_nvfp4_log_vcache_batched_switch_once: GGML_CUDA_NVFP4_VCACHE_BATCHED=1 -> enabled, batching P quantization and cuBLASLt resources across V-cache heads
+ggml_cuda_nvfp4_log_bf16_quant_once: GGML_CUDA_NVFP4_BF16_QUANT=(unset) -> disabled, using FP32 nearest-neighbor NVFP4 quantization
+ggml_cuda_nvfp4_log_bf16_quant_trunc_nn_once: GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=(unset) -> disabled, BF16 activation quantizer does not use the truncation NN variant
+ggml_cuda_nvfp4_log_bf16_quant_bf16_internal_once: GGML_CUDA_NVFP4_BF16_QUANT_BF16_INTERNAL=(unset) -> disabled, BF16 trunc-NN quantizer keeps internal scale/threshold arithmetic in FP32 precision
+ggml_cuda_nvfp4_log_bf16_quant_bf16_block_scale_once: GGML_CUDA_NVFP4_BF16_QUANT_BF16_BLOCK_SCALE=(unset) -> disabled, BF16 trunc-NN quantizer computes blockscale with FP32 tensor scale arithmetic
+ggml_cuda_nvfp4_log_trunc_bf16_input_once: GGML_CUDA_NVFP4_TRUNC_BF16_INPUT=(unset) -> disabled, FP32 nearest-neighbor NVFP4 quantization uses full FP32 activations
+ggml_cuda_nvfp4_log_vcache_lt_active_once: cuBLASLt FP4 P*V path active rows=128 cols=2 padded_cols=16 kv_size=8192 q_heads=32 q_streams=1
+ggml_cuda_nvfp4_log_vcache_matmul_path_once: CUDA NVFP4 V-cache p*v matmul path=batched-native-dynamic-p-global-scale
+test-vcache-nvfp4-matmul: benchmark kv_size=8192 path=global-native-slice 901.180 us/iter (100 iters)
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+ggml_cuda_nvfp4_log_vcache_fp4_pv_once: CUDA NVFP4 V-cache p*v uses dynamic NVFP4 P; global-scale V defaults to per-head native slices
+ggml_cuda_nvfp4_log_vcache_batched_switch_once: GGML_CUDA_NVFP4_VCACHE_BATCHED=1 -> enabled, batching P quantization and cuBLASLt resources across V-cache heads
+ggml_cuda_nvfp4_log_bf16_quant_once: GGML_CUDA_NVFP4_BF16_QUANT=(unset) -> disabled, using FP32 nearest-neighbor NVFP4 quantization
+ggml_cuda_nvfp4_log_bf16_quant_trunc_nn_once: GGML_CUDA_NVFP4_BF16_QUANT_TRUNC_NN=(unset) -> disabled, BF16 activation quantizer does not use the truncation NN variant
+ggml_cuda_nvfp4_log_bf16_quant_bf16_internal_once: GGML_CUDA_NVFP4_BF16_QUANT_BF16_INTERNAL=(unset) -> disabled, BF16 trunc-NN quantizer keeps internal scale/threshold arithmetic in FP32 precision
+ggml_cuda_nvfp4_log_bf16_quant_bf16_block_scale_once: GGML_CUDA_NVFP4_BF16_QUANT_BF16_BLOCK_SCALE=(unset) -> disabled, BF16 trunc-NN quantizer computes blockscale with FP32 tensor scale arithmetic
+ggml_cuda_nvfp4_log_trunc_bf16_input_once: GGML_CUDA_NVFP4_TRUNC_BF16_INPUT=(unset) -> disabled, FP32 nearest-neighbor NVFP4 quantization uses full FP32 activations
+ggml_cuda_nvfp4_log_vcache_lt_active_once: cuBLASLt FP4 P*V path active rows=128 cols=2 padded_cols=16 kv_size=32768 q_heads=32 q_streams=1
+ggml_cuda_nvfp4_log_vcache_matmul_path_once: CUDA NVFP4 V-cache p*v matmul path=batched-native-dynamic-p-global-scale
+test-vcache-nvfp4-matmul: benchmark kv_size=32768 path=global-native-slice 3293.762 us/iter (100 iters)

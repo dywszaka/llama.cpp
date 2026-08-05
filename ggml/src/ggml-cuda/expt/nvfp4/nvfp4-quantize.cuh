@@ -40,6 +40,15 @@ void ggml_cuda_nvfp4_prepare_dynamic_input_scales(
         bool per_tensor_scale,
         cudaStream_t stream);
 
+void ggml_cuda_nvfp4_prepare_dynamic_input_scales_device_weight(
+        const float * amax_rows,
+        float * input_scales,
+        int64_t nrows,
+        const float * weight_scale,
+        bool reciprocal_weight_scale,
+        bool per_tensor_scale,
+        cudaStream_t stream);
+
 void ggml_cuda_nvfp4_quantize_rows_f32(
         const float * x,
         block_nvfp4 * y,
