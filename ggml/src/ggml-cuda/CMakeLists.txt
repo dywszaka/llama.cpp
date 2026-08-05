@@ -44,12 +44,13 @@ if (CUDAToolkit_FOUND)
 
     file(GLOB   GGML_HEADERS_CUDA
         "*.cuh"
+        "expt/*.cuh"
         "expt/bf16-expp/*.cuh"
         "expt/fp8/*.cuh"
         "expt/nvfp4/*.cuh")
     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
 
-    file(GLOB   GGML_SOURCES_CUDA "*.cu" "expt/fp8/*.cu" "expt/nvfp4/*.cu")
+    file(GLOB   GGML_SOURCES_CUDA "*.cu" "expt/*.cu" "expt/fp8/*.cu" "expt/nvfp4/*.cu")
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/mmq*.cu")
@@ -74,6 +75,36 @@ if (CUDAToolkit_FOUND)
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}
                             )
+
+    if (GGML_CUDA_SOFTMAX_QEMU OR GGML_CUDA_RMS_NORM_QEMU OR GGML_CUDA_MUL_QEMU OR GGML_CUDA_ADD_QEMU OR GGML_CUDA_ROPE_QEMU OR GGML_CUDA_GLU_QEMU)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(ZMQ REQUIRED IMPORTED_TARGET libzmq)
+        target_link_libraries(ggml-cuda PRIVATE PkgConfig::ZMQ)
+    endif()
+
+    if (GGML_CUDA_SOFTMAX_QEMU)
+        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_SOFTMAX_QEMU)
+    endif()
+
+    if (GGML_CUDA_RMS_NORM_QEMU)
+        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_RMS_NORM_QEMU)
+    endif()
+
+    if (GGML_CUDA_MUL_QEMU)
+        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_MUL_QEMU)
+    endif()
+
+    if (GGML_CUDA_ADD_QEMU)
+        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_ADD_QEMU)
+    endif()
+
+    if (GGML_CUDA_ROPE_QEMU)
+        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_ROPE_QEMU)
+    endif()
+
+    if (GGML_CUDA_GLU_QEMU)
+        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_GLU_QEMU)
+    endif()
 
     add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 

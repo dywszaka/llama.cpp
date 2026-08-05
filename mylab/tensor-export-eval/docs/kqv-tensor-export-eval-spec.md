@@ -20,6 +20,26 @@
 
 当 `LLAMA_EXPT_TENSOR_EXPORT_KINDS` 未设置或为空时，导出器会尝试所有支持的种类：`k,q,v,kq,kqv`。该 kind 开关只过滤已识别的张量名；如果没有设置 `LLAMA_EXPT_TENSOR_EXPORT_DIR`，它不会单独启用导出。
 
+通用 op 导出模式由 `LLAMA_EXPT_TENSOR_EXPORT_OP` 开启，并由
+`LLAMA_EXPT_TENSOR_EXPORT_TYPE=decode|prefill` 选择首次 prompt/prefill graph
+或 prompt 之后的首次单 token decode graph；position 0 的单 token prompt 也
+归类为 prefill。op 名按 `ggml_op_name()` 匹配，忽略大小写并接受可选的
+`GGML_OP_` 前缀。该模式会导出所有匹配节点的 `dst`、`dst->src[0]` 和
+`dst->src[1]`；不存在的 source 不生成 record。它保留每个 tensor 的原始
+dtype 和带 stride 的内存 span，不要求 F32 或连续布局，也不使用 kind
+过滤器。
+
+op 模式的 manifest 格式为 `llama_expt_op_tensor_export_v1`，顶层包含
+`type`、`op`、`matched_nodes` 和 `records`。每条 record 包含
+`node_index`、`op`、`role`、`name`、`dtype`、`ne`、`nb`、`path`、
+`byte_size`、`contiguous` 和 `view_offset`。这些 raw 文件用于 op 级调试，
+不能直接交给只接受 F32 K/Q/V manifest 的离线 NVFP4 evaluator。
+
+`LLAMA_EXPT_TENSOR_EXPORT_LAYER` 可选地把 op 导出限制到一个从 0 开始的
+模型层。匹配依据是 graph tensor 名中的稳定 layer 标记，例如 `norm-0`、
+`blk.0.*` 或 `cache_k_l0`。op manifest 顶层用 `layer` 记录实际过滤值；未
+设置时为 `-1`，表示导出全部匹配层。
+
 导出器在 backend scheduler 同步后扫描已完成的 graph node。它从稳定的 attention 相关张量名识别 kind，按 graph node 指针去重，并为每个支持的张量写一个 raw 文件。导出文件是无 header 的连续 F32 little-endian 数据。文件大小必须等于 `ggml_nelements(tensor) * sizeof(float)`。
 
 导出目录中的 manifest 文件名为 `manifest.json`，格式如下：
@@ -162,3 +182,8 @@ kind_RMSE = sqrt(kind_MSE)
 kind 检测基于名称。新的 graph 张量名可能需要显式映射后才会出现在导出产物中。反过来，当 active graph 没有创建匹配的 F32 连续张量时，即使选择了某些 kinds，也可能产生零条 records。
 
 当前 NVFP4 evaluator 是离线 roundtrip 基线。它不模拟所有 CUDA native matmul 细节、cuBLASLt 行为、K-cache sidecar compensation 或 generic dequantization 路径。对于 correctness-sensitive 的运行时调试，应把该 evaluator 作为一个信号，并结合运行时配置证据、代码路径确认、focused CUDA 或 server 验证 artifact 一起判断。
+
+op 导出在 graph compute 完成后读取 raw tensor span，可能显著增加同步、
+显存到主机拷贝和磁盘占用。特别是 `MUL_MAT` 一类 op 的 `src0` 可能是大
+权重 tensor；一次导出可能接近模型大小。该模式仍属于诊断运行，不应用于
+性能结论。

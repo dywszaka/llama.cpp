@@ -3081,7 +3081,6 @@ void ggml_mul_mat_set_nvfp4_input_scale(
 
     ggml_set_op_params_i32(mul_mat, 1, (int32_t) (scale_u64 & 0xFFFFFFFFu));
     ggml_set_op_params_i32(mul_mat, 2, (int32_t) (scale_u64 >> 32));
-    ggml_set_op_params_i32(mul_mat, 3, 0); // reserved flags
 }
 
 const struct ggml_tensor * ggml_mul_mat_get_nvfp4_input_scale(
@@ -3118,6 +3117,48 @@ const struct ggml_tensor * ggml_mul_mat_get_nvfp4_weight_scale(
     const uintptr_t scale_ptr = (uintptr_t) scale_u64;
 
     return (const struct ggml_tensor *) scale_ptr;
+}
+
+void ggml_mul_mat_set_nvfp4_rhs_capture(
+        struct ggml_tensor * mul_mat,
+        struct ggml_tensor * rhs_nvfp4,
+        struct ggml_tensor * rhs_global_scale) {
+    GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
+    GGML_ASSERT(mul_mat->src[2] == NULL || mul_mat->src[2] == rhs_nvfp4);
+    GGML_ASSERT(mul_mat->src[3] == NULL || mul_mat->src[3] == rhs_global_scale);
+
+    mul_mat->src[2] = rhs_nvfp4;
+    mul_mat->src[3] = rhs_global_scale;
+
+    uint32_t flags = ggml_mul_mat_get_nvfp4_capture_flags(mul_mat);
+    flags |= GGML_NVFP4_MUL_MAT_CAPTURE_REQUESTED;
+    flags &= ~GGML_NVFP4_MUL_MAT_CAPTURE_VALID;
+    ggml_mul_mat_set_nvfp4_capture_flags(mul_mat, flags);
+}
+
+const struct ggml_tensor * ggml_mul_mat_get_nvfp4_rhs_capture(
+        const struct ggml_tensor * mul_mat) {
+    GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
+    return mul_mat->src[2];
+}
+
+const struct ggml_tensor * ggml_mul_mat_get_nvfp4_rhs_global_scale_capture(
+        const struct ggml_tensor * mul_mat) {
+    GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
+    return mul_mat->src[3];
+}
+
+void ggml_mul_mat_set_nvfp4_capture_flags(
+        struct ggml_tensor * mul_mat,
+        uint32_t flags) {
+    GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
+    ggml_set_op_params_i32(mul_mat, 3, (int32_t) flags);
+}
+
+uint32_t ggml_mul_mat_get_nvfp4_capture_flags(
+        const struct ggml_tensor * mul_mat) {
+    GGML_ASSERT(mul_mat->op == GGML_OP_MUL_MAT);
+    return (uint32_t) mul_mat->op_params[3];
 }
 
 // ggml_mul_mat_id

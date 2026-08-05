@@ -1,4 +1,6 @@
 #include "binbcast.cuh"
+#include "expt/add-qemu.cuh"
+#include "expt/mul-qemu.cuh"
 #include <cstdint>
 
 static __device__ __forceinline__ float op_repeat(const float a, const float b) {
@@ -315,7 +317,53 @@ void ggml_cuda_op_repeat(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_repeat>>(dst, dst->src[0], dst, nullptr, dst->src[0]->data, dst->data, ctx.stream());
 }
 
+static void add_cuda_qemu_launch(
+        const ggml_cuda_add_qemu_params & params,
+        cudaStream_t stream) {
+    ggml_tensor dst = *params.src0_tensor;
+    dst.type = params.dst_type;
+    dst.data = params.dst;
+    for (int i = 0; i < 4; ++i) {
+        dst.ne[i] = params.ne[i];
+        dst.nb[i] = (size_t) params.sd[i] * ggml_type_size(params.dst_type);
+    }
+    ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_add>>(
+            params.src0_tensor, params.src1_tensor, &dst,
+            params.src0, params.src1, params.dst, stream);
+}
+
 void ggml_cuda_op_add(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    if (ggml_cuda_add_qemu_enabled()) {
+        const ggml_tensor * src0 = dst->src[0];
+        const ggml_tensor * src1 = dst->src[1];
+        GGML_ASSERT(ggml_is_contiguous(dst));
+        GGML_ASSERT(ggml_are_same_shape(src0, dst));
+        GGML_ASSERT(ggml_can_repeat(src1, src0));
+        GGML_ASSERT((src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16) &&
+                (src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16) &&
+                (dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16));
+        ggml_cuda_add_qemu_params params = {};
+        params.src0_tensor = src0;
+        params.src1_tensor = src1;
+        params.src0 = src0->data;
+        params.src1 = src1->data;
+        params.dst = dst->data;
+        params.src0_type = src0->type;
+        params.src1_type = src1->type;
+        params.dst_type = dst->type;
+        for (int i = 0; i < 4; ++i) {
+            GGML_ASSERT(src0->nb[i] % ggml_type_size(src0->type) == 0);
+            GGML_ASSERT(src1->nb[i] % ggml_type_size(src1->type) == 0);
+            GGML_ASSERT(dst->nb[i] % ggml_type_size(dst->type) == 0);
+            params.ne[i] = dst->ne[i];
+            params.ne1[i] = src1->ne[i];
+            params.s0[i] = (int64_t) (src0->nb[i] / ggml_type_size(src0->type));
+            params.s1[i] = (int64_t) (src1->nb[i] / ggml_type_size(src1->type));
+            params.sd[i] = (int64_t) (dst->nb[i] / ggml_type_size(dst->type));
+        }
+        ggml_cuda_add_qemu_run(ctx, dst, params, add_cuda_qemu_launch);
+        return;
+    }
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_add>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
 }
 
@@ -323,7 +371,53 @@ void ggml_cuda_op_sub(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_sub>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
 }
 
+static void mul_cuda_qemu_launch(
+        const ggml_cuda_mul_qemu_params & params,
+        cudaStream_t stream) {
+    ggml_tensor dst = *params.src0_tensor;
+    dst.type = params.dst_type;
+    dst.data = params.dst;
+    for (int i = 0; i < 4; ++i) {
+        dst.ne[i] = params.ne[i];
+        dst.nb[i] = (size_t) params.sd[i] * ggml_type_size(params.dst_type);
+    }
+    ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_mul>>(
+            params.src0_tensor, params.src1_tensor, &dst,
+            params.src0, params.src1, params.dst, stream);
+}
+
 void ggml_cuda_op_mul(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    if (ggml_cuda_mul_qemu_enabled()) {
+        const ggml_tensor * src0 = dst->src[0];
+        const ggml_tensor * src1 = dst->src[1];
+        GGML_ASSERT(ggml_is_contiguous(dst));
+        GGML_ASSERT(ggml_are_same_shape(src0, dst));
+        GGML_ASSERT(ggml_can_repeat(src1, src0));
+        GGML_ASSERT((src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16) &&
+                (src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16) &&
+                (dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16));
+        ggml_cuda_mul_qemu_params params = {};
+        params.src0_tensor = src0;
+        params.src1_tensor = src1;
+        params.src0 = src0->data;
+        params.src1 = src1->data;
+        params.dst = dst->data;
+        params.src0_type = src0->type;
+        params.src1_type = src1->type;
+        params.dst_type = dst->type;
+        for (int i = 0; i < 4; ++i) {
+            GGML_ASSERT(src0->nb[i] % ggml_type_size(src0->type) == 0);
+            GGML_ASSERT(src1->nb[i] % ggml_type_size(src1->type) == 0);
+            GGML_ASSERT(dst->nb[i] % ggml_type_size(dst->type) == 0);
+            params.ne[i] = dst->ne[i];
+            params.ne1[i] = src1->ne[i];
+            params.s0[i] = (int64_t) (src0->nb[i] / ggml_type_size(src0->type));
+            params.s1[i] = (int64_t) (src1->nb[i] / ggml_type_size(src1->type));
+            params.sd[i] = (int64_t) (dst->nb[i] / ggml_type_size(dst->type));
+        }
+        ggml_cuda_mul_qemu_run(ctx, dst, params, mul_cuda_qemu_launch);
+        return;
+    }
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_mul>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
 }
 

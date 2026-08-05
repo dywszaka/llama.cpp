@@ -1,4 +1,5 @@
 #include "rope.cuh"
+#include "expt/rope-qemu.cuh"
 
 struct rope_corr_dims {
     float v[2];
@@ -320,6 +321,30 @@ static void rope_vision_cuda(
     }
 }
 
+static void rope_cuda_qemu_launch(
+        const ggml_cuda_rope_qemu_params & params,
+        cudaStream_t stream) {
+    GGML_ASSERT(params.forward);
+    GGML_ASSERT(params.mode == GGML_ROPE_TYPE_NEOX);
+    rope_corr_dims corr_dims;
+    ggml_rope_yarn_corr_dims(params.n_dims, params.n_ctx_orig, params.freq_base,
+            params.beta_fast, params.beta_slow, corr_dims.v);
+    const int64_t rows = params.ne[1] * params.ne[2] * params.ne[3];
+    if (params.src0_type == GGML_TYPE_F32) {
+        rope_neox_cuda<true>((const float *) params.src0, (float *) params.dst,
+                params.ne[0], params.ne[1], params.s0[1], params.s0[2],
+                params.n_dims, rows, params.positions, params.freq_scale,
+                params.freq_base, params.ext_factor, params.attn_factor,
+                corr_dims, params.freq_factors, stream);
+    } else {
+        rope_neox_cuda<true>((const half *) params.src0, (half *) params.dst,
+                params.ne[0], params.ne[1], params.s0[1], params.s0[2],
+                params.n_dims, rows, params.positions, params.freq_scale,
+                params.freq_base, params.ext_factor, params.attn_factor,
+                corr_dims, params.freq_factors, stream);
+    }
+}
+
 template <bool forward>
 void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
@@ -384,6 +409,42 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
     const float * freq_factors = nullptr;
     if (src2 != nullptr) {
         freq_factors = (const float *) src2->data;
+    }
+
+    if (ggml_cuda_rope_qemu_enabled()) {
+        GGML_ASSERT(src1->type == GGML_TYPE_I32);
+        ggml_cuda_rope_qemu_params qemu_params = {};
+        qemu_params.src0 = src0->data;
+        qemu_params.positions = pos;
+        qemu_params.freq_factors = freq_factors;
+        qemu_params.dst = dst->data;
+        qemu_params.src0_type = src0->type;
+        qemu_params.dst_type = dst->type;
+        qemu_params.n_dims = n_dims;
+        qemu_params.mode = mode;
+        qemu_params.n_ctx_orig = n_ctx_orig;
+        qemu_params.freq_base = freq_base;
+        qemu_params.freq_scale = freq_scale;
+        qemu_params.ext_factor = ext_factor;
+        qemu_params.attn_factor = attn_factor;
+        qemu_params.beta_fast = beta_fast;
+        qemu_params.beta_slow = beta_slow;
+        qemu_params.forward = forward;
+        memcpy(qemu_params.sections, sections.v, sizeof(qemu_params.sections));
+        for (int index = 0; index < 4; ++index) {
+            GGML_ASSERT(src0->nb[index] % ggml_type_size(src0->type) == 0);
+            GGML_ASSERT(dst->nb[index] % ggml_type_size(dst->type) == 0);
+            qemu_params.ne[index] = src0->ne[index];
+            qemu_params.s0[index] = src0->nb[index] / ggml_type_size(src0->type);
+            qemu_params.sd[index] = dst->nb[index] / ggml_type_size(dst->type);
+        }
+        if (ggml_cuda_rope_qemu_supported(qemu_params)) {
+            GGML_ASSERT((size_t) ggml_nelements(src1) >=
+                    (size_t) src0->ne[2] * (size_t) src0->ne[3]);
+            ggml_cuda_rope_qemu_run(
+                    ctx, dst, qemu_params, rope_cuda_qemu_launch);
+            return;
+        }
     }
 
     rope_corr_dims corr_dims;

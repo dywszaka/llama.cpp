@@ -1,4 +1,5 @@
 #include "norm.cuh"
+#include "expt/rms-norm-qemu.cuh"
 #include <cstdint>
 
 template <int block_size>
@@ -331,6 +332,15 @@ static void rms_norm_f32_cuda(
     }
 }
 
+static void rms_norm_f32_cuda_qemu_launch(
+        const ggml_cuda_rms_norm_qemu_params & params,
+        cudaStream_t stream) {
+    rms_norm_f32_cuda(
+            params.src0, params.dst, params.ncols, params.nrows,
+            params.nchannels, params.nsamples, params.stride_row,
+            params.stride_channel, params.stride_sample, params.eps, stream);
+}
+
 static void rms_norm_mul_f32_cuda(
         const float * x, const float * mul, float * dst, const int ncols, const int nrows, const int nchannels, const int nsamples,
         const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample,
@@ -438,7 +448,15 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t s02 = nb02 / ts0;
     const int64_t s03 = nb03 / ts0;
 
-    rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+    if (!ggml_cuda_rms_norm_qemu_enabled()) {
+        rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+        return;
+    }
+
+    const ggml_cuda_rms_norm_qemu_params params = {
+        src0_d, dst_d, (int) ne00, (int) ne01, (int) ne02, (int) ne03, s01, s02, s03, eps,
+    };
+    ggml_cuda_rms_norm_qemu_run(ctx, dst, params, rms_norm_f32_cuda_qemu_launch);
 }
 
 void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * mul_tensor) {

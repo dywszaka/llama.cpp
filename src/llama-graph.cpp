@@ -11,6 +11,7 @@
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
 #include "expt/nvfp4-k-offline-channel-order.h"
+#include "expt/tensor-export-eval.h"
 
 #include <cassert>
 #include <climits>
@@ -636,6 +637,10 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
     if (cb_func) {
         cb_func(ubatch, cur, name, il);
     }
+
+    const bool is_prefill = ubatch.n_seq_tokens > 1 ||
+            (ubatch.pos && ubatch.n_tokens > 0 && ubatch.pos[0] == 0);
+    llama_expt::tensor_export_maybe_bind_nvfp4_mul_mat_capture(ctx0, cur, is_prefill);
 }
 
 ggml_tensor * llm_graph_context::build_cvec(
@@ -1478,6 +1483,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         llama_expt_pin_soft_max_to_c100(sched, kq, il);
         cb(kq, "kq_soft_max_ext", il);
         ggml_soft_max_add_sinks(kq, sinks);
+        cb(kq, "kq_soft_max", il);
 
         if (!v_trans) {
             // note: avoid this branch

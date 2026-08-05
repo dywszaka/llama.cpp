@@ -22,7 +22,14 @@
 #include "ggml-cuda/cross-entropy-loss.cuh"
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/fattn.cuh"
+#include "ggml-cuda/expt/add-qemu.cuh"
+#include "ggml-cuda/expt/glu-qemu.cuh"
 #include "ggml-cuda/expt/fp8/fp8-e8m0-matmul.cuh"
+#include "ggml-cuda/expt/rms-norm-qemu.cuh"
+#include "ggml-cuda/expt/rope-qemu.cuh"
+#include "ggml-cuda/expt/mul-qemu.cuh"
+#include "ggml-cuda/expt/rope-qemu.cuh"
+#include "ggml-cuda/expt/softmax-qemu.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"
@@ -2636,6 +2643,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_op_silu_back(ctx, dst);
             break;
         case GGML_OP_RMS_NORM:
+            if (dst->src[0]->type == GGML_TYPE_F32) {
+                ggml_cuda_truncate_tensor_f32(ctx, dst->src[0]);
+            }
             ggml_cuda_op_rms_norm(ctx, dst);
             break;
         case GGML_OP_RMS_NORM_BACK:
@@ -2909,6 +2919,57 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
 #endif
         }
 
+        if (node->op == GGML_OP_RMS_NORM && ggml_cuda_rms_norm_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for RMS_NORM QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_MUL && ggml_cuda_mul_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for MUL QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_ADD && ggml_cuda_add_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for ADD QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_GLU &&
+                ggml_get_glu_op(node) == GGML_GLU_OP_SWIGLU &&
+                ggml_cuda_glu_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for SWIGLU QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_ROPE && ggml_cuda_rope_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for ROPE QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_SOFT_MAX && ggml_cuda_soft_max_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for SOFT_MAX QEMU experiment\n", __func__);
+#endif
+        }
+
+        if (node->op == GGML_OP_ROPE && ggml_cuda_rope_qemu_enabled()) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs for ROPE QEMU experiment\n", __func__);
+#endif
+        }
+
         if (node->op == GGML_OP_ADD &&
             node->src[1] && node->src[1]->ne[1] > 1 &&
             (node->src[0] ? node->src[0]->name != gemma3n_per_layer_proj_src0_name : true) &&
@@ -3077,6 +3138,9 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, 
     }
 
     if (ops.size() == 2 && ops.begin()[0] == GGML_OP_RMS_NORM && ops.begin()[1] == GGML_OP_MUL) {
+        if (ggml_cuda_rms_norm_qemu_enabled() || ggml_cuda_mul_qemu_enabled()) {
+            return false;
+        }
         const ggml_tensor *rms_norm = cgraph->nodes[node_idx];
         const ggml_tensor *mul      = cgraph->nodes[node_idx+1];
 
